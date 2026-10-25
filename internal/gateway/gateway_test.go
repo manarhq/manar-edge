@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -265,15 +266,15 @@ func TestEventsBatching(t *testing.T) {
 		e.Add(Event{PeerID: "p", Port: i})
 	}
 	fail.Store(true)
-	if err := e.Flush(context.Background()); err == nil || len(e.q) != 1200 {
-		t.Fatalf("failed flush must keep the events: err %v, queued %d", err, len(e.q))
+	if err := e.Flush(context.Background()); err == nil || queued(e) != 1200 {
+		t.Fatalf("failed flush must keep the events: err %v, queued %d", err, queued(e))
 	}
 	fail.Store(false)
 	if err := e.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if fmt.Sprint(sizes) != "[500 500 200]" || len(e.q) != 0 || m.EventsDropped.Load() != 0 {
-		t.Fatalf("batches %v, left %d", sizes, len(e.q))
+	if fmt.Sprint(sizes) != "[500 500 200]" || queued(e) != 0 || m.EventsDropped.Load() != 0 {
+		t.Fatalf("batches %v, left %d", sizes, queued(e))
 	}
 }
 
@@ -409,8 +410,8 @@ func TestEventsRejectedBatchesSplit(t *testing.T) {
 	if err := e.Flush(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if delivered != 1199 || m.EventsDropped.Load() != 1 || len(e.q) != 0 {
-		t.Fatalf("delivered %d, dropped %d, left %d", delivered, m.EventsDropped.Load(), len(e.q))
+	if delivered != 1199 || m.EventsDropped.Load() != 1 || queued(e) != 0 {
+		t.Fatalf("delivered %d, dropped %d, left %d", delivered, m.EventsDropped.Load(), queued(e))
 	}
 }
 
@@ -435,5 +436,95 @@ func TestEventECHFieldOmittedByDefault(t *testing.T) {
 	b, _ = json.Marshal(Event{PeerID: "p", ECH: true})
 	if !strings.Contains(string(b), `"ech":true`) {
 		t.Fatalf("ech missing: %s", b)
+	}
+}
+
+func queued(e *Events) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := len(e.q)
+	for _, b := range e.retry {
+		n += len(b.events)
+	}
+	return n
+}
+
+type postRec struct {
+	id string
+	n  int
+}
+
+// batchServer answers each POST with status(attempt, batch size) and records batchId and size.
+func batchServer(t *testing.T, status func(attempt, n int) int) (*Events, func() []postRec) {
+	var mu sync.Mutex
+	var posts []postRec
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct {
+			BatchID string `json:"batchId"`
+			Events  []Event
+		}
+		json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		posts = append(posts, postRec{body.BatchID, len(body.Events)})
+		attempt := len(posts)
+		mu.Unlock()
+		w.WriteHeader(status(attempt, len(body.Events)))
+	}))
+	t.Cleanup(srv.Close)
+	e := &Events{APIURL: srv.URL, TokenFile: tokenFile(t), Client: srv.Client(), Metrics: &Metrics{}, Log: discard, Max: 5000}
+	return e, func() []postRec { mu.Lock(); defer mu.Unlock(); return append([]postRec(nil), posts...) }
+}
+
+var uuid4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+func TestEventsBatchIDSameOnRetry(t *testing.T) {
+	e, posts := batchServer(t, func(attempt, _ int) int {
+		if attempt == 1 {
+			return http.StatusServiceUnavailable
+		}
+		return http.StatusAccepted
+	})
+	for range 10 {
+		e.Add(Event{PeerID: "p"})
+	}
+	if err := e.Flush(context.Background()); err == nil {
+		t.Fatal("503 must fail the flush")
+	}
+	e.Add(Event{PeerID: "later"}) // must not join the retried batch
+	if err := e.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	p := posts()
+	if len(p) != 3 || p[0] != p[1] || p[1].n != 10 || p[2].n != 1 || p[2].id == p[0].id || !uuid4Re.MatchString(p[0].id) {
+		t.Fatalf("posts %+v: want the retry to repeat batch 1 with its id, then a new batch", p)
+	}
+}
+
+func TestEventsBatchIDNewOnSplit(t *testing.T) {
+	e, posts := batchServer(t, func(_, n int) int {
+		if n > 100 {
+			return http.StatusRequestEntityTooLarge
+		}
+		return http.StatusAccepted
+	})
+	for range 300 {
+		e.Add(Event{PeerID: "p"})
+	}
+	if err := e.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	total := 0
+	for _, p := range posts() {
+		if seen[p.id] || !uuid4Re.MatchString(p.id) {
+			t.Fatalf("batchId %q reused or malformed across splits: %+v", p.id, posts())
+		}
+		seen[p.id] = true
+		if p.n <= 100 {
+			total += p.n
+		}
+	}
+	if total != 300 || len(posts()) < 3 {
+		t.Fatalf("delivered %d in %d posts", total, len(posts()))
 	}
 }

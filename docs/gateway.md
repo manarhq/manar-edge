@@ -35,6 +35,9 @@ unknown fields.
 A cut closes the peer's relay and proxy connections. Removing a host from a peer's allow-list
 closes that peer's open proxy connections to hosts no longer allowed.
 
+Each events POST carries a `batchId` (random UUIDv4) that manar-api uses to dedupe retries: a
+batch resent after a transient failure keeps its id; the halves of a split batch get new ones.
+
 Events the API rejects as invalid or too large (400, 413, 422) are split in halves until the one
 bad event is found and dropped (counted in `manar_edge_gateway_events_dropped_total`).
 

@@ -3,6 +3,7 @@ package gateway
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -45,8 +46,27 @@ type Events struct {
 	Max       int
 	Interval  time.Duration
 
-	mu sync.Mutex
-	q  []Event
+	mu    sync.Mutex
+	retry []batch // batches that failed transiently, resent as they are with the same batchId
+	q     []Event
+}
+
+// batch is one POST. manar-api dedupes retried batches by id, so a retry of the exact same events
+// keeps it and any new grouping (a split) gets a fresh one.
+type batch struct {
+	id     string
+	events []Event
+}
+
+func newBatch(events []Event) batch { return batch{id: uuid4(), events: events} }
+
+// uuid4 returns a random RFC 9562 version 4 UUID.
+func uuid4() string {
+	var b [16]byte
+	rand.Read(b[:])
+	b[6] = b[6]&0x0f | 0x40
+	b[8] = b[8]&0x3f | 0x80
+	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // Add queues an event.
@@ -57,10 +77,26 @@ func (e *Events) Add(ev Event) {
 	e.trim()
 }
 
+// trim drops the oldest events (pending retries first) beyond Max. Callers hold e.mu.
 func (e *Events) trim() {
-	if n := len(e.q) - e.Max; n > 0 {
+	n := len(e.q) - e.Max
+	for _, b := range e.retry {
+		n += len(b.events)
+	}
+	if n <= 0 {
+		return
+	}
+	e.Metrics.EventsDropped.Add(int64(n))
+	for n > 0 && len(e.retry) > 0 {
+		k := min(n, len(e.retry[0].events))
+		e.retry[0].events = e.retry[0].events[k:]
+		if len(e.retry[0].events) == 0 {
+			e.retry = e.retry[1:]
+		}
+		n -= k
+	}
+	if n > 0 {
 		e.q = append(e.q[:0:0], e.q[n:]...)
-		e.Metrics.EventsDropped.Add(int64(n))
 	}
 }
 
@@ -85,21 +121,25 @@ func (e *Events) Run(ctx context.Context) {
 	}
 }
 
-// Flush sends everything queued, MaxBatch per call. A batch that failed for a transient reason
-// goes back to the front.
+// Flush resends pending retries, then sends everything queued, MaxBatch per call. Batches that
+// fail for a transient reason are kept for the next Flush with their batchId.
 func (e *Events) Flush(ctx context.Context) error {
 	for {
 		e.mu.Lock()
-		n := min(len(e.q), MaxBatch)
-		batch := append([]Event(nil), e.q[:n]...)
-		e.q = e.q[n:]
+		var b batch
+		if len(e.retry) > 0 {
+			b, e.retry = e.retry[0], e.retry[1:]
+		} else if n := min(len(e.q), MaxBatch); n > 0 {
+			b = newBatch(append([]Event(nil), e.q[:n]...))
+			e.q = e.q[n:]
+		}
 		e.mu.Unlock()
-		if n == 0 {
+		if len(b.events) == 0 {
 			return nil
 		}
-		if unsent, err := e.send(ctx, batch); err != nil {
+		if unsent, err := e.send(ctx, b); err != nil {
 			e.mu.Lock()
-			e.q = append(unsent, e.q...)
+			e.retry = append(unsent, e.retry...)
 			e.trim()
 			e.mu.Unlock()
 			return err
@@ -107,34 +147,39 @@ func (e *Events) Flush(ctx context.Context) error {
 	}
 }
 
-// send posts batch; when the API rejects it (400, 413, 422) it halves the batch so one bad or
-// oversized event costs only itself. It returns what is left unsent after a transient error.
-func (e *Events) send(ctx context.Context, batch []Event) ([]Event, error) {
-	err := e.post(ctx, batch)
+// send posts b; when the API rejects it (400, 413, 422) it halves it, each half with a new
+// batchId, so one bad or oversized event costs only itself. It returns the batches left unsent
+// after a transient error.
+func (e *Events) send(ctx context.Context, b batch) ([]batch, error) {
+	err := e.post(ctx, b)
 	if err == nil {
 		return nil, nil
 	}
 	if !errors.Is(err, errRejected) {
-		return batch, err
+		return []batch{b}, err
 	}
-	if len(batch) == 1 {
+	if len(b.events) == 1 {
 		e.Metrics.EventsDropped.Add(1)
-		e.Log.Warn("egress event rejected by the API, dropped", "peerId", batch[0].PeerID, "err", err)
+		e.Log.Warn("egress event rejected by the API, dropped", "peerId", b.events[0].PeerID, "err", err)
 		return nil, nil
 	}
-	h := len(batch) / 2
-	if rest, err := e.send(ctx, batch[:h]); err != nil {
-		return append(rest, batch[h:]...), err
+	h := len(b.events) / 2
+	first, second := newBatch(b.events[:h]), newBatch(b.events[h:])
+	if rest, err := e.send(ctx, first); err != nil {
+		return append(rest, second), err
 	}
-	return e.send(ctx, batch[h:])
+	return e.send(ctx, second)
 }
 
-func (e *Events) post(ctx context.Context, batch []Event) error {
+func (e *Events) post(ctx context.Context, b batch) error {
 	token, err := readSecret(e.TokenFile)
 	if err != nil {
 		return err
 	}
-	body, err := json.Marshal(map[string][]Event{"events": batch})
+	body, err := json.Marshal(struct {
+		BatchID string  `json:"batchId"`
+		Events  []Event `json:"events"`
+	}{b.id, b.events})
 	if err != nil {
 		return err
 	}
