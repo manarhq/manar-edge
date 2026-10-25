@@ -84,9 +84,10 @@ func ensureUser(name, home string) (uid, gid int, err error) {
 	return lookupUser(name)
 }
 
-// ensureHome gives the agent a writable home outside the root-only state dir. When the user was
-// recreated with another uid, entries still owned by the old uid are handed over; symlinks are not
-// followed and nothing owned by anyone else, or hard-linked, is touched.
+// ensureHome gives the agent a writable home outside the root-only state dir. A home left by an
+// earlier user with another uid is never re-owned as root (a tree walk would race the old owner's
+// symlinks and hard links): that uid's processes are killed, the old home is moved aside to
+// <home>.stale-<time>, root 0700, for an administrator, and a fresh home is created.
 func ensureHome(home string, uid, gid int) error {
 	if err := os.MkdirAll(homeBase, 0o755); err != nil {
 		return err
@@ -94,33 +95,37 @@ func ensureHome(home string, uid, gid int) error {
 	if err := os.Chmod(homeBase, 0o755); err != nil {
 		return err
 	}
-	if err := os.Mkdir(home, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-		return err
-	}
-	fi, err := os.Lstat(home)
-	if err != nil {
-		return err
-	}
-	if !fi.IsDir() {
-		return fmt.Errorf("%s is not a directory", home)
-	}
-	if old := int(fi.Sys().(*syscall.Stat_t).Uid); old != uid && old != 0 {
-		err := filepath.WalkDir(home, func(p string, d os.DirEntry, err error) error {
-			if err != nil {
+	if fi, err := os.Lstat(home); err == nil {
+		old := int(fi.Sys().(*syscall.Stat_t).Uid)
+		if fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 && (old == uid || old == 0) {
+			if err := os.Lchown(home, uid, gid); err != nil {
 				return err
 			}
-			info, err := d.Info()
-			if err != nil {
+			return os.Chmod(home, 0o700)
+		}
+		if old != 0 && old != uid {
+			if err := killUser(old); err != nil {
 				return err
 			}
-			if s := info.Sys().(*syscall.Stat_t); int(s.Uid) == old && (d.IsDir() || s.Nlink == 1) {
-				return os.Lchown(p, uid, gid)
-			}
-			return nil
-		})
-		if err != nil {
+		}
+		stale := fmt.Sprintf("%s.stale-%d", home, time.Now().UnixNano())
+		if err := os.Rename(home, stale); err != nil {
 			return err
 		}
+		if fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
+			if err := os.Lchown(stale, 0, 0); err != nil {
+				return err
+			}
+			if err := os.Chmod(stale, 0o700); err != nil {
+				return err
+			}
+		}
+		fmt.Fprintf(os.Stderr, "moved the previous home (uid %d) to %s\n", old, stale)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if err := os.Mkdir(home, 0o700); err != nil {
+		return err
 	}
 	if err := os.Lchown(home, uid, gid); err != nil {
 		return err
@@ -264,7 +269,8 @@ ReadWritePaths=/run/manar-edge/%%i
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
-CapabilityBoundingSet=
+# CAP_CHOWN only: the hook socket is handed to the agent's group (root:<group> 0660).
+CapabilityBoundingSet=CAP_CHOWN
 AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=read-only
@@ -525,8 +531,11 @@ func cmdDown(base, agent string, purge bool) error {
 		}
 	}
 	if purge {
-		if err := os.RemoveAll(homeDir(st)); err != nil {
-			errs = append(errs, err)
+		stale, _ := filepath.Glob(homeDir(st) + ".stale-*")
+		for _, d := range append(stale, homeDir(st)) {
+			if err := os.RemoveAll(d); err != nil {
+				errs = append(errs, err)
+			}
 		}
 	}
 	if err := errors.Join(errs...); err != nil {

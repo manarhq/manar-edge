@@ -335,7 +335,30 @@ func TestGatewayAuthorizePinsTask(t *testing.T) {
 		t.Fatalf("matching task: %d", code)
 	}
 	if s := <-got; s.body != body {
-		t.Errorf("body rewritten: %q", s.body)
+		t.Errorf("forwarded body %q, want the canonical %q", s.body, body)
+	}
+	// Case variants and duplicates: encoding/json would fold them, manar-api would not.
+	for _, bad := range []string{
+		`{"taskId":"other","taskid":"task-1","toolId":"x","actionId":"bash","resource":"ls"}`,
+		`{"taskid":"task-1","toolId":"x","actionId":"bash","resource":"ls"}`,
+		`{"taskId":"other","taskId":"task-1","toolId":"x","actionId":"bash","resource":"ls"}`,
+		`{"taskId":"task-1","toolId":"x","actionId":"bash","resource":"ls","extra":1}`,
+		`{"taskId":"task-1","toolId":"x","actionId":"bash"}`,
+		`{"taskId":"task-1","toolId":"x","actionId":"bash","resource":7}`,
+		`{"taskId":"task-1","toolId":"x","actionId":"bash","resource":"ls"} {}`,
+		`[]`,
+	} {
+		if code := post(gw.URL, bad); code != http.StatusBadRequest {
+			t.Errorf("%s: %d", bad, code)
+		}
+	}
+	// The forwarded body is re-encoded from the checked fields, not the original bytes.
+	spaced := `{ "resource":"ls", "taskId":"task-1", "actionId":"bash", "toolId":"host.claude-code" }`
+	if code := post(gw.URL, spaced); code != 200 {
+		t.Fatalf("reordered body: %d", code)
+	}
+	if s := <-got; s.body != body {
+		t.Errorf("forwarded %q, want %q", s.body, body)
 	}
 	if code := post(gw.URL, strings.Replace(body, "task-1", "task-2", 1)); code != http.StatusForbidden {
 		t.Errorf("other task: %d", code)

@@ -75,3 +75,33 @@ func TestOpenPTY(t *testing.T) {
 		t.Fatalf("tty = %q", got)
 	}
 }
+
+// The hook socket listener drops peers whose uid is not allowed.
+func TestPeerListener(t *testing.T) {
+	me := uint32(os.Getuid())
+	get := func(allow func(uint32) bool) error {
+		path := filepath.Join(t.TempDir(), "s")
+		ln, err := net.Listen("unix", path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })}
+		go srv.Serve(&peerListener{Listener: ln, allow: allow})
+		defer srv.Close()
+		hc := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", path)
+			}}}
+		res, err := hc.Get("http://gw/")
+		if err == nil {
+			res.Body.Close()
+		}
+		return err
+	}
+	if err := get(func(u uint32) bool { return u == me }); err != nil {
+		t.Errorf("allowed peer refused: %v", err)
+	}
+	if err := get(func(u uint32) bool { return u == me+1 }); err == nil {
+		t.Error("peer with another uid served")
+	}
+}

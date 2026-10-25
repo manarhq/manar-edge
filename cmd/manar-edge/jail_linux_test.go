@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -188,7 +189,7 @@ func TestJail(t *testing.T) {
 	defer hl.Close()
 	g := &localGateway{host: testServerName, task: "t1", agent: st.Name,
 		transport: newMTLSTransport(pki.clientCert, pki.roots, testServerName, strings.TrimPrefix(manar.URL, "https://"))}
-	go http.Serve(hl, g.handler())
+	go http.Serve(hl, g.hookHandler())
 	hook := func() string {
 		got, err := run(bashInput, bin, "hook", "claude-code", st.Name)
 		if err != nil {
@@ -202,6 +203,20 @@ func TestJail(t *testing.T) {
 	decision.Store(`{"decision":"DENY","reason":"policy"}`)
 	if got := hook(); !strings.Contains(got, `"permissionDecision":"deny"`) {
 		t.Errorf("deny: %s", got)
+	}
+	// Another local user cannot use the socket (group permission and SO_PEERCRED).
+	other := exec.Command("timeout", "5", bin, "hook", "claude-code", st.Name)
+	other.Stdin = strings.NewReader(bashInput)
+	other.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 4343, Gid: 4343}}
+	if b, _ := other.CombinedOutput(); !strings.Contains(string(b), `"permissionDecision":"deny"`) {
+		t.Errorf("other uid through the hook socket: %s", b)
+	}
+	// Only the hook routes are served on the socket.
+	hc := &http.Client{Transport: &http.Transport{DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		return dialUnixAs(ctx, sockPath(st.Name), 0)
+	}}}
+	if res, err := hc.Post("http://gw/v1/chat/completions", "application/json", strings.NewReader("{}")); err != nil || res.StatusCode != http.StatusNotFound {
+		t.Errorf("LLM route on the hook socket: %v %v", res, err)
 	}
 	hl.Close() // gateway gone: the hook denies
 	if got := hook(); !strings.Contains(got, `"permissionDecision":"deny"`) {
@@ -255,14 +270,9 @@ func TestJail(t *testing.T) {
 		t.Error("down without --purge removed the home")
 	}
 
-	// Up again with the home owned by a stale uid: its files are handed over, a root file is not.
-	for _, p := range []string{homeDir(st), filepath.Join(homeDir(st), ".written")} {
-		if err := os.Lchown(p, 4242, 4242); err != nil {
-			t.Fatal(err)
-		}
-	}
-	rootFile := filepath.Join(homeDir(st), "rootfile")
-	if err := os.WriteFile(rootFile, nil, 0o600); err != nil {
+	// Up again with the home owned by a stale uid: it is moved aside root-only, not re-owned, and
+	// the new home is fresh.
+	if err := os.Lchown(homeDir(st), 4242, 4242); err != nil {
 		t.Fatal(err)
 	}
 	if err := buildJail(dir, st); err != nil {
@@ -270,16 +280,23 @@ func TestJail(t *testing.T) {
 	}
 	uid2, _, _ := lookupUser(userName(st))
 	checkHome(uid2)
-	if fi, err := os.Stat(filepath.Join(homeDir(st), ".written")); err != nil || int(fi.Sys().(*syscall.Stat_t).Uid) != uid2 {
-		t.Errorf("home file not handed over: %v", err)
+	if _, err := os.Stat(filepath.Join(homeDir(st), ".written")); err == nil {
+		t.Error("stale home contents kept in the new home")
 	}
-	if fi, err := os.Stat(rootFile); err != nil || fi.Sys().(*syscall.Stat_t).Uid != 0 {
-		t.Errorf("root-owned file in the home was chowned: %v", err)
+	stale, _ := filepath.Glob(homeDir(st) + ".stale-*")
+	if len(stale) != 1 {
+		t.Fatalf("stale homes: %v", stale)
+	}
+	if fi, err := os.Stat(stale[0]); err != nil || fi.Mode().Perm() != 0o700 || fi.Sys().(*syscall.Stat_t).Uid != 0 {
+		t.Errorf("stale home not root 0700: %v", err)
+	}
+	if fi, err := os.Lstat(filepath.Join(stale[0], ".written")); err != nil || fi.Sys().(*syscall.Stat_t).Uid != uint32(uid) {
+		t.Errorf("stale contents were re-owned: %v", err)
 	}
 	if err := cmdDown(base, st.Name, true); err != nil {
 		t.Fatalf("down --purge: %v", err)
 	}
-	if _, err := os.Stat(homeDir(st)); err == nil {
-		t.Error("down --purge left the home")
+	if left, _ := filepath.Glob(homeDir(st) + "*"); len(left) > 0 {
+		t.Errorf("down --purge left %v", left)
 	}
 }

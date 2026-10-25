@@ -10,12 +10,12 @@ it.
 
 | Layer | What it does |
 |---|---|
-| User | System user `manar-<name>`, no login shell, home `/var/lib/manar-edge-home/<name>` (0700, owned by the agent; outside the root-only state dir). `down` keeps the home unless `--purge`. |
+| User | System user `manar-<name>`, no login shell, home `/var/lib/manar-edge-home/<name>` (0700, owned by the agent; outside the root-only state dir). `down` keeps the home unless `--purge`. A home left by an earlier uid is never re-owned: that uid's processes are killed and the home is moved to `<home>.stale-<time>` (root 0700) for an administrator. |
 | Network | Netns `manar-<name>` whose only route is WireGuard `manar0`; nftables in the netns allow `lo` and the two overlay endpoints, drop everything else (IPv6 included). |
 | Root namespace | nftables `inet manar_edge`: sockets owned by any agent uid are dropped (set `agent_uids`), so the user reaches nothing even outside the netns. |
 | `run` | Refuses to start unless both nftables layers and the uid set entry are present. Then: setns, private mount namespace, `setgroups([])`, `setresgid`, `setresuid`, `PR_SET_NO_NEW_PRIVS`, a new session; on a terminal the agent gets its own pty as controlling terminal (never root's). |
 | Filesystem view | `/etc/resolv.conf` (`nameserver 127.0.0.1`, nothing listens) and `/etc/nsswitch.conf` (`hosts: files`) from `/etc/netns/manar-<name>/`; fresh tmpfs over `/run`, `/var/run`, `/tmp`, `/var/tmp`, so host unix sockets (systemd-resolved, D-Bus, nscd, Docker, X11) are out of reach; only the gateway socket directory is bound back. |
-| Gateway | `manar-edge-gw@<name>.service` in the netns, no capabilities. LLM and MCP on `127.0.0.1:8480`; the Claude Code hook uses `/run/manar-edge/<name>/gw.sock` (directory root 0755: the agent can connect but cannot create or replace the socket, and the hook checks the server is root with `SO_PEERCRED`). |
+| Gateway | `manar-edge-gw@<name>.service` in the netns, only `CAP_CHOWN` (to hand the hook socket to the agent's group). LLM and MCP on `127.0.0.1:8480`. The Claude Code hook uses `/run/manar-edge/<name>/gw.sock`, which serves only health, authorize and approvals: the directory is root 0755 (nobody else can create or replace the socket), the socket is `root:<agent group>` 0660 and the gateway accepts only the agent uid and root (`SO_PEERCRED`); the hook in turn requires the server to be root. Authorize bodies are parsed strictly (exact keys, no duplicates) and re-encoded with the gateway's task. |
 | Boot | `manar-edge-jail@<name>.service` (enabled by `up`) rebuilds the jail after a reboot, before the gateway unit starts. |
 | `down` | Kills every process of the agent uid until none is left (bounded; `down` fails and leaves the jail in place otherwise), then removes units, netns, files, the uid from the drop set and the user. |
 

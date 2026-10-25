@@ -82,6 +82,24 @@ type localGateway struct {
 	agent     string
 }
 
+// hookHandler serves only what the Claude Code hook needs, on the hook socket.
+func (g *localGateway) hookHandler() http.Handler {
+	mux := http.NewServeMux()
+	g.hookRoutes(mux)
+	return mux
+}
+
+func (g *localGateway) hookRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "agent": g.agent, "taskId": g.task})
+	})
+	mux.Handle("POST /agent/v1/authorize", g.pinTask(g.proxy(func(*http.Request) (string, bool) { return "/agent/v1/authorize", true }, true, nil)))
+	mux.Handle("GET /agent/v1/approvals/{id}", g.proxy(func(r *http.Request) (string, bool) {
+		id := r.PathValue("id")
+		return "/agent/v1/approvals/" + id, idPattern.MatchString(id)
+	}, false, nil))
+}
+
 func (g *localGateway) handler() http.Handler {
 	fixed := func(p string) func(*http.Request) (string, bool) {
 		return func(*http.Request) (string, bool) { return p, true }
@@ -89,21 +107,13 @@ func (g *localGateway) handler() http.Handler {
 	mcp := g.proxy(func(*http.Request) (string, bool) { return "/agent/v1/tasks/" + g.task + "/mcp", true }, true, nil)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "agent": g.agent, "taskId": g.task})
-	})
+	g.hookRoutes(mux)
 	mux.Handle("POST /v1/chat/completions", g.proxy(fixed("/agent/v1/llm/chat/completions"), true, nil))
 	mux.Handle("POST /v1/messages", g.proxy(fixed("/agent/v1/llm/anthropic/v1/messages"), true, nil))
 	mux.Handle("GET /v1/models", g.proxy(fixed("/agent/v1/llm/models"), false, modelsFallback))
 	mux.Handle("POST /mcp", mcp)
 	mux.Handle("GET /mcp", mcp)
 	mux.Handle("DELETE /mcp", mcp)
-	// Used by `manar-edge hook claude-code`, which runs as the agent user and cannot read the key.
-	mux.Handle("POST /agent/v1/authorize", g.pinTask(g.proxy(fixed("/agent/v1/authorize"), true, nil)))
-	mux.Handle("GET /agent/v1/approvals/{id}", g.proxy(func(r *http.Request) (string, bool) {
-		id := r.PathValue("id")
-		return "/agent/v1/approvals/" + id, idPattern.MatchString(id)
-	}, false, nil))
 	return mux
 }
 
@@ -170,16 +180,66 @@ func (g *localGateway) pinTask(next http.Handler) http.Handler {
 			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large")
 			return
 		}
-		var body struct {
-			TaskID string `json:"taskId"`
+		body, err := parseAuthorize(b)
+		if err != nil {
+			writeJSONError(w, http.StatusBadRequest, "invalid_authorize_body")
+			return
 		}
-		if json.Unmarshal(b, &body) != nil || body.TaskID != g.task {
+		if body.TaskID != g.task {
 			writeJSONError(w, http.StatusForbidden, "task_mismatch")
 			return
 		}
-		r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(b)), int64(len(b))
+		// Forward what was checked, re-encoded: never the original bytes.
+		out, _ := json.Marshal(body)
+		r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(out)), int64(len(out))
+		r.Header.Set("Content-Type", "application/json")
 		next.ServeHTTP(w, r)
 	})
+}
+
+type authorizeBody struct {
+	TaskID   string `json:"taskId"`
+	ToolID   string `json:"toolId"`
+	ActionID string `json:"actionId"`
+	Resource string `json:"resource"`
+}
+
+// parseAuthorize reads an authorize body strictly: one JSON object with exactly the four
+// exact-case string keys, no duplicates, nothing after it. encoding/json alone would match keys
+// case-insensitively and keep the last duplicate, while manar-api reads them exactly.
+func parseAuthorize(b []byte) (authorizeBody, error) {
+	var out authorizeBody
+	fields := map[string]*string{"taskId": &out.TaskID, "toolId": &out.ToolID, "actionId": &out.ActionID, "resource": &out.Resource}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return out, errors.New("not an object")
+	}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return out, err
+		}
+		k, _ := t.(string)
+		dst, ok := fields[k]
+		if !ok || seen[k] {
+			return out, errors.New("unknown or repeated key")
+		}
+		seen[k] = true
+		if err := dec.Decode(dst); err != nil {
+			return out, err
+		}
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return out, errors.New("unterminated object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return out, errors.New("data after the object")
+	}
+	if len(seen) != len(fields) {
+		return out, errors.New("missing key")
+	}
+	return out, nil
 }
 
 // modelsFallback answers a fixed, empty list while manar-api has no models endpoint yet.
@@ -228,30 +288,35 @@ func serveGateway(ctx context.Context, base, arg string) error {
 	if err != nil {
 		return err
 	}
-	listeners := []net.Listener{ln}
-	hl, err := hookListener(st) // Linux: the unix socket the hook uses; nil on Windows
+	servers := map[*http.Server]net.Listener{
+		{Handler: g.handler(), ReadHeaderTimeout: 10 * time.Second}: ln,
+	}
+	hl, err := hookListener(st) // Linux: the hook's unix socket, agent uid and root only; nil on Windows
 	if err != nil {
 		ln.Close()
 		return err
 	}
 	if hl != nil {
-		listeners = append(listeners, hl)
+		servers[&http.Server{Handler: g.hookHandler(), ReadHeaderTimeout: 10 * time.Second}] = hl
 	}
-	srv := &http.Server{Handler: g.handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
 		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		_ = srv.Shutdown(sctx)
+		for srv := range servers {
+			_ = srv.Shutdown(sctx)
+		}
 	}()
 	log.Printf("local gateway for %s on %s (task %q)", st.Name, gatewayListen, task)
-	errc := make(chan error, len(listeners))
-	for _, l := range listeners {
+	errc := make(chan error, len(servers))
+	for srv, l := range servers {
 		go func() { errc <- srv.Serve(l) }()
 	}
-	for range listeners {
+	for range servers {
 		if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
-			_ = srv.Close()
+			for srv := range servers {
+				_ = srv.Close()
+			}
 			return err
 		}
 	}

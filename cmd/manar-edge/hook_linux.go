@@ -22,7 +22,14 @@ const runBase = "/run/manar-edge"
 func sockDir(name string) string  { return runBase + "/" + name }
 func sockPath(name string) string { return sockDir(name) + "/gw.sock" }
 
+// hookListener serves the hook routes on the socket. Only the agent's uid and root may use it:
+// the socket is root:<agent group> 0660 and every connection's SO_PEERCRED is checked, so no other
+// local user can use the agent's identity through it.
 func hookListener(st *State) (net.Listener, error) {
+	uid, gid, err := lookupUser(userName(st))
+	if err != nil {
+		return nil, fmt.Errorf("agent user: %w", err)
+	}
 	if err := rootOnlyWritable(sockDir(st.Name), true); err != nil {
 		return nil, err
 	}
@@ -34,11 +41,53 @@ func hookListener(st *State) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(p, 0o666); err != nil { // connect needs write permission on the socket
+	if err := os.Lchown(p, 0, gid); err != nil {
 		ln.Close()
 		return nil, err
 	}
-	return ln, nil
+	if err := os.Chmod(p, 0o660); err != nil { // connect needs write permission on the socket
+		ln.Close()
+		return nil, err
+	}
+	return &peerListener{Listener: ln, allow: func(u uint32) bool { return u == 0 || u == uint32(uid) }}, nil
+}
+
+// peerListener drops connections whose peer uid is not allowed.
+type peerListener struct {
+	net.Listener
+	allow func(uint32) bool
+}
+
+func (l *peerListener) Accept() (net.Conn, error) {
+	for {
+		c, err := l.Listener.Accept()
+		if err != nil {
+			return nil, err
+		}
+		if cred, err := peerCred(c); err == nil && l.allow(cred.Uid) {
+			return c, nil
+		}
+		c.Close()
+	}
+}
+
+func peerCred(c net.Conn) (*unix.Ucred, error) {
+	uc, ok := c.(*net.UnixConn)
+	if !ok {
+		return nil, errors.New("not a unix socket")
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	var cred *unix.Ucred
+	var cerr error
+	if err := raw.Control(func(fd uintptr) {
+		cred, cerr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	}); err != nil {
+		return nil, err
+	}
+	return cred, cerr
 }
 
 func hookTransport(name string) (*http.Transport, string) {
@@ -53,16 +102,7 @@ func dialUnixAs(ctx context.Context, path string, uid uint32) (net.Conn, error) 
 	if err != nil {
 		return nil, err
 	}
-	raw, err := c.(*net.UnixConn).SyscallConn()
-	if err != nil {
-		c.Close()
-		return nil, err
-	}
-	var cred *unix.Ucred
-	var cerr error
-	if err := raw.Control(func(fd uintptr) {
-		cred, cerr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
-	}); err != nil || cerr != nil || cred.Uid != uid {
+	if cred, err := peerCred(c); err != nil || cred.Uid != uid {
 		c.Close()
 		return nil, errors.New("the local gateway socket is not served by root")
 	}
