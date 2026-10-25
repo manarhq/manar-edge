@@ -1,3 +1,7 @@
 bin/
 .go/
 *.test
+
+# Local agent and package-manager state, never committed
+.claude/
+.pnpm-store/
