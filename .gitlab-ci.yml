@@ -1,0 +1,79 @@
+# manar-edge: vet, tests, static builds for Linux and Windows, and the usual security scans.
+stages:
+  - check
+  - build
+  - security
+
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+default:
+  tags: [manar]
+  image: golang:1.26.8
+
+variables:
+  GOPATH: '$CI_PROJECT_DIR/.go'
+  GOFLAGS: '-mod=readonly'
+
+cache:
+  key:
+    files:
+      - go.sum
+  paths:
+    - .go/pkg/mod
+
+vet:
+  stage: check
+  script:
+    - test -z "$(gofmt -l $(git ls-files '*.go'))" || { gofmt -l $(git ls-files '*.go'); exit 1; }
+    - go vet ./...
+    - GOOS=windows go vet ./...
+
+test:
+  stage: check
+  script:
+    - go test -race ./...
+
+govulncheck:
+  stage: check
+  script:
+    - go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+build:
+  stage: build
+  script:
+    - CGO_ENABLED=0 go build -trimpath -o bin/linux-amd64/ ./cmd/...
+    - CGO_ENABLED=0 GOARCH=arm64 go build -trimpath -o bin/linux-arm64/ ./cmd/...
+    - CGO_ENABLED=0 GOOS=windows go build -trimpath -o bin/windows-amd64/ ./cmd/manar-edge
+  artifacts:
+    paths:
+      - bin
+    expire_in: 1 week
+
+gitleaks:
+  stage: security
+  image:
+    name: ghcr.io/gitleaks/gitleaks:v8.30.1
+    entrypoint: ['']
+  script:
+    - gitleaks git --log-opts="--all" --exit-code 1 --redact -v .
+
+semgrep:
+  stage: security
+  image:
+    name: semgrep/semgrep:1.172.0
+    entrypoint: ['']
+  variables:
+    GIT_DEPTH: 0
+  script:
+    - semgrep scan --config auto --severity ERROR --error .
+
+trivy-fs:
+  stage: security
+  image:
+    name: aquasec/trivy:0.71.0
+    entrypoint: ['']
+  script:
+    - trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed --skip-dirs .go .
