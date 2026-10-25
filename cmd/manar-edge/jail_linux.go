@@ -265,8 +265,7 @@ ReadWritePaths=/run/manar-edge/%%i
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
-# CAP_CHOWN only: the hook socket is handed to the agent's group (root:<group> 0660).
-CapabilityBoundingSet=CAP_CHOWN
+CapabilityBoundingSet=
 AmbientCapabilities=
 ProtectSystem=strict
 ProtectHome=read-only
@@ -328,6 +327,7 @@ func cmdUp(base string, args []string) error {
 	fs := flag.NewFlagSet("up", flag.ContinueOnError)
 	task := fs.String("task", "", "task id the local gateway injects")
 	boot := fs.Bool("boot", false, "internal: rebuild the jail only (used by the boot unit)")
+	allowPtrace0 := fs.Bool("allow-ptrace-scope-0", false, "do not raise kernel.yama.ptrace_scope to 1 (the agent could then attach to Claude Code)")
 	agent, err := parseAgentFlags(fs, args)
 	if err != nil {
 		return err
@@ -344,6 +344,9 @@ func cmdUp(base string, args []string) error {
 		return buildJail(dir, st)
 	}
 	if _, err := applyTask(dir, st, *task); err != nil {
+		return err
+	}
+	if err := ensurePtraceScope(ptraceScopePath, ptraceSysctlConf, *allowPtrace0, os.Stdout); err != nil {
 		return err
 	}
 	exe, err := installedBinary() // root runs it from the units: must not be user-writable
@@ -373,6 +376,53 @@ func cmdUp(base string, args []string) error {
 		fmt.Println("no task set: LLM and MCP calls get 412 until `manar-edge up " + st.Name + " --task <taskId>`")
 	}
 	return nil
+}
+
+const (
+	ptraceScopePath  = "/proc/sys/kernel/yama/ptrace_scope"
+	ptraceSysctlConf = "/etc/sysctl.d/60-manar-edge.conf"
+)
+
+// ensurePtraceScope makes sure kernel.yama.ptrace_scope is at least 1. The agent runs as the same
+// uid as Claude Code, so with scope 0 a command Claude Code runs could ptrace Claude Code (or
+// write its /proc/<pid>/mem) and skip the hook. Scope 1 allows ptrace only of descendants. A
+// process cannot protect itself from its own children with PR_SET_DUMPABLE without breaking it,
+// so this sysctl is the control. It is raised now and persisted in sysctl.d, unless allowZero.
+func ensurePtraceScope(procPath, confPath string, allowZero bool, out io.Writer) error {
+	cur, err := readPtraceScope(procPath)
+	if err != nil {
+		if allowZero {
+			fmt.Fprintln(out, "warning: Yama ptrace_scope is not available; the agent could attach to Claude Code")
+			return nil
+		}
+		return fmt.Errorf("cannot read kernel.yama.ptrace_scope (%v); without Yama the agent could attach to Claude Code; pass --allow-ptrace-scope-0 to accept that", err)
+	}
+	if cur >= 1 {
+		return nil
+	}
+	if allowZero {
+		fmt.Fprintln(out, "warning: kernel.yama.ptrace_scope is 0; a command the agent runs could attach to Claude Code and skip the hook")
+		return nil
+	}
+	if err := os.WriteFile(confPath, []byte("# manar-edge: agents run as the same uid as Claude Code; keep ptrace to descendants only\nkernel.yama.ptrace_scope = 1\n"), 0o644); err != nil {
+		return err
+	}
+	if err := os.WriteFile(procPath, []byte("1\n"), 0o644); err != nil {
+		return err
+	}
+	if cur, err = readPtraceScope(procPath); err != nil || cur < 1 {
+		return errors.New("could not raise kernel.yama.ptrace_scope to 1")
+	}
+	fmt.Fprintf(out, "set kernel.yama.ptrace_scope from 0 to 1 (persisted in %s)\n", confPath)
+	return nil
+}
+
+func readPtraceScope(path string) (int, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	return strconv.Atoi(strings.TrimSpace(string(b)))
 }
 
 // jailNsswitch resolves names from files only, so no lookup reaches a host resolver service.
@@ -638,6 +688,11 @@ func printStatus(st *State) {
 		return
 	}
 	fmt.Println("  jail: netns", ns)
+	if v, err := readPtraceScope(ptraceScopePath); err != nil || v < 1 {
+		fmt.Println("  ptrace_scope: 0 or unavailable: the agent could attach to Claude Code")
+	} else {
+		fmt.Println("  ptrace_scope:", v)
+	}
 	var hs time.Time
 	err := inNetns(ns, func() error {
 		c, err := wgctrl.New()
@@ -771,7 +826,13 @@ func cmdRun(base string, args []string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Unshareflags: syscall.CLONE_NEWNS, Setsid: true}
 	var master, slave *os.File
 	restore := func() {}
-	if isTerminal(os.Stdin) {
+	var term *os.File // a terminal among stdin, stdout, stderr: the agent then gets a pty
+	for _, f := range []*os.File{os.Stdin, os.Stdout, os.Stderr} {
+		if term == nil && isTerminal(f) {
+			term = f
+		}
+	}
+	if term != nil {
 		m, s, err := openPTY()
 		if err != nil {
 			return fmt.Errorf("pty: %w", err)
@@ -779,7 +840,7 @@ func cmdRun(base string, args []string) error {
 		if err := s.Chown(uid, -1); err != nil {
 			return err
 		}
-		copyWinsize(os.Stdin, m)
+		copyWinsize(term, m)
 		master, slave = m, s
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = s, s, s
 		cmd.SysProcAttr.Setctty, cmd.SysProcAttr.Ctty = true, 0
@@ -794,16 +855,24 @@ func cmdRun(base string, args []string) error {
 	}
 	outDone := make(chan struct{})
 	if master != nil {
-		if old, err := makeRaw(int(os.Stdin.Fd())); err == nil {
-			restore = func() { _ = unix.IoctlSetTermios(int(os.Stdin.Fd()), unix.TCSETS, old) }
+		stdinTTY := isTerminal(os.Stdin)
+		if stdinTTY {
+			if old, err := makeRaw(int(os.Stdin.Fd())); err == nil {
+				restore = func() { _ = unix.IoctlSetTermios(int(os.Stdin.Fd()), unix.TCSETS, old) }
+			}
 		}
-		go func() { _, _ = io.Copy(master, os.Stdin) }()
+		go func() {
+			_, _ = io.Copy(master, os.Stdin)
+			if !stdinTTY {
+				_, _ = master.Write([]byte{4}) // end of piped input: EOF on the pty
+			}
+		}()
 		go func() { _, _ = io.Copy(os.Stdout, master); close(outDone) }()
 		winch := make(chan os.Signal, 1)
 		signal.Notify(winch, syscall.SIGWINCH)
 		go func() {
 			for range winch {
-				copyWinsize(os.Stdin, master)
+				copyWinsize(term, master)
 			}
 		}()
 	} else {

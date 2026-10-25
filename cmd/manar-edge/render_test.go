@@ -1,10 +1,12 @@
 package main
 
 import (
+	"encoding/base64"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -32,7 +34,7 @@ func TestEdgeName(t *testing.T) {
 			t.Error("not stable")
 		}
 	}
-	if n := edgeName("acme", "soc-1"); !strings.HasPrefix(n, "acme-soc-1-") || len(n) != 15 {
+	if n := edgeName("acme", "soc-1"); !strings.HasPrefix(n, "acme-s-") || len(n) != 15 {
 		t.Errorf("short pair: %q", n)
 	}
 }
@@ -146,10 +148,17 @@ func TestPSQuote(t *testing.T) {
 	}
 }
 
-func TestFirewallScript(t *testing.T) {
-	s := firewallScript("acme-soc-1", []string{`C:\Program Files\Agent\agent.exe`, `C:\it's\x.exe`}, allowedTCP(testEdge))
+func TestFirewallScripts(t *testing.T) {
+	progs := []string{`C:\Program Files\Agent\agent.exe`, `C:\it's\x.exe`}
+	scripts := firewallScripts("acme-soc-1", progs, allowedTCP(testEdge))
+	if len(scripts) != 1+len(progs) {
+		t.Fatalf("%d scripts, want removal plus one per program", len(scripts))
+	}
+	if !strings.Contains(scripts[0], "Get-NetFirewallRule -Group 'Manar Edge acme-soc-1' -ErrorAction SilentlyContinue | Remove-NetFirewallRule") {
+		t.Errorf("removal: %s", scripts[0])
+	}
+	s := strings.Join(scripts, "")
 	for _, want := range []string{
-		"Get-NetFirewallRule -Group 'Manar Edge acme-soc-1' -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
 		"-Program 'C:\\Program Files\\Agent\\agent.exe'",
 		"-Program 'C:\\it''s\\x.exe'",
 		"-RemoteAddress @('0.0.0.0-100.88.0.0','100.88.0.2-127.0.0.0','127.0.0.2-255.255.255.255','" + ipv6All + "')",
@@ -159,11 +168,61 @@ func TestFirewallScript(t *testing.T) {
 		"-Direction Outbound -Action Block",
 	} {
 		if !strings.Contains(s, want) {
-			t.Errorf("script lacks %q:\n%s", want, s)
+			t.Errorf("scripts lack %q:\n%s", want, s)
 		}
 	}
-	if n := strings.Count(s, "New-NetFirewallRule"); n != 2*4 {
-		t.Errorf("%d rules, want 4 per program", n)
+	per := rulesPerProgram(allowedTCP(testEdge))
+	if n := strings.Count(s, "New-NetFirewallRule"); n != per*len(progs) || per != 4 {
+		t.Errorf("%d rules (%d per program), want 4 per program", n, per)
+	}
+	// Each per-program command stays well under the Windows command line limit once encoded.
+	for _, sc := range scripts {
+		if l := len(psEncode(sc)); l > 16000 {
+			t.Errorf("encoded script of %d characters", l)
+		}
+	}
+}
+
+func TestCheckRulePrograms(t *testing.T) {
+	progs := []string{`C:\Programme\Agént\a.exe`, `C:\b.exe`}
+	good := strings.Repeat(progs[0]+"\r\n", 4) + strings.Repeat(strings.ToUpper(progs[1])+"\n", 4)
+	if err := checkRulePrograms(good, progs, 4); err != nil {
+		t.Errorf("good read-back refused: %v", err)
+	}
+	mangled := strings.Repeat(`C:\Programme\AgÃ©nt\a.exe`+"\n", 4) + strings.Repeat(progs[1]+"\n", 4)
+	if checkRulePrograms(mangled, progs, 4) == nil {
+		t.Error("mangled path accepted")
+	}
+	if checkRulePrograms(good+"C:\\other.exe\n", progs, 4) == nil {
+		t.Error("extra rule accepted")
+	}
+	if checkRulePrograms(strings.Repeat(progs[0]+"\n", 4), progs, 4) == nil {
+		t.Error("missing program accepted")
+	}
+}
+
+func TestPSEncode(t *testing.T) {
+	// "é" is U+00E9: UTF-16LE e9 00.
+	if got := psEncode("é'"); got != base64.StdEncoding.EncodeToString([]byte{0xe9, 0, '\'', 0}) {
+		t.Errorf("psEncode = %q", got)
+	}
+}
+
+func TestPipeSDDL(t *testing.T) {
+	// Users must not get FILE_APPEND_DATA (0x4), the right to create a pipe instance, nor any
+	// generic right (which would include it).
+	for _, ace := range strings.Split(pipeSDDL, "(")[1:] {
+		f := strings.Split(strings.TrimSuffix(ace, ")"), ";")
+		if f[5] == "SY" {
+			continue
+		}
+		mask, err := strconv.ParseUint(strings.TrimPrefix(f[2], "0x"), 16, 32)
+		if err != nil || mask&0x4 != 0 || mask&0xf0000000 != 0 {
+			t.Errorf("ACE %q grants instance creation or a generic right", ace)
+		}
+	}
+	if !strings.HasPrefix(pipeSDDL, "D:P") {
+		t.Error("DACL not protected")
 	}
 }
 

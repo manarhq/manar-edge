@@ -288,37 +288,28 @@ func serveGateway(ctx context.Context, base, arg string) error {
 	if err != nil {
 		return err
 	}
-	servers := map[*http.Server]net.Listener{
-		{Handler: g.handler(), ReadHeaderTimeout: 10 * time.Second}: ln,
-	}
-	hl, err := hookListener(st) // Linux: the hook's unix socket, agent uid and root only; nil on Windows
-	if err != nil {
-		ln.Close()
-		return err
-	}
-	if hl != nil {
-		servers[&http.Server{Handler: g.hookHandler(), ReadHeaderTimeout: 10 * time.Second}] = hl
-	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	srv := &http.Server{Handler: g.handler(), ReadHeaderTimeout: 10 * time.Second}
+	errc := make(chan error, 2)
+	// The hook endpoint: a unix socket for the agent uid and root (Linux), a named pipe served by
+	// this service (Windows). Only health, authorize and approvals are served there.
+	go func() { errc <- serveHook(ctx, st, g.hookHandler()) }()
+	go func() {
+		err := srv.Serve(ln)
+		if errors.Is(err, http.ErrServerClosed) {
+			err = nil
+		}
+		errc <- err
+	}()
 	go func() {
 		<-ctx.Done()
-		sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		for srv := range servers {
-			_ = srv.Shutdown(sctx)
-		}
+		sctx, scancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer scancel()
+		_ = srv.Shutdown(sctx)
 	}()
 	log.Printf("local gateway for %s on %s (task %q)", st.Name, gatewayListen, task)
-	errc := make(chan error, len(servers))
-	for srv, l := range servers {
-		go func() { errc <- srv.Serve(l) }()
-	}
-	for range servers {
-		if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
-			for srv := range servers {
-				_ = srv.Close()
-			}
-			return err
-		}
-	}
-	return nil
+	err = <-errc
+	cancel()
+	return errors.Join(err, <-errc)
 }

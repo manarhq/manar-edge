@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -23,10 +24,11 @@ func sockDir(name string) string  { return runBase + "/" + name }
 func sockPath(name string) string { return sockDir(name) + "/gw.sock" }
 
 // hookListener serves the hook routes on the socket. Only the agent's uid and root may use it:
-// the socket is root:<agent group> 0660 and every connection's SO_PEERCRED is checked, so no other
-// local user can use the agent's identity through it.
+// every connection's SO_PEERCRED is checked, so no other local user can use the agent's identity
+// through it. The socket itself is 0666 (connect needs write permission) inside the root-owned
+// 0755 directory, so the gateway needs no capability to set it up.
 func hookListener(st *State) (net.Listener, error) {
-	uid, gid, err := lookupUser(userName(st))
+	uid, _, err := lookupUser(userName(st))
 	if err != nil {
 		return nil, fmt.Errorf("agent user: %w", err)
 	}
@@ -41,11 +43,7 @@ func hookListener(st *State) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Lchown(p, 0, gid); err != nil {
-		ln.Close()
-		return nil, err
-	}
-	if err := os.Chmod(p, 0o660); err != nil { // connect needs write permission on the socket
+	if err := os.Chmod(p, 0o666); err != nil {
 		ln.Close()
 		return nil, err
 	}
@@ -90,7 +88,32 @@ func peerCred(c net.Conn) (*unix.Ucred, error) {
 	return cred, cerr
 }
 
-func hookTransport(name string) (*http.Transport, string) {
+func serveHook(ctx context.Context, st *State, h http.Handler) error {
+	ln, err := hookListener(st)
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	go func() { <-ctx.Done(); _ = srv.Close() }()
+	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+// osPolicyConflicts finds cached server-managed Claude Code settings of local users. (Sessions
+// started by `manar-edge run` export ANTHROPIC_BASE_URL, which makes Claude Code skip that fetch,
+// but a Claude Code started any other way would apply them over our file.)
+func osPolicyConflicts() []string {
+	var out []string
+	for _, g := range []string{"/root/.claude/remote-settings.json", "/home/*/.claude/remote-settings.json", homeBase + "/*/.claude/remote-settings.json"} {
+		m, _ := filepath.Glob(g)
+		out = append(out, m...)
+	}
+	return out
+}
+
+func hookTransport(name string) (http.RoundTripper, string) {
 	return &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 		return dialUnixAs(ctx, sockPath(name), 0)
 	}}, "http://manar-edge-gateway"

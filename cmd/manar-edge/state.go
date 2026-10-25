@@ -20,16 +20,17 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 // maxNameLen is the Linux interface and netns name limit the contract sizes names for.
 const maxNameLen = 15
 
-// edgeName derives the on-disk name: a prefix of `<tenant>-<agent>` plus 4 hex characters of a
-// hash of the full pair, at most 15 characters. The hash is always there, so pairs that render the
-// same prefix (`a-b`+`c` and `a`+`b-c`) still get different names.
+// edgeName derives the on-disk name: a prefix of `<tenant>-<agent>` plus 8 hex characters (32 bits)
+// of a hash of the full pair, at most 15 characters. The hash is always there, so pairs that
+// render the same prefix (`a-b`+`c` and `a`+`b-c`) still get different names; enrollment also
+// refuses a state dir that belongs to another pair.
 func edgeName(tenant, agent string) string {
 	base := tenant + "-" + agent
-	if len(base) > maxNameLen-5 {
-		base = base[:maxNameLen-5]
+	if len(base) > maxNameLen-9 {
+		base = base[:maxNameLen-9]
 	}
 	sum := sha256.Sum256([]byte(tenant + "/" + agent))
-	return strings.TrimRight(base, "-") + "-" + hex.EncodeToString(sum[:2])
+	return strings.TrimRight(base, "-") + "-" + hex.EncodeToString(sum[:4])
 }
 
 // Edge is the `edge` object of the enrollment response (docs/design.md section 1).

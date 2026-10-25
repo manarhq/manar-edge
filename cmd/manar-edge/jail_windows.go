@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/windows"
+	"golang.org/x/sys/windows/registry"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 	"golang.zx2c4.com/wireguard/wgctrl"
@@ -74,14 +75,32 @@ func run(name string, args ...string) error {
 	return nil
 }
 
-func powershell(script string) error {
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", "-")
-	cmd.Stdin = strings.NewReader(script)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("powershell: %v: %s", err, strings.TrimSpace(string(out)))
+// powershell runs a script passed as -EncodedCommand (UTF-16LE), so non-ASCII paths are not
+// mangled by the console code page, and returns its standard output.
+func powershell(script string) (string, error) {
+	cmd := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-EncodedCommand", psEncode(script))
+	var stdout, stderr strings.Builder
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("powershell: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	return nil
+	return stdout.String(), nil
+}
+
+// applyFirewall replaces the agent's rule group and reads it back: every program must have
+// exactly its rules, with the path as given.
+func applyFirewall(st *State) error {
+	allowed := allowedTCP(st.Edge)
+	for _, s := range firewallScripts(st.Name, st.Programs, allowed) {
+		if _, err := powershell(s); err != nil {
+			return err
+		}
+	}
+	out, err := powershell(firewallReadback(st.Name))
+	if err != nil {
+		return err
+	}
+	return checkRulePrograms(out, st.Programs, rulesPerProgram(allowed))
 }
 
 func serviceExists(m *mgr.Mgr, name string) bool {
@@ -170,9 +189,11 @@ func restartGateway(st *State) error {
 	return s.Start()
 }
 
-func gatewayHealth(*State) error {
-	c := &http.Client{Timeout: 3 * time.Second, Transport: &http.Transport{Proxy: nil}}
-	res, err := c.Get(gatewayURL + "/healthz")
+// gatewayHealth checks the gateway the way the hook reaches it: over the pipe, served by the service.
+func gatewayHealth(st *State) error {
+	tr, base := hookTransport(st.Name)
+	c := &http.Client{Timeout: 3 * time.Second, Transport: tr}
+	res, err := c.Get(base + "/healthz")
 	if err != nil {
 		return err
 	}
@@ -219,8 +240,9 @@ func cmdUp(base string, args []string) error {
 			if !filepath.IsAbs(p) {
 				return fmt.Errorf("--program %q must be an absolute path", p)
 			}
-			if _, err := os.Stat(p); err != nil {
-				return err
+			// New-NetFirewallRule accepts a path that does not exist, which would confine nothing.
+			if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+				return fmt.Errorf("--program %q is not an existing file", p)
 			}
 			abs = append(abs, filepath.Clean(p))
 		}
@@ -250,7 +272,12 @@ func cmdUp(base string, args []string) error {
 	}
 
 	// Firewall first, so the programs are confined before the tunnel comes up.
-	if err := powershell(firewallScript(st.Name, st.Programs, allowedTCP(st.Edge))); err != nil {
+	for _, p := range st.Programs { // also on a later up without --program
+		if fi, err := os.Stat(p); err != nil || !fi.Mode().IsRegular() {
+			return fmt.Errorf("confined program %q no longer exists; pass the --program list again", p)
+		}
+	}
+	if err := applyFirewall(st); err != nil {
 		return err
 	}
 	conf := filepath.Join(dir, tunnelName(st)+".conf")
@@ -316,7 +343,7 @@ func cmdDown(base, agent string, _ bool) error {
 	} else {
 		errs = append(errs, err)
 	}
-	if err := powershell(fmt.Sprintf("Get-NetFirewallRule -Group %s -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n", psQuote(fwGroup(st.Name)))); err != nil {
+	if _, err := powershell(fmt.Sprintf("Get-NetFirewallRule -Group %s -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n", psQuote(fwGroup(st.Name)))); err != nil {
 		errs = append(errs, err)
 	}
 	if err := errors.Join(errs...); err != nil {
@@ -418,12 +445,23 @@ func cmdRun(base string, args []string) error {
 
 func jailExec([]string) error { return errors.New("not supported on Windows") }
 
-// On Windows the hook uses the loopback gateway; there is no per-agent network namespace for an
-// agent to impersonate it in, and the gateway is reachable by every local process anyway
-// (docs/host.md).
-func hookListener(*State) (net.Listener, error) { return nil, nil }
+func hookTransport(name string) (http.RoundTripper, string) {
+	return pipeRoundTripper{pipe: pipeName(name), service: "manar-edge-gw-" + name}, "http://manar-edge-gateway"
+}
 
-func hookTransport(string) (*http.Transport, string) { return &http.Transport{Proxy: nil}, gatewayURL }
+// osPolicyConflicts finds the HKLM Claude Code policy and cached server-managed settings of local
+// users, either of which Claude Code would apply instead of our file.
+func osPolicyConflicts() []string {
+	var out []string
+	if k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Policies\ClaudeCode`, registry.QUERY_VALUE); err == nil {
+		if _, _, err := k.GetValue("Settings", nil); err == nil {
+			out = append(out, `HKLM\SOFTWARE\Policies\ClaudeCode\Settings`)
+		}
+		k.Close()
+	}
+	m, _ := filepath.Glob(filepath.Join(os.Getenv("SystemDrive")+`\`, "Users", "*", ".claude", "remote-settings.json"))
+	return append(out, m...)
+}
 
 // installedBinary returns a path under Program Files (writable by administrators only), copying
 // the binary there when it runs from elsewhere: SYSTEM runs it as a service and the hook path

@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -244,5 +246,43 @@ func TestVersionLess(t *testing.T) {
 		if got := versionLess(c.a, c.b); got != c.less {
 			t.Errorf("versionLess(%q, %q) = %v", c.a, c.b, got)
 		}
+	}
+}
+
+// A redirect from the gateway is never followed: the hook denies.
+func TestHookNoRedirect(t *testing.T) {
+	var hit atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hit.Store(true)
+		_, _ = io.WriteString(w, `{"decision":"ALLOW","taskId":"t1"}`)
+	}))
+	defer other.Close()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{"taskId":"t1"}`) })
+	mux.HandleFunc("POST /agent/v1/authorize", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/agent/v1/authorize", http.StatusTemporaryRedirect)
+	})
+	gw := httptest.NewServer(mux)
+	defer gw.Close()
+	h := testHook(gw.URL)
+	h.http.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if allow, reason := h.decide(context.Background(), []byte(bashInput)); allow || hit.Load() {
+		t.Fatalf("redirect followed: (%v, %q)", allow, reason)
+	}
+}
+
+func TestSettingsDConflict(t *testing.T) {
+	dir := t.TempDir()
+	if len(settingsDFiles(dir)) != 0 {
+		t.Fatal("conflict in an empty dir")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "managed-settings.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "managed-settings.d", "10-org.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if len(settingsDFiles(dir)) != 1 {
+		t.Error("managed-settings.d file not reported")
 	}
 }

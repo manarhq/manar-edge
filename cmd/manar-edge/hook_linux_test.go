@@ -105,3 +105,41 @@ func TestPeerListener(t *testing.T) {
 		t.Error("peer with another uid served")
 	}
 }
+
+func TestEnsurePtraceScope(t *testing.T) {
+	dir := t.TempDir()
+	proc, conf := filepath.Join(dir, "ptrace_scope"), filepath.Join(dir, "60-manar-edge.conf")
+	var out strings.Builder
+	write := func(v string) {
+		if err := os.WriteFile(proc, []byte(v), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("1\n")
+	if err := ensurePtraceScope(proc, conf, false, &out); err != nil || out.Len() != 0 {
+		t.Errorf("scope 1: %v %q", err, out.String())
+	}
+	if _, err := os.Stat(conf); err == nil {
+		t.Error("conf written although scope was already 1")
+	}
+	write("0\n")
+	if err := ensurePtraceScope(proc, conf, true, &out); err != nil || !strings.Contains(out.String(), "warning") {
+		t.Errorf("allowed 0: %v %q", err, out.String())
+	}
+	if v, _ := readPtraceScope(proc); v != 0 {
+		t.Error("scope changed although --allow-ptrace-scope-0")
+	}
+	out.Reset()
+	if err := ensurePtraceScope(proc, conf, false, &out); err != nil || !strings.Contains(out.String(), "from 0 to 1") {
+		t.Errorf("raise: %v %q", err, out.String())
+	}
+	if v, _ := readPtraceScope(proc); v != 1 {
+		t.Errorf("scope now %d", v)
+	}
+	if b, _ := os.ReadFile(conf); !strings.Contains(string(b), "kernel.yama.ptrace_scope = 1") {
+		t.Errorf("conf: %q", b)
+	}
+	if err := ensurePtraceScope(filepath.Join(dir, "missing"), conf, false, &out); err == nil {
+		t.Error("missing Yama accepted without the flag")
+	}
+}

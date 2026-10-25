@@ -169,3 +169,19 @@ func TestEnrollRedirectRefused(t *testing.T) {
 		t.Fatal("the token reached another origin")
 	}
 }
+
+func TestCheckStateOwner(t *testing.T) {
+	dir := t.TempDir()
+	if err := checkStateOwner(dir, "acme", "soc-1"); err != nil {
+		t.Fatalf("empty dir: %v", err)
+	}
+	if err := saveState(dir, &State{TenantSlug: "acme", AgentSlug: "soc-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := checkStateOwner(dir, "acme", "soc-1"); err != nil {
+		t.Errorf("same pair refused: %v", err)
+	}
+	if err := checkStateOwner(dir, "globex", "soc-1"); err == nil {
+		t.Error("another pair allowed to overwrite the state dir")
+	}
+}

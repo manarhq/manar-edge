@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -224,8 +225,9 @@ func cmdHook(args []string) (code int) {
 	}
 	tr, base := hookTransport(args[1])
 	h := &hookClient{
-		base:     base,
-		http:     &http.Client{Timeout: 30 * time.Second, Transport: tr},
+		base: base,
+		http: &http.Client{Timeout: 30 * time.Second, Transport: tr,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }},
 		pollMin:  2 * time.Second,
 		pollMax:  15 * time.Second,
 		deadline: hookBudget,
@@ -321,16 +323,39 @@ func isManarHookGroup(g any) bool {
 	return false
 }
 
+// policyConflicts lists managed policy sources that would win over, or merge into, our file:
+// files in managed-settings.d (merged after managed-settings.json), the Windows HKLM policy, and
+// any cached server-managed settings (~/.claude/remote-settings.json of a user).
+func policyConflicts() []string {
+	return append(settingsDFiles(filepath.Dir(managedSettingsPath)), osPolicyConflicts()...)
+}
+
+func settingsDFiles(dir string) []string {
+	m, _ := filepath.Glob(filepath.Join(dir, "managed-settings.d", "*.json"))
+	return m
+}
+
 func cmdInstallClaudeCode(base string, args []string) error {
-	if len(args) != 1 {
-		return errors.New("usage: manar-edge install-claude-code <agent>")
+	fs := flag.NewFlagSet("install-claude-code", flag.ContinueOnError)
+	force := fs.Bool("force-coexist", false, "install even when another managed policy source exists")
+	agent, err := parseAgentFlags(fs, args)
+	if err != nil {
+		return err
 	}
 	if err := requireAdmin(); err != nil {
 		return err
 	}
-	_, st, err := resolveAgent(base, args[0])
+	_, st, err := resolveAgent(base, agent)
 	if err != nil {
 		return err
+	}
+	if c := policyConflicts(); len(c) > 0 {
+		msg := "other managed Claude Code policy sources exist and could override or merge into this policy:\n  " +
+			strings.Join(c, "\n  ")
+		if !*force {
+			return errors.New(msg + "\nremove them, or pass --force-coexist after checking they keep the hook, dontAsk and the locks")
+		}
+		fmt.Fprintln(os.Stderr, "warning: "+msg)
 	}
 	exe, err := installedBinary()
 	if err != nil {
@@ -358,5 +383,7 @@ func cmdInstallClaudeCode(base string, args []string) error {
 		return err
 	}
 	fmt.Printf("wrote %s (hook %s, dontAsk, managed hooks and rules only, Claude Code >= %s)\n", managedSettingsPath, exe, minClaudeCode)
+	fmt.Println("verify in Claude Code with /status: \"Setting sources\" must show the managed settings file " +
+		"(not remote, HKLM or plist), and /hooks must list the manar-edge PreToolUse hook")
 	return nil
 }

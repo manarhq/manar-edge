@@ -18,7 +18,7 @@ const usage = `usage:
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
   manar-edge status [<agent>]
   manar-edge hook claude-code <agent>
-  manar-edge install-claude-code <agent>
+  manar-edge install-claude-code <agent> [--force-coexist]
   manar-edge version
 
 Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`

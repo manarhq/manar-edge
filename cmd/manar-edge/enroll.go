@@ -102,6 +102,9 @@ func cmdEnroll(args []string) error {
 
 	name := edgeName(tenant, agent)
 	dir := agentDir(*base, name)
+	if err := checkStateOwner(dir, tenant, agent); err != nil {
+		return err
+	}
 	if err := secureMkdir(*base); err != nil {
 		return err
 	}
@@ -155,6 +158,14 @@ func cmdEnroll(args []string) error {
 	}
 	fmt.Printf("enrolled %s/%s as %s (overlay %s)\nnext: manar-edge up %s --task <taskId>\n",
 		tenant, agent, name, st.Edge.Address, name)
+	return nil
+}
+
+// checkStateOwner refuses to reuse a state dir that holds another tenant/agent pair.
+func checkStateOwner(dir, tenant, agent string) error {
+	if prev, err := loadState(dir); err == nil && (prev.TenantSlug != tenant || prev.AgentSlug != agent) {
+		return fmt.Errorf("state dir %s belongs to %s/%s, not %s/%s; refusing to overwrite it", dir, prev.TenantSlug, prev.AgentSlug, tenant, agent)
+	}
 	return nil
 }
 
