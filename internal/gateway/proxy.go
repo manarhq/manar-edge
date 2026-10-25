@@ -25,9 +25,9 @@ type Proxy struct {
 	Events   *Events
 	Metrics  *Metrics
 	Log      *slog.Logger
-	Ports    []int        // CONNECT ports allowed
-	Overlay  netip.Prefix // refused as a destination
-	Resolve  func(ctx context.Context, host string) ([]netip.Addr, error)
+	Ports    []int                                                        // CONNECT ports allowed
+	Overlay  netip.Prefix                                                 // refused as a destination
+	Resolve  func(ctx context.Context, fqdn string) ([]netip.Addr, error) // called with a trailing dot
 	Dial     DialFunc
 	Idle     time.Duration
 	// DenyECH refuses ClientHellos carrying encrypted_client_hello. Off by default: GREASE ECH
@@ -114,7 +114,9 @@ func (p *Proxy) handle(c net.Conn) {
 		}
 		return
 	}
-	addrs, err := p.Resolve(ctx, host)
+	// Fully qualified: the pod's resolver would otherwise try the Kubernetes search domains first
+	// (ndots:5), turning an allowed short name into a cluster service name.
+	addrs, err := p.Resolve(ctx, host+".")
 	if cut() {
 		return
 	}

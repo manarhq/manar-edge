@@ -55,6 +55,7 @@ func dialFrom(t *testing.T, src net.IP, addr string) net.Conn {
 }
 
 type proxyEnv struct {
+	queried chan string
 	addr    string
 	proxy   *Proxy
 	pool    *x509.CertPool
@@ -71,7 +72,7 @@ func newProxyEnvWith(t *testing.T, setup func(*Proxy), allow ...string) *proxyEn
 		io.WriteString(w, "hello from upstream")
 	}))
 	t.Cleanup(up.Close)
-	env := &proxyEnv{pool: x509.NewCertPool(), dialed: make(chan string, 10), resolve: map[string][]netip.Addr{
+	env := &proxyEnv{pool: x509.NewCertPool(), dialed: make(chan string, 10), queried: make(chan string, 10), resolve: map[string][]netip.Addr{
 		"example.com": {netip.MustParseAddr("203.0.113.7")},
 	}}
 	env.pool.AddCert(up.Certificate())
@@ -80,7 +81,8 @@ func newProxyEnvWith(t *testing.T, setup func(*Proxy), allow ...string) *proxyEn
 		Events:  &Events{Max: 100, Metrics: &Metrics{}},
 		Overlay: netip.MustParsePrefix("100.88.0.0/16"),
 		Resolve: func(_ context.Context, host string) ([]netip.Addr, error) {
-			if a, ok := env.resolve[host]; ok {
+			env.queried <- host
+			if a, ok := env.resolve[strings.TrimSuffix(host, ".")]; ok {
 				return a, nil
 			}
 			return nil, fmt.Errorf("no such host %s", host)
@@ -434,5 +436,20 @@ func TestRelayIdleTimeout(t *testing.T) {
 	start := time.Now()
 	if n, _ := c.Read(buf); n != 0 || time.Since(start) > 2*time.Second {
 		t.Fatal("idle connection not closed")
+	}
+}
+
+func TestProxyResolvesFullyQualified(t *testing.T) {
+	env := newProxyEnv(t, "example.com", "*.internal")
+	env.resolve["api.internal"] = []netip.Addr{netip.MustParseAddr("10.43.0.10")}
+	for target, want := range map[string]string{"Example.com.:443": "example.com.", "api.internal:443": "api.internal."} {
+		c := dialFrom(t, peerIP, env.addr)
+		resp := connect(t, c, target)
+		if got := <-env.queried; got != want {
+			t.Fatalf("%s: resolver queried %q, want %q", target, got, want)
+		}
+		if target == "api.internal:443" && resp.StatusCode != 403 {
+			t.Fatalf("private answer for %s: status %d", target, resp.StatusCode)
+		}
 	}
 }

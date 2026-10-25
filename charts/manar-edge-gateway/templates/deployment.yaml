@@ -35,6 +35,10 @@ spec:
       {{- with .Values.tolerations }}
       tolerations: {{- toYaml . | nindent 8 }}
       {{- end }}
+      # Defence in depth for the egress proxy, which already resolves fully qualified names: no
+      # Kubernetes search-domain expansion for names with a dot.
+      dnsConfig:
+        options: [{name: ndots, value: "1"}]
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
