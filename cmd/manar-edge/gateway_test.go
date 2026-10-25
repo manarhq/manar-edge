@@ -96,13 +96,14 @@ func newTestGateway(t *testing.T, p *testPKI, manar *httptest.Server, task strin
 type seen struct {
 	method, path, task, auth, apiKey, host, body string
 	clientCN                                     string
+	header                                       http.Header
 }
 
 func recordingManar(t *testing.T, p *testPKI, out chan<- seen) *httptest.Server {
 	return newTestManar(t, p, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		out <- seen{r.Method, r.URL.Path, r.Header.Get("X-Manar-Task-Id"), r.Header.Get("Authorization"),
-			r.Header.Get("X-Api-Key"), r.Host, string(b), r.TLS.PeerCertificates[0].Subject.CommonName}
+			r.Header.Get("X-Api-Key"), r.Host, string(b), r.TLS.PeerCertificates[0].Subject.CommonName, r.Header.Clone()}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"ok":true}`)
 	}))
@@ -120,7 +121,6 @@ func TestGatewayRoutesAndHeaders(t *testing.T) {
 		{"POST", "/mcp", "/agent/v1/tasks/task-123/mcp"},
 		{"GET", "/mcp", "/agent/v1/tasks/task-123/mcp"},
 		{"DELETE", "/mcp", "/agent/v1/tasks/task-123/mcp"},
-		{"POST", "/agent/v1/authorize", "/agent/v1/authorize"},
 		{"GET", "/agent/v1/approvals/ap-1", "/agent/v1/approvals/ap-1"},
 	}
 	for _, c := range cases {
@@ -128,6 +128,9 @@ func TestGatewayRoutesAndHeaders(t *testing.T) {
 		req.Header.Set("Authorization", "Bearer sk-should-not-leave")
 		req.Header.Set("X-Api-Key", "sk-ant-should-not-leave")
 		req.Header.Set("X-Manar-Task-Id", "spoofed")
+		req.Header.Set("X-Manar-Tenant", "other")
+		req.Header.Set("X-Custom", "x")
+		req.Header.Set("Anthropic-Version", "2023-06-01")
 		res, err := http.DefaultClient.Do(req)
 		if err != nil {
 			t.Fatal(err)
@@ -145,6 +148,14 @@ func TestGatewayRoutesAndHeaders(t *testing.T) {
 		}
 		if s.auth != "" || s.apiKey != "" {
 			t.Errorf("%s: auth headers forwarded: %q %q", c.local, s.auth, s.apiKey)
+		}
+		for _, k := range []string{"X-Manar-Tenant", "X-Custom", "Cookie"} {
+			if s.header.Get(k) != "" {
+				t.Errorf("%s: %s forwarded", c.local, k)
+			}
+		}
+		if s.header.Get("Anthropic-Version") != "2023-06-01" {
+			t.Errorf("%s: allowed header dropped", c.local)
 		}
 		if s.host != testServerName || s.clientCN != "agent://acme/soc-1" {
 			t.Errorf("%s: host %q client %q", c.local, s.host, s.clientCN)
@@ -289,12 +300,53 @@ func TestGatewayRejectsBadApprovalID(t *testing.T) {
 	p := newTestPKI(t)
 	got := make(chan seen, 1)
 	gw := newTestGateway(t, p, recordingManar(t, p, got), "t1")
-	res, err := http.Get(gw.URL + "/agent/v1/approvals/a%2F..%2Fb")
-	if err != nil {
-		t.Fatal(err)
+	for _, id := range []string{"a%2F..%2Fb", "%2E%2E", "a.b", "a%20b"} {
+		res, err := http.Get(gw.URL + "/agent/v1/approvals/" + id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		if res.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status %d", id, res.StatusCode)
+		}
 	}
-	res.Body.Close()
-	if res.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status %d", res.StatusCode)
+	select {
+	case s := <-got:
+		t.Fatalf("forwarded %s", s.path)
+	default:
+	}
+}
+
+func TestGatewayAuthorizePinsTask(t *testing.T) {
+	p := newTestPKI(t)
+	got := make(chan seen, 1)
+	manar := recordingManar(t, p, got)
+	gw := newTestGateway(t, p, manar, "task-1")
+	post := func(gwURL, body string) int {
+		res, err := http.Post(gwURL+"/agent/v1/authorize", "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res.StatusCode
+	}
+	body := `{"taskId":"task-1","toolId":"host.claude-code","actionId":"bash","resource":"ls"}`
+	if code := post(gw.URL, body); code != 200 {
+		t.Fatalf("matching task: %d", code)
+	}
+	if s := <-got; s.body != body {
+		t.Errorf("body rewritten: %q", s.body)
+	}
+	if code := post(gw.URL, strings.Replace(body, "task-1", "task-2", 1)); code != http.StatusForbidden {
+		t.Errorf("other task: %d", code)
+	}
+	noTask := newTestGateway(t, p, manar, "")
+	if code := post(noTask.URL, body); code != http.StatusPreconditionFailed {
+		t.Errorf("no task: %d", code)
+	}
+	select {
+	case s := <-got:
+		t.Fatalf("forwarded %s", s.body)
+	default:
 	}
 }

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"net"
+	"maps"
 	"net/netip"
 	"slices"
 	"strconv"
@@ -96,33 +96,88 @@ const ipv6All = "::-ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff"
 
 func fwGroup(name string) string { return "Manar Edge " + name }
 
-func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
+// psQuote makes a PowerShell single-quoted literal. PowerShell also treats U+2018 to U+201B as
+// single quotes, so each of those is doubled as well.
+func psQuote(s string) string {
+	var b strings.Builder
+	b.WriteByte('\'')
+	for _, r := range s {
+		b.WriteRune(r)
+		switch r {
+		case '\'', '\u2018', '\u2019', '\u201a', '\u201b':
+			b.WriteRune(r)
+		}
+	}
+	b.WriteByte('\'')
+	return b.String()
+}
 
-// firewallScript renders the PowerShell that replaces the agent's rule group: per program, block
-// outbound to everything except the allowed IPv4 addresses, and all of IPv6.
-func firewallScript(name string, programs []string, allowed []netip.Addr) string {
+// complementPorts returns the port ranges 1-65535 without the given ports.
+func complementPorts(ports []uint16) []string {
+	ps := slices.Clone(ports)
+	slices.Sort(ps)
+	ps = slices.Compact(ps)
+	var out []string
+	next := 1
+	add := func(a, b int) {
+		if a == b {
+			out = append(out, strconv.Itoa(a))
+		} else if a < b {
+			out = append(out, strconv.Itoa(a)+"-"+strconv.Itoa(b))
+		}
+	}
+	for _, p := range ps {
+		if int(p) >= next {
+			add(next, int(p)-1)
+			next = int(p) + 1
+		}
+	}
+	add(next, 65535)
+	return out
+}
+
+func psList(items []string) string {
+	q := make([]string, len(items))
+	for i, it := range items {
+		q[i] = psQuote(it)
+	}
+	return "@(" + strings.Join(q, ",") + ")"
+}
+
+// firewallScript renders the PowerShell that replaces the agent's rule group. For each program:
+// block every protocol to every address except the allowed ones, and all of IPv6; block TCP to
+// an allowed address on any port it is not allowed on; block UDP to the allowed addresses.
+func firewallScript(name string, programs []string, allowed map[netip.Addr][]uint16) string {
 	var b strings.Builder
 	b.WriteString("$ErrorActionPreference = 'Stop'\n")
 	fmt.Fprintf(&b, "Get-NetFirewallRule -Group %s -ErrorAction SilentlyContinue | Remove-NetFirewallRule\n", psQuote(fwGroup(name)))
-	var q []string
-	for _, r := range append(complementRanges(allowed), ipv6All) {
-		q = append(q, psQuote(r))
+	addrs := slices.Collect(maps.Keys(allowed))
+	slices.SortFunc(addrs, netip.Addr.Compare)
+	var addrStrs []string
+	for _, a := range addrs {
+		addrStrs = append(addrStrs, a.String())
 	}
-	ranges := "@(" + strings.Join(q, ",") + ")"
+	rule := func(i int, kind, extra string, p string) {
+		fmt.Fprintf(&b, "New-NetFirewallRule -DisplayName %s -Group %s -Direction Outbound -Action Block -Profile Any -Program %s %s | Out-Null\n",
+			psQuote(fmt.Sprintf("%s %d %s", fwGroup(name), i, kind)), psQuote(fwGroup(name)), psQuote(p), extra)
+	}
 	for i, p := range programs {
-		fmt.Fprintf(&b, "New-NetFirewallRule -DisplayName %s -Group %s -Direction Outbound -Action Block -Profile Any -Program %s -RemoteAddress %s | Out-Null\n",
-			psQuote(fmt.Sprintf("%s %d", fwGroup(name), i+1)), psQuote(fwGroup(name)), psQuote(p), ranges)
+		rule(i+1, "other addresses", "-RemoteAddress "+psList(append(complementRanges(addrs), ipv6All)), p)
+		for _, a := range addrs {
+			rule(i+1, "tcp "+a.String(), "-Protocol TCP -RemoteAddress "+psQuote(a.String())+" -RemotePort "+psList(complementPorts(allowed[a])), p)
+		}
+		rule(i+1, "udp", "-Protocol UDP -RemoteAddress "+psList(addrStrs), p)
 	}
 	return b.String()
 }
 
-// allowedHosts are the addresses a covered program may still reach on Windows.
-func allowedHosts(e Edge) []netip.Addr {
-	out := []netip.Addr{netip.MustParseAddr("127.0.0.1")}
+// allowedTCP is what a confined Windows program may still reach: the local gateway, Manar's
+// relay and the egress proxy, each on its own TCP port only.
+func allowedTCP(e Edge) map[netip.Addr][]uint16 {
+	out := map[netip.Addr][]uint16{netip.MustParseAddr("127.0.0.1"): {8480}}
 	for _, a := range []string{e.ManarAddress, e.ProxyAddress} {
-		h, _, _ := net.SplitHostPort(a)
-		if ip, err := netip.ParseAddr(h); err == nil {
-			out = append(out, ip)
+		if ap, err := netip.ParseAddrPort(a); err == nil {
+			out[ap.Addr()] = append(out[ap.Addr()], ap.Port())
 		}
 	}
 	return out

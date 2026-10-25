@@ -1,10 +1,12 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -235,7 +237,7 @@ func cmdUp(base string, args []string) error {
 	if err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	exe, err := installedBinary()
 	if err != nil {
 		return err
 	}
@@ -248,7 +250,7 @@ func cmdUp(base string, args []string) error {
 	}
 
 	// Firewall first, so the programs are confined before the tunnel comes up.
-	if err := powershell(firewallScript(st.Name, st.Programs, allowedHosts(st.Edge))); err != nil {
+	if err := powershell(firewallScript(st.Name, st.Programs, allowedTCP(st.Edge))); err != nil {
 		return err
 	}
 	conf := filepath.Join(dir, tunnelName(st)+".conf")
@@ -284,7 +286,8 @@ func cmdUp(base string, args []string) error {
 	return nil
 }
 
-func cmdDown(base, agent string) error {
+// purge is accepted for symmetry with Linux; Windows agents have no Manar-managed home.
+func cmdDown(base, agent string, _ bool) error {
 	if err := requireAdmin(); err != nil {
 		return err
 	}
@@ -414,6 +417,59 @@ func cmdRun(base string, args []string) error {
 }
 
 func jailExec([]string) error { return errors.New("not supported on Windows") }
+
+// On Windows the hook uses the loopback gateway; there is no per-agent network namespace for an
+// agent to impersonate it in, and the gateway is reachable by every local process anyway
+// (docs/host.md).
+func hookListener(*State) (net.Listener, error) { return nil, nil }
+
+func hookTransport(string) (*http.Transport, string) { return &http.Transport{Proxy: nil}, gatewayURL }
+
+// installedBinary returns a path under Program Files (writable by administrators only), copying
+// the binary there when it runs from elsewhere: SYSTEM runs it as a service and the hook path
+// must not be changeable by the agent.
+func installedBinary() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	pf := os.Getenv("ProgramFiles")
+	if pf == "" {
+		return "", errors.New("ProgramFiles is not set")
+	}
+	if rel, err := filepath.Rel(pf, exe); err == nil && !strings.HasPrefix(rel, "..") {
+		return exe, nil
+	}
+	dst := filepath.Join(pf, "manar-edge", "manar-edge.exe")
+	if err := copyFile(exe, dst, 0o755); err != nil {
+		return "", err
+	}
+	fmt.Fprintf(os.Stderr, "installed %s as %s\n", exe, dst)
+	return dst, nil
+}
+
+func isTerminal(f *os.File) bool {
+	var m uint32
+	return windows.GetConsoleMode(windows.Handle(f.Fd()), &m) == nil
+}
+
+// readSecret reads one line from the console with echo off.
+func readSecret(f *os.File) (string, error) {
+	h := windows.Handle(f.Fd())
+	var mode uint32
+	if err := windows.GetConsoleMode(h, &mode); err != nil {
+		return "", err
+	}
+	if err := windows.SetConsoleMode(h, mode&^windows.ENABLE_ECHO_INPUT); err != nil {
+		return "", err
+	}
+	defer windows.SetConsoleMode(h, mode)
+	line, err := bufio.NewReader(f).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	return line, nil
+}
 
 type gatewayService struct{ base, agent string }
 

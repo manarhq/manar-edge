@@ -10,17 +10,23 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf16"
 )
 
 const (
-	hookToolID      = "host.claude-code"
-	maxResource     = 2048
-	approvalTimeout = 10 * time.Minute
-	// hookTimeoutSeconds is the Claude Code hook timeout: the approval wait plus slack.
-	hookTimeoutSeconds = 660
+	hookToolID  = "host.claude-code"
+	maxResource = 2048
+	maxActionID = 128
+	// hookBudget bounds one hook decision end to end (authorize plus the approval wait).
+	hookBudget = 10 * time.Minute
+	// hookTimeoutSeconds is the Claude Code hook timeout: the budget plus 90 s spare, so the hook
+	// always answers before Claude Code gives up on it.
+	hookTimeoutSeconds = 690
+	// minClaudeCode is the oldest Claude Code that honours `onFailure: "block"`.
+	minClaudeCode = "2.1.295"
 )
 
 type hookInput struct {
@@ -28,9 +34,11 @@ type hookInput struct {
 	ToolInput map[string]any `json:"tool_input"`
 }
 
-// hookAction maps a PreToolUse call to the authorize request's actionId and resource.
-func hookAction(in hookInput) (actionID, resource string) {
-	actionID = truncateUTF16(strings.ToLower(in.ToolName), 128)
+// hookAction maps a PreToolUse call to the authorize request's actionId and resource. A value
+// longer than manar-api accepts is an error: a truncated resource would get a decision about a
+// different command than the one that runs.
+func hookAction(in hookInput) (actionID, resource string, err error) {
+	actionID = strings.ToLower(in.ToolName)
 	str := func(k string) string { s, _ := in.ToolInput[k].(string); return s }
 	switch actionID {
 	case "bash":
@@ -45,28 +53,30 @@ func hookAction(in hookInput) (actionID, resource string) {
 	if resource == "" {
 		resource = in.ToolName
 	}
-	return actionID, truncateUTF16(resource, maxResource)
+	if utf16Len(actionID) > maxActionID {
+		return "", "", errors.New("tool name longer than Manar accepts")
+	}
+	if utf16Len(resource) > maxResource {
+		return "", "", fmt.Errorf("the %s input is longer than %d characters, which Manar cannot check as a whole; split it (for long file content use the Write tool)", in.ToolName, maxResource)
+	}
+	return actionID, resource, nil
 }
 
-// truncateUTF16 cuts s to at most n UTF-16 code units (manar-api validates lengths with zod,
-// which counts in UTF-16), never splitting a character.
-func truncateUTF16(s string, n int) string {
-	units := 0
-	for i, r := range s {
-		units += len(utf16.Encode([]rune{r}))
-		if units > n {
-			return s[:i]
-		}
+// utf16Len counts UTF-16 code units, as manar-api's zod limits do.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		n += utf16.RuneLen(r)
 	}
-	return s
+	return n
 }
 
 type hookClient struct {
-	base     string // local gateway URL
+	base     string // local gateway URL (over the unix socket on Linux)
 	http     *http.Client
 	pollMin  time.Duration
 	pollMax  time.Duration
-	deadline time.Duration
+	deadline time.Duration // whole decision
 }
 
 type authorizeResponse struct {
@@ -77,9 +87,15 @@ type authorizeResponse struct {
 
 // decide returns the hook decision. Every error is a deny with the reason (fail closed).
 func (h *hookClient) decide(ctx context.Context, raw []byte) (allow bool, reason string) {
+	ctx, cancel := context.WithTimeout(ctx, h.deadline)
+	defer cancel()
 	var in hookInput
 	if err := json.Unmarshal(raw, &in); err != nil || in.ToolName == "" {
 		return false, "Manar: cannot read the hook input"
+	}
+	actionID, resource, err := hookAction(in)
+	if err != nil {
+		return false, "Manar: " + err.Error()
 	}
 	var health struct {
 		TaskID string `json:"taskId"`
@@ -90,9 +106,8 @@ func (h *hookClient) decide(ctx context.Context, raw []byte) (allow bool, reason
 	if health.TaskID == "" {
 		return false, "Manar: no task set for this agent (manar-edge up --task <taskId>)"
 	}
-	actionID, resource := hookAction(in)
 	var dec authorizeResponse
-	err := h.postJSON(ctx, "/agent/v1/authorize", map[string]string{
+	err = h.postJSON(ctx, "/agent/v1/authorize", map[string]string{
 		"taskId": health.TaskID, "toolId": hookToolID, "actionId": actionID, "resource": resource,
 	}, &dec)
 	if err != nil {
@@ -109,12 +124,10 @@ func (h *hookClient) decide(ctx context.Context, raw []byte) (allow bool, reason
 		}
 		return h.waitApproval(ctx, dec.ApprovalID)
 	}
-	return false, "Manar: unknown decision " + fmt.Sprintf("%q", dec.Decision)
+	return false, "Manar: unknown decision " + strconv.Quote(dec.Decision)
 }
 
 func (h *hookClient) waitApproval(ctx context.Context, id string) (bool, string) {
-	ctx, cancel := context.WithTimeout(ctx, h.deadline)
-	defer cancel()
 	wait := h.pollMin
 	for {
 		select {
@@ -200,8 +213,8 @@ func cmdHook(args []string) (code int) {
 		os.Stdout.Write(append(hookOutput(allow, reason), '\n'))
 		code = 0
 	}()
-	if len(args) != 2 || args[0] != "claude-code" {
-		reason = "Manar: usage: manar-edge hook claude-code <agent>"
+	if len(args) != 2 || args[0] != "claude-code" || !slugPattern.MatchString(args[1]) {
+		reason = "Manar: usage: manar-edge hook claude-code <name>"
 		return
 	}
 	raw, err := io.ReadAll(io.LimitReader(os.Stdin, 4<<20))
@@ -209,19 +222,26 @@ func cmdHook(args []string) (code int) {
 		reason = "Manar: cannot read the hook input"
 		return
 	}
+	tr, base := hookTransport(args[1])
 	h := &hookClient{
-		base:     gatewayURL,
-		http:     &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{Proxy: nil}},
+		base:     base,
+		http:     &http.Client{Timeout: 30 * time.Second, Transport: tr},
 		pollMin:  2 * time.Second,
 		pollMax:  15 * time.Second,
-		deadline: approvalTimeout,
+		deadline: hookBudget,
 	}
 	allow, reason = h.decide(context.Background(), raw)
 	return
 }
 
-// claudeSettings returns the managed settings with the Manar hook merged in. Other keys and
-// other hooks already in the file are kept; an older Manar entry is replaced.
+// claudeSettings returns the managed settings with the Manar policy merged in. Other keys and
+// other hooks already in the file are kept; an older Manar entry is replaced. The policy:
+//   - the hook runs before every tool call, and a hook that fails, times out or cannot start
+//     blocks the call (onFailure "block");
+//   - only managed hooks run, so no other hook can answer "allow" first;
+//   - dontAsk mode: anything that would prompt is denied unless the hook allowed it;
+//   - bypass and auto modes are disabled, permission rules come from managed settings only;
+//   - Claude Code older than the version that honours onFailure refuses to start.
 func claudeSettings(existing []byte, exe, agent string) ([]byte, error) {
 	s := map[string]any{}
 	if len(bytes.TrimSpace(existing)) > 0 {
@@ -229,10 +249,15 @@ func claudeSettings(existing []byte, exe, agent string) ([]byte, error) {
 			return nil, fmt.Errorf("existing managed settings are not valid JSON: %w", err)
 		}
 	}
-	hooks, _ := s["hooks"].(map[string]any)
-	if hooks == nil {
-		hooks = map[string]any{}
+	obj := func(k string) map[string]any {
+		m, _ := s[k].(map[string]any)
+		if m == nil {
+			m = map[string]any{}
+		}
+		s[k] = m
+		return m
 	}
+	hooks := obj("hooks")
 	var pre []any
 	if list, ok := hooks["PreToolUse"].([]any); ok {
 		for _, g := range list {
@@ -241,7 +266,7 @@ func claudeSettings(existing []byte, exe, agent string) ([]byte, error) {
 			}
 		}
 	}
-	pre = append(pre, map[string]any{
+	hooks["PreToolUse"] = append(pre, map[string]any{
 		"matcher": "*",
 		"hooks": []any{map[string]any{
 			"type":      "command",
@@ -251,17 +276,37 @@ func claudeSettings(existing []byte, exe, agent string) ([]byte, error) {
 			"onFailure": "block",
 		}},
 	})
-	hooks["PreToolUse"] = pre
-	s["hooks"] = hooks
 	s["allowManagedHooksOnly"] = true
-	env, _ := s["env"].(map[string]any)
-	if env == nil {
-		env = map[string]any{}
+	s["allowManagedPermissionRulesOnly"] = true
+	perms := obj("permissions")
+	perms["defaultMode"] = "dontAsk"
+	perms["disableBypassPermissionsMode"] = "disable"
+	perms["disableAutoMode"] = "disable"
+	if v, _ := s["requiredMinimumVersion"].(string); versionLess(v, minClaudeCode) {
+		s["requiredMinimumVersion"] = minClaudeCode
 	}
-	env["ANTHROPIC_BASE_URL"] = gatewayURL
-	s["env"] = env
+	obj("env")["ANTHROPIC_BASE_URL"] = gatewayURL
 	b, err := json.MarshalIndent(s, "", "  ")
 	return append(b, '\n'), err
+}
+
+// versionLess compares dotted numeric versions; an empty or invalid a is less.
+func versionLess(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := range pb {
+		if i >= len(pa) {
+			return true
+		}
+		x, err := strconv.Atoi(pa[i])
+		if err != nil {
+			return true
+		}
+		y, _ := strconv.Atoi(pb[i])
+		if x != y {
+			return x < y
+		}
+	}
+	return false
 }
 
 func isManarHookGroup(g any) bool {
@@ -287,11 +332,8 @@ func cmdInstallClaudeCode(base string, args []string) error {
 	if err != nil {
 		return err
 	}
-	exe, err := os.Executable()
+	exe, err := installedBinary()
 	if err != nil {
-		return err
-	}
-	if exe, err = filepath.EvalSymlinks(exe); err != nil {
 		return err
 	}
 	existing, err := os.ReadFile(managedSettingsPath)
@@ -315,6 +357,6 @@ func cmdInstallClaudeCode(base string, args []string) error {
 	if err := os.Rename(tmp, managedSettingsPath); err != nil {
 		return err
 	}
-	fmt.Printf("wrote %s (PreToolUse hook for %s, managed hooks only)\n", managedSettingsPath, st.Name)
+	fmt.Printf("wrote %s (hook %s, dontAsk, managed hooks and rules only, Claude Code >= %s)\n", managedSettingsPath, exe, minClaudeCode)
 	return nil
 }

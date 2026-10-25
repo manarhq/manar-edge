@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -25,8 +26,16 @@ const (
 	maxBody       = 10 << 20
 )
 
-// idPattern bounds task and approval ids so they can go into an upstream path without escaping.
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,200}$`)
+// idPattern bounds task and approval ids so they can go into an upstream path without escaping:
+// no '/', no '.', so no "..".
+var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
+
+// forwardHeaders is the allowlist of request headers sent to Manar. Everything else, every
+// X-Manar-* header and all credentials included, is dropped.
+var forwardHeaders = []string{
+	"Accept", "Accept-Encoding", "Content-Type", "User-Agent", "Last-Event-Id",
+	"Anthropic-Version", "Anthropic-Beta", "Openai-Beta", "Mcp-Session-Id", "Mcp-Protocol-Version",
+}
 
 // mtlsTransport talks to Manar at manarAddress with the enrollment identity. The enrollment CA
 // chain is the only trust anchor, the server name is manarServerName, and proxy env is ignored.
@@ -90,7 +99,7 @@ func (g *localGateway) handler() http.Handler {
 	mux.Handle("GET /mcp", mcp)
 	mux.Handle("DELETE /mcp", mcp)
 	// Used by `manar-edge hook claude-code`, which runs as the agent user and cannot read the key.
-	mux.Handle("POST /agent/v1/authorize", g.proxy(fixed("/agent/v1/authorize"), false, nil))
+	mux.Handle("POST /agent/v1/authorize", g.pinTask(g.proxy(fixed("/agent/v1/authorize"), true, nil)))
 	mux.Handle("GET /agent/v1/approvals/{id}", g.proxy(func(r *http.Request) (string, bool) {
 		id := r.PathValue("id")
 		return "/agent/v1/approvals/" + id, idPattern.MatchString(id)
@@ -106,13 +115,16 @@ func (g *localGateway) proxy(target func(*http.Request) (string, bool), needTask
 			pr.Out.URL.Host = g.host
 			pr.Out.URL.Path, pr.Out.URL.RawPath = path, ""
 			pr.Out.Host = g.host
-			h := pr.Out.Header
-			for _, k := range []string{"Authorization", "X-Api-Key", "Proxy-Authorization", "Cookie", "X-Manar-Task-Id"} {
-				h.Del(k)
+			h := http.Header{}
+			for _, k := range forwardHeaders {
+				if v := pr.In.Header.Values(k); len(v) > 0 {
+					h[k] = v
+				}
 			}
 			if g.task != "" {
 				h.Set("X-Manar-Task-Id", g.task)
 			}
+			pr.Out.Header = h
 		},
 		Transport:      g.transport,
 		FlushInterval:  -1, // SSE and chunked responses go through as they arrive
@@ -142,6 +154,31 @@ func (g *localGateway) proxy(target func(*http.Request) (string, bool), needTask
 		}
 		r.Body = http.MaxBytesReader(w, r.Body, maxBody)
 		rp.ServeHTTP(w, r)
+	})
+}
+
+// pinTask lets an authorize request through only when its taskId is the gateway's task, so the
+// agent cannot ask Manar about another task with this identity. The body is not rewritten.
+func (g *localGateway) pinTask(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.task == "" {
+			writeJSONError(w, http.StatusPreconditionFailed, "manar_task_required")
+			return
+		}
+		b, err := io.ReadAll(io.LimitReader(r.Body, 64<<10+1))
+		if err != nil || len(b) > 64<<10 {
+			writeJSONError(w, http.StatusRequestEntityTooLarge, "request_too_large")
+			return
+		}
+		var body struct {
+			TaskID string `json:"taskId"`
+		}
+		if json.Unmarshal(b, &body) != nil || body.TaskID != g.task {
+			writeJSONError(w, http.StatusForbidden, "task_mismatch")
+			return
+		}
+		r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(b)), int64(len(b))
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -191,6 +228,15 @@ func serveGateway(ctx context.Context, base, arg string) error {
 	if err != nil {
 		return err
 	}
+	listeners := []net.Listener{ln}
+	hl, err := hookListener(st) // Linux: the unix socket the hook uses; nil on Windows
+	if err != nil {
+		ln.Close()
+		return err
+	}
+	if hl != nil {
+		listeners = append(listeners, hl)
+	}
 	srv := &http.Server{Handler: g.handler(), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -199,8 +245,15 @@ func serveGateway(ctx context.Context, base, arg string) error {
 		_ = srv.Shutdown(sctx)
 	}()
 	log.Printf("local gateway for %s on %s (task %q)", st.Name, gatewayListen, task)
-	if err := srv.Serve(ln); !errors.Is(err, http.ErrServerClosed) {
-		return err
+	errc := make(chan error, len(listeners))
+	for _, l := range listeners {
+		go func() { errc <- srv.Serve(l) }()
+	}
+	for range listeners {
+		if err := <-errc; !errors.Is(err, http.ErrServerClosed) {
+			_ = srv.Close()
+			return err
+		}
 	}
 	return nil
 }

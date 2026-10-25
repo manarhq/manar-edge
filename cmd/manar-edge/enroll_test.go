@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -126,5 +127,45 @@ func TestValidateEdgeRejects(t *testing.T) {
 	e.GatewayPublicKey = "nope"
 	if validateEdge(&e) == nil {
 		t.Error("bad key accepted")
+	}
+}
+
+func TestEnrollToken(t *testing.T) {
+	env := func(v string) func(string) string { return func(string) string { return v } }
+	var warn strings.Builder
+	if tok, err := enrollToken("", env(" a:b:c "), strings.NewReader("x:y:z\n"), &warn); err != nil || tok != "a:b:c" {
+		t.Errorf("env: %q %v", tok, err)
+	}
+	if tok, err := enrollToken("", env(""), strings.NewReader("x:y:z\n"), &warn); err != nil || tok != "x:y:z" {
+		t.Errorf("stdin: %q %v", tok, err)
+	}
+	if tok, err := enrollToken("-", env(""), strings.NewReader("x:y:z"), &warn); err != nil || tok != "x:y:z" {
+		t.Errorf("stdin with -: %q %v", tok, err)
+	}
+	if warn.Len() != 0 {
+		t.Errorf("warned without --token: %q", warn.String())
+	}
+	if tok, _ := enrollToken("f:g:h", env(""), strings.NewReader(""), &warn); tok != "f:g:h" || !strings.Contains(warn.String(), "process list") {
+		t.Errorf("flag: %q, warning %q", tok, warn.String())
+	}
+	if _, err := enrollToken("", env(""), strings.NewReader(""), &warn); err == nil {
+		t.Error("empty stdin accepted")
+	}
+}
+
+func TestEnrollRedirectRefused(t *testing.T) {
+	var hit atomic.Bool
+	other := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { hit.Store(true) }))
+	defer other.Close()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/agents/enroll", http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	if _, err := postEnroll(context.Background(), enrollClient(u), u, "a:b:secret", "CSR", "K"); err == nil {
+		t.Fatal("cross-origin redirect followed")
+	}
+	if hit.Load() {
+		t.Fatal("the token reached another origin")
 	}
 }

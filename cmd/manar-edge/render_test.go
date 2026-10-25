@@ -16,25 +16,24 @@ var testEdge = Edge{
 }
 
 func TestEdgeName(t *testing.T) {
-	if got := edgeName("acme", "soc-1"); got != "acme-soc-1" {
-		t.Errorf("short: %q", got)
-	}
-	if got := edgeName("abcdefg", "1234567"); got != "abcdefg-1234567" { // exactly 15
-		t.Errorf("15 chars: %q", got)
-	}
-	a := edgeName("contoso-bank", "incident-responder")
-	b := edgeName("contoso-bank", "incident-reviewer")
-	for _, n := range []string{a, b} {
-		if len(n) > maxNameLen || !slugPattern.MatchString(n) {
-			t.Errorf("long name %q: len %d", n, len(n))
+	pairs := [][2]string{{"acme", "soc-1"}, {"a-b", "c"}, {"a", "b-c"}, {"contoso-bank", "incident-responder"},
+		{"contoso-bank", "incident-reviewer"}, {"abcdefghi", "zzzzzzzzzz"}}
+	seen := map[string]bool{}
+	for _, p := range pairs {
+		n := edgeName(p[0], p[1])
+		if len(n) > maxNameLen || !slugPattern.MatchString(n) || strings.Contains(n, "--") {
+			t.Errorf("%v: bad name %q", p, n)
+		}
+		if seen[n] {
+			t.Errorf("%v: collides on %q", p, n)
+		}
+		seen[n] = true
+		if edgeName(p[0], p[1]) != n {
+			t.Error("not stable")
 		}
 	}
-	if a == b {
-		t.Errorf("two long pairs with the same prefix collide: %q", a)
-	}
-	// The hash is of the pair, so a name ending in '-' before the hash is trimmed.
-	if n := edgeName("abcdefghi", "-zzzzzzzzzz"); strings.Contains(n, "--") {
-		t.Errorf("double dash in %q", n)
+	if n := edgeName("acme", "soc-1"); !strings.HasPrefix(n, "acme-soc-1-") || len(n) != 15 {
+		t.Errorf("short pair: %q", n)
 	}
 }
 
@@ -49,7 +48,7 @@ func TestResolveAgent(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, st, err := resolveAgent(base, "triage"); err != nil || st.Name != "acme-triage" {
+	if _, st, err := resolveAgent(base, "triage"); err != nil || st.Name != edgeName("acme", "triage") {
 		t.Errorf("slug: %v %v", st, err)
 	}
 	if _, st, err := resolveAgent(base, "globex/soc-1"); err != nil || st.TenantSlug != "globex" {
@@ -61,7 +60,7 @@ func TestResolveAgent(t *testing.T) {
 	if _, _, err := resolveAgent(base, "nope"); err == nil {
 		t.Error("unknown agent resolved")
 	}
-	fi, err := os.Stat(filepath.Join(agentDir(base, "acme-triage"), fileState))
+	fi, err := os.Stat(filepath.Join(agentDir(base, edgeName("acme", "triage")), fileState))
 	if err != nil || fi.Mode().Perm() != 0o600 {
 		t.Errorf("state.json mode %v %v", fi.Mode(), err)
 	}
@@ -121,21 +120,50 @@ func TestComplementRanges(t *testing.T) {
 	}
 }
 
+func TestComplementPorts(t *testing.T) {
+	if got := complementPorts([]uint16{3128, 443, 443}); !slices.Equal(got, []string{"1-442", "444-3127", "3129-65535"}) {
+		t.Errorf("got %v", got)
+	}
+	if got := complementPorts([]uint16{1, 2, 65535}); !slices.Equal(got, []string{"3-65534"}) {
+		t.Errorf("edges: %v", got)
+	}
+	if got := complementPorts([]uint16{8480}); !slices.Equal(got, []string{"1-8479", "8481-65535"}) {
+		t.Errorf("8480: %v", got)
+	}
+}
+
+func TestPSQuote(t *testing.T) {
+	for in, want := range map[string]string{
+		`C:\x`:           `'C:\x'`,
+		"it's":           "'it''s'",
+		"a\u2018b":       "'a\u2018\u2018b'",
+		"a\u201bb":       "'a\u201b\u201bb'",
+		"\u2019;x\u201a": "'\u2019\u2019;x\u201a\u201a'",
+	} {
+		if got := psQuote(in); got != want {
+			t.Errorf("psQuote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestFirewallScript(t *testing.T) {
-	s := firewallScript("acme-soc-1", []string{`C:\Program Files\Agent\agent.exe`, `C:\it's\x.exe`}, allowedHosts(testEdge))
+	s := firewallScript("acme-soc-1", []string{`C:\Program Files\Agent\agent.exe`, `C:\it's\x.exe`}, allowedTCP(testEdge))
 	for _, want := range []string{
 		"Get-NetFirewallRule -Group 'Manar Edge acme-soc-1' -ErrorAction SilentlyContinue | Remove-NetFirewallRule",
 		"-Program 'C:\\Program Files\\Agent\\agent.exe'",
 		"-Program 'C:\\it''s\\x.exe'",
-		"'0.0.0.0-100.88.0.0','100.88.0.2-127.0.0.0','127.0.0.2-255.255.255.255','" + ipv6All + "'",
+		"-RemoteAddress @('0.0.0.0-100.88.0.0','100.88.0.2-127.0.0.0','127.0.0.2-255.255.255.255','" + ipv6All + "')",
+		"-Protocol TCP -RemoteAddress '100.88.0.1' -RemotePort @('1-442','444-3127','3129-65535')",
+		"-Protocol TCP -RemoteAddress '127.0.0.1' -RemotePort @('1-8479','8481-65535')",
+		"-Protocol UDP -RemoteAddress @('100.88.0.1','127.0.0.1')",
 		"-Direction Outbound -Action Block",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("script lacks %q:\n%s", want, s)
 		}
 	}
-	if strings.Count(s, "New-NetFirewallRule") != 2 {
-		t.Error("want one rule per program")
+	if n := strings.Count(s, "New-NetFirewallRule"); n != 2*4 {
+		t.Errorf("%d rules, want 4 per program", n)
 	}
 }
 
@@ -153,9 +181,9 @@ func TestWGConfig(t *testing.T) {
 }
 
 func TestAgentEnv(t *testing.T) {
-	env := agentEnv([]string{"PATH=/bin", "OPENAI_API_KEY=sk-real", "AWS_SECRET_ACCESS_KEY=x", "https_proxy=http://corp:8080", "SUDO_USER=bob", "LANG=C"}, "100.88.0.1:3128")
+	env := agentEnv([]string{"PATH=/bin", "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1/bus", "SSH_AUTH_SOCK=/tmp/s", "XDG_RUNTIME_DIR=/run/user/1", "OPENAI_API_KEY=sk-real", "AWS_SECRET_ACCESS_KEY=x", "https_proxy=http://corp:8080", "SUDO_USER=bob", "LANG=C"}, "100.88.0.1:3128")
 	joined := strings.Join(env, "\n")
-	for _, bad := range []string{"sk-real", "AWS_SECRET", "corp:8080", "SUDO_USER"} {
+	for _, bad := range []string{"sk-real", "AWS_SECRET", "corp:8080", "SUDO_USER", "DBUS_", "SSH_AUTH", "XDG_RUNTIME"} {
 		if strings.Contains(joined, bad) {
 			t.Errorf("leaked %q", bad)
 		}

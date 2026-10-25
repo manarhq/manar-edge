@@ -12,9 +12,9 @@ import (
 var version = "dev"
 
 const usage = `usage:
-  manar-edge enroll --api <url> --token <tenant:agent:secret|-> [--state-dir D]
+  manar-edge enroll --api <url> [--state-dir D]   (token on stdin or in MANAR_ENROLL_TOKEN)
   manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
-  manar-edge down <agent>
+  manar-edge down <agent> [--purge]
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
   manar-edge status [<agent>]
   manar-edge hook claude-code <agent>
@@ -47,7 +47,12 @@ func main() {
 	case "up":
 		err = cmdUp(base, rest)
 	case "down":
-		err = withAgent(rest, "down", func(a string) error { return cmdDown(base, a) })
+		fs := flag.NewFlagSet("down", flag.ContinueOnError)
+		purge := fs.Bool("purge", false, "also delete the agent's home directory (Linux)")
+		var agent string
+		if agent, err = parseAgentFlags(fs, rest); err == nil {
+			err = cmdDown(base, agent, *purge)
+		}
 	case "run":
 		err = cmdRun(base, rest)
 	case "status":
@@ -122,7 +127,10 @@ func agentEnv(base []string, proxyAddr string) []string {
 		if strings.HasPrefix(u, "SUDO_") || strings.HasPrefix(u, "MANAR_") ||
 			strings.Contains(u, "KEY") || strings.Contains(u, "TOKEN") || strings.Contains(u, "SECRET") ||
 			strings.Contains(u, "PASSWORD") || strings.Contains(u, "CREDENTIAL") || strings.Contains(u, "PROXY") ||
-			strings.HasPrefix(u, "OPENAI_") || strings.HasPrefix(u, "ANTHROPIC_") {
+			strings.HasPrefix(u, "OPENAI_") || strings.HasPrefix(u, "ANTHROPIC_") ||
+			// host session sockets: none of them is reachable from the jail, and none should be
+			strings.HasPrefix(u, "DBUS_") || strings.HasPrefix(u, "SSH_A") || strings.HasPrefix(u, "XDG_RUNTIME") ||
+			u == "DISPLAY" || u == "WAYLAND_DISPLAY" || u == "GPG_AGENT_INFO" {
 			continue
 		}
 		env = append(env, kv)

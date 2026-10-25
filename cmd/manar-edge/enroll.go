@@ -72,24 +72,20 @@ type enrollResponse struct {
 func cmdEnroll(args []string) error {
 	fs := flag.NewFlagSet("enroll", flag.ContinueOnError)
 	api := fs.String("api", "", "Manar console or API base URL (https)")
-	token := fs.String("token", "", "enrollment token <tenant>:<agent>:<secret>; \"-\" reads it from stdin")
+	token := fs.String("token", "", "enrollment token (discouraged: visible in the process list; default reads stdin or MANAR_ENROLL_TOKEN)")
 	base := fs.String("state-dir", defaultStateBase, "state directory")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *api == "" || *token == "" || fs.NArg() != 0 {
-		return errors.New("usage: manar-edge enroll --api <url> --token <tenant:agent:secret|-> [--state-dir D]")
+	if *api == "" || fs.NArg() != 0 {
+		return errors.New("usage: manar-edge enroll --api <url> [--state-dir D]  (token from stdin or MANAR_ENROLL_TOKEN)")
 	}
 	if err := requireAdmin(); err != nil {
 		return err
 	}
-	tok := *token
-	if tok == "-" {
-		line, err := bufio.NewReader(os.Stdin).ReadString('\n')
-		if err != nil && !errors.Is(err, io.EOF) {
-			return err
-		}
-		tok = strings.TrimSpace(line)
+	tok, err := enrollToken(*token, os.Getenv, os.Stdin, os.Stderr)
+	if err != nil {
+		return err
 	}
 	tenant, agent, ok := parseToken(tok)
 	if !ok {
@@ -99,6 +95,7 @@ func cmdEnroll(args []string) error {
 		return errors.New("enrollment token has a tenant or agent slug this host does not accept")
 	}
 	apiURL, err := checkAPIURL(*api)
+	_ = os.Unsetenv("MANAR_ENROLL_TOKEN")
 	if err != nil {
 		return err
 	}
@@ -123,7 +120,7 @@ func cmdEnroll(args []string) error {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	resp, err := postEnroll(ctx, http.DefaultClient, apiURL, tok, string(csrPEM), wgKey.PublicKey().String())
+	resp, err := postEnroll(ctx, enrollClient(apiURL), apiURL, tok, string(csrPEM), wgKey.PublicKey().String())
 	if err != nil {
 		return err
 	}
@@ -159,6 +156,46 @@ func cmdEnroll(args []string) error {
 	fmt.Printf("enrolled %s/%s as %s (overlay %s)\nnext: manar-edge up %s --task <taskId>\n",
 		tenant, agent, name, st.Edge.Address, name)
 	return nil
+}
+
+// enrollToken takes the token from MANAR_ENROLL_TOKEN, else --token (with a warning: it is
+// visible in the process list), else stdin, with a hidden prompt on a terminal.
+func enrollToken(flagVal string, getenv func(string) string, stdin io.Reader, stderr io.Writer) (string, error) {
+	if v := strings.TrimSpace(getenv("MANAR_ENROLL_TOKEN")); v != "" {
+		return v, nil
+	}
+	if flagVal != "" && flagVal != "-" {
+		fmt.Fprintln(stderr, "warning: --token puts the token in the process list; pipe it on stdin or set MANAR_ENROLL_TOKEN")
+		return flagVal, nil
+	}
+	if f, ok := stdin.(*os.File); ok && isTerminal(f) {
+		fmt.Fprint(stderr, "Enrollment token: ")
+		s, err := readSecret(f)
+		fmt.Fprintln(stderr)
+		return strings.TrimSpace(s), err
+	}
+	line, err := bufio.NewReader(stdin).ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
+	if line = strings.TrimSpace(line); line == "" {
+		return "", errors.New("no enrollment token on stdin")
+	}
+	return line, nil
+}
+
+// enrollClient follows a redirect only within the same scheme and host, so the token is never
+// sent to another origin or over plain HTTP.
+func enrollClient(api *url.URL) *http.Client {
+	return &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if req.URL.Scheme != api.Scheme || req.URL.Host != api.Host {
+			return errors.New("enrollment redirect to another origin refused")
+		}
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	}}
 }
 
 // checkAPIURL refuses to send the token in clear text except to a loopback address.

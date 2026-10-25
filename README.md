@@ -17,27 +17,16 @@ Two binaries:
 ## Host quick start (Linux, as root)
 
 ```bash
-manar-edge enroll --api https://manar.example --token -   # paste <tenant>:<agent>:<secret>
+manar-edge enroll --api https://manar.example        # paste <tenant>:<agent>:<secret> (hidden)
 manar-edge up <agent> --task <taskId>
+manar-edge install-claude-code <agent>               # optional: Claude Code hook and policy
 manar-edge run <agent> -- claude
 manar-edge status <agent>
-manar-edge down <agent>
+manar-edge down <agent> [--purge]
 ```
 
-`install-claude-code <agent>` writes the managed settings (`/etc/claude-code/managed-settings.json`,
-Windows `C:\Program Files\ClaudeCode\managed-settings.json`) with a PreToolUse hook that asks Manar
-before every tool call and denies on any error (`onFailure: "block"`, needs Claude Code 2.1.295 or
-later). The hook runs as the agent user, so it reaches Manar through the local gateway.
-
-Limits to know:
-
-- Windows: firewall rules follow the program path; a copied or renamed binary is not covered.
-  Running the agent as a dedicated local account with a user-scoped rule is the stronger follow-up.
-  `run` on Windows needs an elevated prompt (the state dir is SYSTEM and Administrators only), so
-  the program it starts is elevated too.
-- The local gateway is reachable by anything that shares its loopback: inside the netns on Linux,
-  the whole host on Windows.
-- The jail does not survive a reboot (`/run/netns` is cleared); run `up` again after boot.
+What the host binary enforces, the Claude Code policy it installs and the Windows limits are in
+[docs/host.md](docs/host.md).
 
 ## Build and test
 

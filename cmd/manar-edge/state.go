@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -19,16 +20,16 @@ var slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 // maxNameLen is the Linux interface and netns name limit the contract sizes names for.
 const maxNameLen = 15
 
-// edgeName derives the on-disk name: `<tenant>-<agent>`, or when longer than 15 characters a
-// truncated prefix plus 4 hex characters of a hash of the full pair, so two long pairs that share
-// a prefix still get different names.
+// edgeName derives the on-disk name: a prefix of `<tenant>-<agent>` plus 4 hex characters of a
+// hash of the full pair, at most 15 characters. The hash is always there, so pairs that render the
+// same prefix (`a-b`+`c` and `a`+`b-c`) still get different names.
 func edgeName(tenant, agent string) string {
 	base := tenant + "-" + agent
-	if len(base) <= maxNameLen {
-		return base
+	if len(base) > maxNameLen-5 {
+		base = base[:maxNameLen-5]
 	}
 	sum := sha256.Sum256([]byte(tenant + "/" + agent))
-	return strings.TrimRight(base[:maxNameLen-5], "-") + "-" + hex.EncodeToString(sum[:2])
+	return strings.TrimRight(base, "-") + "-" + hex.EncodeToString(sum[:2])
 }
 
 // Edge is the `edge` object of the enrollment response (docs/design.md section 1).
@@ -154,4 +155,33 @@ func listAgents(base string) []string {
 		}
 	}
 	return dirs
+}
+
+// copyFile copies src to dst through a temp file and rename.
+func copyFile(src, dst string, mode os.FileMode) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	tmp := dst + ".tmp"
+	_ = os.Remove(tmp)
+	out, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, mode)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		return err
+	}
+	if err := out.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dst)
 }
