@@ -76,6 +76,8 @@ func (s *Syncer) Poll(ctx context.Context) error {
 	netErr := s.Net.SetPeers(wg)
 	s.Metrics.CutsApplied.Add(int64(cuts))
 	s.Metrics.PeersActive.Store(int64(len(wg)))
+	_, rejected := s.Registry.Active()
+	s.Metrics.PeersRejected.Store(int64(rejected))
 	if netErr != nil {
 		// The registry already refuses the cut peers; the version is not advanced so the next
 		// call returns the same changes and wg0 is configured again.

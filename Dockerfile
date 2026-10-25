@@ -4,7 +4,7 @@
 # NET_ADMIN (Kubernetes has no ambient capabilities; the pod needs allowPrivilegeEscalation: true
 # for the file capability to apply, see charts/manar-edge-gateway).
 # Newer patch than the go.mod floor: go1.26.10 carries the net/http and crypto/x509 fixes.
-FROM golang:1.26.10 AS build
+FROM golang:1.26.10@sha256:672c944cfd07599b5f1bb179869270cdc94c6254e41db4d431259693cb286b82 AS build
 RUN apt-get update && apt-get install -y --no-install-recommends libcap2-bin \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /src

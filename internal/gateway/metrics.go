@@ -17,6 +17,7 @@ type Metrics struct {
 	CutsApplied   atomic.Int64
 	EventsDropped atomic.Int64
 	RelayRefused  atomic.Int64
+	PeersRejected atomic.Int64
 	lastSync      atomic.Int64 // unix nanoseconds of the last applied sync response
 
 	mu        sync.Mutex
@@ -46,7 +47,8 @@ func (m *Metrics) write(w io.Writer, now time.Time) {
 		{"manar_edge_gateway_cuts_applied_total", "counter", "Peers removed from the active set (cut or missing).", fmt.Sprint(m.CutsApplied.Load())},
 		{"manar_edge_gateway_sync_lag_seconds", "gauge", "Seconds since the last applied peer sync.", lag},
 		{"manar_edge_gateway_events_dropped_total", "counter", "Egress events dropped because the queue was full.", fmt.Sprint(m.EventsDropped.Load())},
-		{"manar_edge_gateway_relay_refused_total", "counter", "Relay connections refused (source not an active peer).", fmt.Sprint(m.RelayRefused.Load())},
+		{"manar_edge_gateway_peers_rejected", "gauge", "Active peers not configured (invalid, or address or key shared).", fmt.Sprint(m.PeersRejected.Load())},
+		{"manar_edge_gateway_relay_refused_total", "counter", "Relay connections refused (not an active peer, or over the connection cap).", fmt.Sprint(m.RelayRefused.Load())},
 	}
 	for _, s := range series {
 		fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s %s\n%s %s\n", s.name, s.help, s.name, s.typ, s.name, s.value)

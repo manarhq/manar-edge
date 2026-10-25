@@ -46,7 +46,8 @@ dnsTo:
   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
     podSelector: {matchLabels: {k8s-app: kube-dns}}
 # Internet for the egress proxy: public addresses only.
-internetExcept: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
+internetExcept: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,
+  192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 240.0.0.0/4]
 
 nodeSelector: {}
 tolerations: []

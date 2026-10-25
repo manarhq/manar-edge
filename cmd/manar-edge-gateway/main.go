@@ -33,6 +33,13 @@ func env(key, def string) string {
 	return def
 }
 
+func envDuration(key string, def time.Duration) time.Duration {
+	if d, err := time.ParseDuration(os.Getenv(key)); err == nil && d > 0 {
+		return d
+	}
+	return def
+}
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "version" {
 		fmt.Println(version)
@@ -57,6 +64,9 @@ func run(log *slog.Logger) error {
 		ports     = flag.String("proxy-ports", env("MANAR_PROXY_PORTS", "443"), "comma-separated CONNECT ports allowed")
 		admin     = flag.String("admin-addr", env("MANAR_ADMIN_ADDR", ":9090"), "health and metrics listener")
 		queue     = flag.Int("events-queue", 10000, "egress events kept in memory while manar-api is unreachable")
+		idle      = flag.Duration("idle-timeout", envDuration("MANAR_IDLE_TIMEOUT", gateway.DefaultIdleTimeout), "close relay and proxy connections idle both ways this long")
+		perPeer   = flag.Int("max-conns-per-peer", gateway.DefaultMaxPerPeer, "open relay plus proxy connections per peer")
+		total     = flag.Int("max-conns", gateway.DefaultMaxTotal, "open relay plus proxy connections in total")
 	)
 	flag.Parse()
 
@@ -95,6 +105,7 @@ func run(log *slog.Logger) error {
 
 	metrics := &gateway.Metrics{}
 	reg := gateway.NewRegistry(overlay, log)
+	reg.MaxPerPeer, reg.MaxTotal = *perPeer, *total
 	syncer := &gateway.Syncer{
 		APIURL: *apiURL, TokenFile: *tokenFile, Registry: reg, Net: kernel, Metrics: metrics, Log: log,
 		Client:     &http.Client{Timeout: 40 * time.Second}, // the server holds a poll up to 25 s
@@ -105,10 +116,10 @@ func run(log *slog.Logger) error {
 		Client: &http.Client{Timeout: 10 * time.Second}, Interval: 2 * time.Second,
 	}
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	relay := &gateway.Relay{Registry: reg, Upstream: *upstream, Dial: dialer.DialContext, Metrics: metrics, Log: log}
+	relay := &gateway.Relay{Registry: reg, Upstream: *upstream, Dial: dialer.DialContext, Idle: *idle, Metrics: metrics, Log: log}
 	proxy := &gateway.Proxy{
 		Registry: reg, Events: events, Metrics: metrics, Log: log, Ports: proxyPorts, Overlay: overlay,
-		Dial: dialer.DialContext,
+		Dial: dialer.DialContext, Idle: *idle,
 		Resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},

@@ -82,7 +82,8 @@ func (e *Events) Run(ctx context.Context) {
 	}
 }
 
-// Flush sends everything queued, MaxBatch per call. A failed batch goes back to the front.
+// Flush sends everything queued, MaxBatch per call. A batch that failed for a transient reason
+// goes back to the front.
 func (e *Events) Flush(ctx context.Context) error {
 	for {
 		e.mu.Lock()
@@ -93,19 +94,36 @@ func (e *Events) Flush(ctx context.Context) error {
 		if n == 0 {
 			return nil
 		}
-		if err := e.post(ctx, batch); err != nil {
-			if errors.Is(err, errRejected) {
-				// A batch the API cannot accept would block the queue forever.
-				e.Metrics.EventsDropped.Add(int64(n))
-				return err
-			}
+		if unsent, err := e.send(ctx, batch); err != nil {
 			e.mu.Lock()
-			e.q = append(batch, e.q...)
+			e.q = append(unsent, e.q...)
 			e.trim()
 			e.mu.Unlock()
 			return err
 		}
 	}
+}
+
+// send posts batch; when the API rejects it (400, 413, 422) it halves the batch so one bad or
+// oversized event costs only itself. It returns what is left unsent after a transient error.
+func (e *Events) send(ctx context.Context, batch []Event) ([]Event, error) {
+	err := e.post(ctx, batch)
+	if err == nil {
+		return nil, nil
+	}
+	if !errors.Is(err, errRejected) {
+		return batch, err
+	}
+	if len(batch) == 1 {
+		e.Metrics.EventsDropped.Add(1)
+		e.Log.Warn("egress event rejected by the API, dropped", "peerId", batch[0].PeerID, "err", err)
+		return nil, nil
+	}
+	h := len(batch) / 2
+	if rest, err := e.send(ctx, batch[:h]); err != nil {
+		return append(rest, batch[h:]...), err
+	}
+	return e.send(ctx, batch[h:])
 }
 
 func (e *Events) post(ctx context.Context, batch []Event) error {
@@ -129,7 +147,8 @@ func (e *Events) post(ctx context.Context, batch []Event) error {
 		return err
 	}
 	resp.Body.Close()
-	if resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusUnprocessableEntity {
+	switch resp.StatusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
 		return fmt.Errorf("%w: status %d", errRejected, resp.StatusCode)
 	}
 	if resp.StatusCode/100 != 2 {

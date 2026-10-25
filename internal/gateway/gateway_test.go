@@ -159,10 +159,10 @@ func TestSyncApply(t *testing.T) {
 		t.Fatal("not ready after the full sync")
 	}
 	connA := &closeRec{}
-	if _, _, ok := reg.Acquire(src(a), connA); !ok {
+	if _, err := reg.Acquire(src(a), connA); err != nil {
 		t.Fatal("active peer a refused")
 	}
-	if _, _, ok := reg.Acquire(src(b), &closeRec{}); ok {
+	if _, err := reg.Acquire(src(b), &closeRec{}); err == nil {
 		t.Fatal("cut peer b accepted")
 	}
 
@@ -181,7 +181,7 @@ func TestSyncApply(t *testing.T) {
 	if !connA.closed.Load() {
 		t.Fatal("cut did not close a's connection")
 	}
-	if _, _, ok := reg.Acquire(src(a), &closeRec{}); ok {
+	if _, err := reg.Acquire(src(a), &closeRec{}); err == nil {
 		t.Fatal("cut peer a accepted")
 	}
 	if m.CutsApplied.Load() != 1 || m.PeersActive.Load() != 1 {
@@ -193,7 +193,7 @@ func TestSyncApply(t *testing.T) {
 	if err := s.Poll(ctx); err == nil {
 		t.Fatal("500 must be an error")
 	}
-	if len(fn.calls) != calls || reg.Active() != 1 {
+	if active, _ := reg.Active(); len(fn.calls) != calls || active != 1 {
 		t.Fatal("an error changed the state")
 	}
 
@@ -301,5 +301,128 @@ func TestMetricsText(t *testing.T) {
 	m.Handler(func() bool { return false }).ServeHTTP(rec, httptest.NewRequest("GET", "/readyz", nil))
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Errorf("readyz before sync: %d", rec.Code)
+	}
+}
+
+func openConns(r *Registry) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.total
+}
+
+func TestRegistryDuplicateKeyFailsClosed(t *testing.T) {
+	k := newKey(t)
+	reg := NewRegistry(netip.MustParsePrefix("100.88.0.0/16"), discard)
+	wg, _, _ := reg.Apply(PeerSet{Full: true, Peers: []Peer{
+		{ID: "a", PublicKey: k, Address: "100.88.0.17/32", State: "active"},
+		{ID: "b", PublicKey: k, Address: "100.88.0.18/32", State: "active"},
+		{ID: "c", PublicKey: newKey(t), Address: "100.88.0.19/32", State: "active"},
+		{ID: "d", PublicKey: newKey(t), Address: "100.88.0.19/32", State: "active"},
+		{ID: "e", PublicKey: newKey(t), Address: "100.88.0.20/32", State: "active"},
+	}})
+	if active, rejected := reg.Active(); len(wg) != 1 || active != 1 || rejected != 4 {
+		t.Fatalf("configured %d, active %d, rejected %d; want only e", len(wg), active, rejected)
+	}
+}
+
+func TestRegistryCaps(t *testing.T) {
+	reg := NewRegistry(netip.MustParsePrefix("100.88.0.0/16"), discard)
+	reg.MaxPerPeer, reg.MaxTotal = 2, 3
+	reg.Apply(PeerSet{Full: true, Peers: []Peer{
+		{ID: "a", PublicKey: newKey(t), Address: "100.88.0.17/32", State: "active"},
+		{ID: "b", PublicKey: newKey(t), Address: "100.88.0.18/32", State: "active"},
+	}})
+	a, b := netip.MustParseAddr("100.88.0.17"), netip.MustParseAddr("100.88.0.18")
+	l1, _ := reg.Acquire(a, &closeRec{})
+	reg.Acquire(a, &closeRec{})
+	if l, err := reg.Acquire(a, &closeRec{}); !errors.Is(err, errTooMany) || l.Peer.ID != "a" {
+		t.Fatalf("per-peer cap: %v", err)
+	}
+	reg.Acquire(b, &closeRec{})
+	if _, err := reg.Acquire(b, &closeRec{}); !errors.Is(err, errTooMany) {
+		t.Fatalf("global cap: %v", err)
+	}
+	l1.Release()
+	if _, err := reg.Acquire(b, &closeRec{}); err != nil {
+		t.Fatalf("after release: %v", err)
+	}
+}
+
+func TestRegistryAllowListNarrowing(t *testing.T) {
+	reg := NewRegistry(netip.MustParsePrefix("100.88.0.0/16"), discard)
+	p := Peer{ID: "a", PublicKey: newKey(t), Address: "100.88.0.17/32", State: "active",
+		AllowHosts: []string{"a.com", "*.b.com"}}
+	reg.Apply(PeerSet{Full: true, Peers: []Peer{p}})
+	src := netip.MustParseAddr("100.88.0.17")
+	ca, cb, relay := &closeRec{}, &closeRec{}, &closeRec{}
+	la, _ := reg.Acquire(src, ca)
+	lb, _ := reg.Acquire(src, cb)
+	reg.Acquire(src, relay)
+	if !la.Allow("a.com") || !lb.Allow("x.b.com") {
+		t.Fatal("allowed hosts refused")
+	}
+	p.AllowHosts = []string{"*.b.com"}
+	_, closers, cuts := reg.Apply(PeerSet{Peers: []Peer{p}})
+	for _, c := range closers {
+		c.Close()
+	}
+	if cuts != 0 || !ca.closed.Load() || la.Ctx.Err() == nil || cb.closed.Load() || relay.closed.Load() {
+		t.Fatalf("cuts %d, a.com closed %v, x.b.com closed %v, relay closed %v",
+			cuts, ca.closed.Load(), cb.closed.Load(), relay.closed.Load())
+	}
+	if la.Allow("a.com") {
+		t.Fatal("a dropped lease allowed a host")
+	}
+}
+
+func TestEventsRejectedBatchesSplit(t *testing.T) {
+	var mu sync.Mutex
+	delivered := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body struct{ Events []Event }
+		json.NewDecoder(r.Body).Decode(&body)
+		for _, ev := range body.Events {
+			if ev.Host == "poison" {
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				return
+			}
+		}
+		if len(body.Events) > 100 {
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
+		mu.Lock()
+		delivered += len(body.Events)
+		mu.Unlock()
+		w.WriteHeader(http.StatusAccepted)
+	}))
+	defer srv.Close()
+	m := &Metrics{}
+	e := &Events{APIURL: srv.URL, TokenFile: tokenFile(t), Client: srv.Client(), Metrics: m, Log: discard, Max: 2000}
+	for i := range 1200 {
+		host := "ok.com"
+		if i == 700 {
+			host = "poison"
+		}
+		e.Add(Event{PeerID: "p", Host: host})
+	}
+	if err := e.Flush(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if delivered != 1199 || m.EventsDropped.Load() != 1 || len(e.q) != 0 {
+		t.Fatalf("delivered %d, dropped %d, left %d", delivered, m.EventsDropped.Load(), len(e.q))
+	}
+}
+
+func TestValidHost(t *testing.T) {
+	for h, want := range map[string]bool{
+		"example.com": true, "a-b.c0.io": true, "x": true,
+		"": false, "-a.com": false, "a-.com": false, "a..com": false, "a_b.com": false,
+		"exa mple.com": false, strings.Repeat("a", 64) + ".com": false,
+		strings.Repeat("a.", 127) + "a": false,
+	} {
+		if validHost(h) != want {
+			t.Errorf("validHost(%q) = %v", h, !want)
+		}
 	}
 }

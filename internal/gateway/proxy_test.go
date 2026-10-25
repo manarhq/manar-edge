@@ -2,6 +2,7 @@ package gateway
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -200,17 +201,135 @@ func TestProxyRefusesStranger(t *testing.T) {
 	}
 }
 
-func TestPeekSNI(t *testing.T) {
+func TestPeekHello(t *testing.T) {
 	a, b := net.Pipe()
 	defer a.Close()
 	go tls.Client(a, &tls.Config{ServerName: "Graph.Microsoft.com"}).Handshake()
-	sni, hello, err := peekSNI(b)
-	if err != nil || sni != "Graph.Microsoft.com" || len(hello) < 5 || hello[0] != 0x16 {
-		t.Fatalf("sni %q, %d bytes, err %v", sni, len(hello), err)
+	h, err := peekHello(b)
+	if err != nil || h.sni != "Graph.Microsoft.com" || h.ech || len(h.raw) < 5 || h.raw[0] != 0x16 {
+		t.Fatalf("hello %+v, err %v", h, err)
 	}
-	if _, _, err := peekSNI(strings.NewReader("GET / HTTP/1.1\r\n\r\n")); err == nil {
+	if _, err := peekHello(strings.NewReader("GET / HTTP/1.1\r\n\r\n")); err == nil {
 		t.Fatal("plain HTTP accepted as a ClientHello")
 	}
+	h, err = peekHello(bytes.NewReader(helloWithECH("example.com")))
+	if err != nil || h.sni != "example.com" || !h.ech {
+		t.Fatalf("ECH hello %+v, err %v", h, err)
+	}
+}
+
+func u16(v int) []byte { return []byte{byte(v >> 8), byte(v)} }
+
+// helloWithECH builds a minimal TLS 1.3 ClientHello whose outer SNI is host and that carries a
+// well-formed outer encrypted_client_hello extension (as ECH or its GREASE looks on the wire).
+func helloWithECH(host string) []byte {
+	ext := func(typ int, data []byte) []byte { return append(append(u16(typ), u16(len(data))...), data...) }
+	sn := append(append([]byte{0}, u16(len(host))...), host...)
+	ech := append([]byte{0, 0, 1, 0, 1, 7}, u16(32)...)
+	ech = append(append(append(ech, make([]byte, 32)...), u16(32)...), make([]byte, 32)...)
+	var exts []byte
+	exts = append(exts, ext(0x0000, append(u16(len(sn)), sn...))...)
+	exts = append(exts, ext(0x002b, []byte{2, 3, 4})...)
+	exts = append(exts, ext(extensionECH, ech)...)
+	body := append([]byte{3, 3}, make([]byte, 32)...)
+	body = append(body, 0)                // session id
+	body = append(body, 0, 2, 0x13, 0x01) // TLS_AES_128_GCM_SHA256
+	body = append(body, 1, 0)             // null compression
+	body = append(append(body, u16(len(exts))...), exts...)
+	hs := append([]byte{1, 0, byte(len(body) >> 8), byte(len(body))}, body...)
+	return append(append([]byte{0x16, 3, 1}, u16(len(hs))...), hs...)
+}
+
+func TestProxyRefusesECH(t *testing.T) {
+	env := newProxyEnv(t, "example.com")
+	c := dialFrom(t, peerIP, env.addr)
+	if resp := connect(t, c, "example.com:443"); resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	c.Write(helloWithECH("example.com"))
+	if ev := env.events(t, 1)[0]; ev.Reason != "ech_not_allowed" {
+		t.Fatalf("event %+v", ev)
+	}
+	if len(env.dialed) != 0 {
+		t.Fatal("dialed upstream for an ECH hello")
+	}
+}
+
+func TestProxyLimits(t *testing.T) {
+	t.Run("oversized request", func(t *testing.T) {
+		env := newProxyEnv(t, "example.com")
+		c := dialFrom(t, peerIP, env.addr)
+		fmt.Fprintf(c, "CONNECT example.com:443 HTTP/1.1\r\nX-Pad: %s\r\n\r\n", strings.Repeat("a", 10<<10))
+		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
+		if err != nil || resp.StatusCode != 400 {
+			t.Fatalf("resp %v err %v", resp, err)
+		}
+	})
+	t.Run("invalid host", func(t *testing.T) {
+		env := newProxyEnv(t, "example.com")
+		long := strings.Repeat("a.", 200) + "com"
+		for _, target := range []string{long + ":443", "exa_mple.com:443", "-x.com:443"} {
+			c := dialFrom(t, peerIP, env.addr)
+			if resp := connect(t, c, target); resp.StatusCode != 400 {
+				t.Fatalf("%s: status %d", target[:10], resp.StatusCode)
+			}
+		}
+		for _, ev := range env.events(t, 3) {
+			if ev.Reason != "invalid_host" || len(ev.Host) > 253 {
+				t.Fatalf("event reason %s host length %d", ev.Reason, len(ev.Host))
+			}
+		}
+	})
+	t.Run("per-peer cap", func(t *testing.T) {
+		env := newProxyEnv(t, "example.com")
+		env.proxy.Registry.mu.Lock()
+		env.proxy.Registry.MaxPerPeer = 1
+		env.proxy.Registry.mu.Unlock()
+		hold := dialFrom(t, peerIP, env.addr) // sits in the handshake, holding the slot
+		waitFor(t, func() bool { return openConns(env.proxy.Registry) == 1 })
+		c := dialFrom(t, peerIP, env.addr)
+		if n, _ := c.Read(make([]byte, 1)); n != 0 {
+			t.Fatal("over-cap connection got a response")
+		}
+		if ev := env.events(t, 1)[0]; ev.Reason != "too_many_connections" || ev.PeerID != "p1" {
+			t.Fatalf("event %+v", ev)
+		}
+		hold.Close()
+		waitFor(t, func() bool { return openConns(env.proxy.Registry) == 0 })
+	})
+	t.Run("cut during dns", func(t *testing.T) {
+		env := newProxyEnv(t, "example.com")
+		inDNS, release := make(chan struct{}), make(chan struct{})
+		env.proxy.Resolve = func(context.Context, string) ([]netip.Addr, error) {
+			close(inDNS)
+			<-release
+			return []netip.Addr{netip.MustParseAddr("203.0.113.7")}, nil
+		}
+		c := dialFrom(t, peerIP, env.addr)
+		fmt.Fprintf(c, "CONNECT example.com:443 HTTP/1.1\r\n\r\n")
+		<-inDNS
+		_, closers, _ := env.proxy.Registry.Apply(PeerSet{Full: true})
+		close(release)
+		for _, cl := range closers {
+			cl.Close()
+		}
+		if ev := env.events(t, 1)[0]; ev.Reason != "peer_cut" {
+			t.Fatalf("event %+v", ev)
+		}
+		if len(env.dialed) != 0 {
+			t.Fatal("dialed upstream after the cut")
+		}
+	})
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatal("condition not reached")
 }
 
 func TestRelay(t *testing.T) {
@@ -267,5 +386,33 @@ func TestRelay(t *testing.T) {
 	}
 	if n, err := c.Read(buf); n != 0 || err == nil {
 		t.Fatalf("connection still open after the cut: %d %v", n, err)
+	}
+}
+
+func TestRelayIdleTimeout(t *testing.T) {
+	echo := listen(t, func(ln net.Listener) error {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return err
+			}
+			go io.Copy(c, c)
+		}
+	})
+	var d net.Dialer
+	r := &Relay{Registry: testRegistry(t), Upstream: echo, Dial: d.DialContext, Idle: 300 * time.Millisecond,
+		Metrics: &Metrics{}, Log: discard}
+	c := dialFrom(t, peerIP, listen(t, r.Serve))
+	buf := make([]byte, 1)
+	for range 6 { // traffic keeps it open past the idle timeout
+		c.Write([]byte("x"))
+		if _, err := io.ReadFull(c, buf); err != nil {
+			t.Fatalf("closed while active: %v", err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	start := time.Now()
+	if n, _ := c.Read(buf); n != 0 || time.Since(start) > 2*time.Second {
+		t.Fatal("idle connection not closed")
 	}
 }
