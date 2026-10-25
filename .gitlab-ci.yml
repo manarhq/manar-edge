@@ -68,7 +68,7 @@ semgrep:
   variables:
     GIT_DEPTH: 0
   script:
-    - semgrep scan --config auto --severity ERROR --error
+    - semgrep scan --config auto --severity ERROR --error .
 
 trivy-fs:
   stage: security
@@ -76,4 +76,4 @@ trivy-fs:
     name: aquasec/trivy:0.71.0
     entrypoint: ['']
   script:
-    - trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed .
+    - trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed --skip-dirs .go .
