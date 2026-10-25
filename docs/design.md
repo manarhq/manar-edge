@@ -125,6 +125,11 @@ At most 500 per call; the gateway batches every 2 s. No payloads, no paths, host
 - Health: `/healthz`, `/readyz` (ready after the first full sync), Prometheus `/metrics` on :9090
   (peers active, cuts applied, sync lag, proxy decisions by result).
 - Runs as non-root with `NET_ADMIN` only; image distroless/static.
+- Namespace `manar-gateway` (privileged Pod Security label: `NET_ADMIN` is outside baseline), pod
+  label `app.kubernetes.io/name: manar-edge-gateway`. Service `manar-edge-gateway` type
+  LoadBalancer, UDP 51820. manar-api's NetworkPolicy admits this label from `manar-gateway` on
+  3443 (relay) and on the HTTP port (sync API); nothing else may call `/internal/v1/edge/*`, and
+  manar-api serves `/internal/*` only on the HTTP port, never on the agent mTLS listener.
 
 ## 4. Per-agent egress allow-list (manar-api + manar-web)
 
