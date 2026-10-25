@@ -1,0 +1,94 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: manar-edge-gateway
+  labels: {{- include "gw.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+# One replica: wg0 holds the peer sessions and the LoadBalancer has no session affinity for UDP
+# across pods. Recreate so two pods never hold the same key at once.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: manar-edge-gateway
+  labels: {{- include "gw.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {{- include "gw.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "gw.labels" . | nindent 8 }}
+    spec:
+      serviceAccountName: manar-edge-gateway
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # Defence in depth for the egress proxy, which already resolves fully qualified names: no
+      # Kubernetes search-domain expansion for names with a dot.
+      dnsConfig:
+        options: [{name: ndots, value: "1"}]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile: {type: RuntimeDefault}
+        # Bind :443 on the overlay without CAP_NET_BIND_SERVICE (a namespaced, safe sysctl).
+        sysctls:
+          - {name: net.ipv4.ip_unprivileged_port_start, value: "443"}
+      volumes:
+        - name: wireguard-key
+          secret:
+            secretName: {{ .Values.secrets.privateKey.secretName }}
+            defaultMode: 0440
+            items: [{key: {{ .Values.secrets.privateKey.key }}, path: private_key}]
+        - name: gateway-token
+          secret:
+            secretName: {{ .Values.secrets.token.secretName }}
+            defaultMode: 0440
+            items: [{key: {{ .Values.secrets.token.key }}, path: gateway_token}]
+      containers:
+        - name: gateway
+          image: "{{ required "image.repository is required" .Values.image.repository }}@{{ required "image.digest is required" .Values.image.digest }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - {name: MANAR_EDGE_CIDR, value: {{ .Values.edgeCidr | quote }}}
+            - {name: MANAR_API_URL, value: {{ .Values.manarApi.url | quote }}}
+            - {name: MANAR_AGENT_UPSTREAM, value: {{ .Values.manarApi.agentUpstream | quote }}}
+            - {name: MANAR_PROXY_PORTS, value: {{ join "," .Values.proxyPorts | quote }}}
+            - {name: MANAR_PROXY_DENY_ECH, value: {{ .Values.proxy.denyEch | toString | quote }}}
+            - {name: MANAR_EDGE_PRIVATE_KEY_FILE, value: /etc/manar-edge-gateway/wireguard/private_key}
+            - {name: MANAR_EDGE_GATEWAY_TOKEN_FILE, value: /etc/manar-edge-gateway/token/gateway_token}
+          ports:
+            - {name: wireguard, containerPort: 51820, protocol: UDP}
+            - {name: metrics, containerPort: 9090, protocol: TCP}
+          readinessProbe:
+            httpGet: {path: /readyz, port: metrics}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: metrics}
+            periodSeconds: 20
+            failureThreshold: 3
+          resources: {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            # The binary holds cap_net_admin as a file capability (uid 65532 gets no ambient
+            # capabilities); execve grants it only without no_new_privs.
+            allowPrivilegeEscalation: true
+            capabilities: {drop: [ALL], add: [NET_ADMIN]}
+          volumeMounts:
+            - {name: wireguard-key, mountPath: /etc/manar-edge-gateway/wireguard, readOnly: true}
+            - {name: gateway-token, mountPath: /etc/manar-edge-gateway/token, readOnly: true}

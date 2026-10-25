@@ -1,0 +1,6 @@
+apiVersion: v2
+name: manar-edge-gateway
+description: WireGuard gateway, agent relay and egress proxy for governed agents (manar-edge)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

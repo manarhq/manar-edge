@@ -1,0 +1,58 @@
+# Install into namespace manar-gateway. That namespace needs the Pod Security label
+# pod-security.kubernetes.io/enforce: privileged (NET_ADMIN is outside baseline); manar-infra owns it.
+
+# Image by digest only (repository@sha256:...).
+image:
+  repository: ""
+  digest: ""
+  pullPolicy: IfNotPresent
+imagePullSecrets: [{name: gitlab-registry}]
+
+# Overlay network (MANAR_EDGE_CIDR); the gateway takes its first host.
+edgeCidr: 100.88.0.0/16
+# manar-api: HTTP port for the sync and events API, agent listener for the :443 relay.
+manarApi:
+  namespace: manar-prod
+  podLabels: {app.kubernetes.io/name: manar-api}
+  url: http://manar-api.manar-prod.svc:3000
+  httpPort: 3000
+  agentUpstream: manar-api.manar-prod.svc:3443
+  agentPort: 3443
+# CONNECT ports the egress proxy allows; also the internet egress ports of the NetworkPolicy.
+proxyPorts: [443]
+proxy:
+  # Refuse TLS ClientHellos with encrypted_client_hello. This also refuses the GREASE ECH every
+  # Chromium, Electron and Playwright client sends; see docs/gateway.md.
+  denyEch: false
+
+# Existing Secrets (rendered by External Secrets from OpenBao kv/prod/manar-edge).
+secrets:
+  privateKey: {secretName: manar-edge-gateway, key: private_key}
+  token: {secretName: manar-edge-gateway, key: gateway_token}
+
+service:
+  # LoadBalancer for UDP 51820; MANAR_EDGE_ENDPOINT points at it.
+  type: LoadBalancer
+  port: 51820
+  externalTrafficPolicy: Cluster
+  annotations: {}
+  loadBalancerIP: ""
+
+resources:
+  requests: {cpu: 50m, memory: 64Mi}
+  limits: {memory: 256Mi}
+
+# Sources allowed to scrape :9090 (NetworkPolicyPeer list).
+metricsFrom:
+  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: observability}}
+# Destinations allowed for DNS.
+dnsTo:
+  - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kube-system}}
+    podSelector: {matchLabels: {k8s-app: kube-dns}}
+# Internet for the egress proxy: public addresses only.
+internetExcept: [0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12,
+  192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 240.0.0.0/4]
+
+nodeSelector: {}
+tolerations: []
+terminationGracePeriodSeconds: 30
