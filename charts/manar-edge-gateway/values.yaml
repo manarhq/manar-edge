@@ -20,6 +20,10 @@ manarApi:
   agentPort: 3443
 # CONNECT ports the egress proxy allows; also the internet egress ports of the NetworkPolicy.
 proxyPorts: [443]
+proxy:
+  # Refuse TLS ClientHellos with encrypted_client_hello. This also refuses the GREASE ECH every
+  # Chromium, Electron and Playwright client sends; see docs/gateway.md.
+  denyEch: false
 
 # Existing Secrets (rendered by External Secrets from OpenBao kv/prod/manar-edge).
 secrets:

@@ -24,6 +24,9 @@ type Event struct {
 	BytesUp    int64     `json:"bytesUp"`
 	BytesDown  int64     `json:"bytesDown"`
 	DurationMs int64     `json:"durationMs"`
+	// ECH is set when the ClientHello carried encrypted_client_hello (real or GREASE); omitted
+	// otherwise, so the contract's event shape is unchanged for every other event.
+	ECH bool `json:"ech,omitempty"`
 }
 
 var errRejected = errors.New("events batch rejected")

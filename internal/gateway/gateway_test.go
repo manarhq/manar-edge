@@ -426,3 +426,14 @@ func TestValidHost(t *testing.T) {
 		}
 	}
 }
+
+func TestEventECHFieldOmittedByDefault(t *testing.T) {
+	b, _ := json.Marshal(Event{PeerID: "p"})
+	if strings.Contains(string(b), "ech") {
+		t.Fatalf("ech present on a plain event: %s", b)
+	}
+	b, _ = json.Marshal(Event{PeerID: "p", ECH: true})
+	if !strings.Contains(string(b), `"ech":true`) {
+		t.Fatalf("ech missing: %s", b)
+	}
+}

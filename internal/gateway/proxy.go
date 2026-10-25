@@ -30,6 +30,9 @@ type Proxy struct {
 	Resolve  func(ctx context.Context, host string) ([]netip.Addr, error)
 	Dial     DialFunc
 	Idle     time.Duration
+	// DenyECH refuses ClientHellos carrying encrypted_client_hello. Off by default: GREASE ECH
+	// from Chromium cannot be told apart from real ECH (docs/gateway.md).
+	DenyECH bool
 }
 
 // Serve accepts until ln is closed.
@@ -131,11 +134,12 @@ func (p *Proxy) handle(c net.Conn) {
 	}
 	lr.N = maxHello
 	hello, err := peekHello(br)
+	ev.ECH = hello.ech
 	switch {
 	case err != nil || !strings.EqualFold(strings.TrimSuffix(hello.sni, "."), host):
 		deny(0, "sni_mismatch")
 		return
-	case hello.ech:
+	case hello.ech && p.DenyECH:
 		deny(0, "ech_not_allowed")
 		return
 	}

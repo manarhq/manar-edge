@@ -64,7 +64,9 @@ type proxyEnv struct {
 
 // newProxyEnv starts an upstream TLS server for example.com (httptest's certificate) and a proxy
 // whose resolver answers from env.resolve and whose dialer reaches that upstream.
-func newProxyEnv(t *testing.T, allow ...string) *proxyEnv {
+func newProxyEnv(t *testing.T, allow ...string) *proxyEnv { return newProxyEnvWith(t, nil, allow...) }
+
+func newProxyEnvWith(t *testing.T, setup func(*Proxy), allow ...string) *proxyEnv {
 	up := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		io.WriteString(w, "hello from upstream")
 	}))
@@ -88,6 +90,9 @@ func newProxyEnv(t *testing.T, allow ...string) *proxyEnv {
 			var d net.Dialer
 			return d.DialContext(ctx, network, up.Listener.Addr().String())
 		},
+	}
+	if setup != nil {
+		setup(env.proxy)
 	}
 	env.addr = listen(t, env.proxy.Serve)
 	return env
@@ -240,18 +245,33 @@ func helloWithECH(host string) []byte {
 	return append(append([]byte{0x16, 3, 1}, u16(len(hs))...), hs...)
 }
 
-func TestProxyRefusesECH(t *testing.T) {
-	env := newProxyEnv(t, "example.com")
-	c := dialFrom(t, peerIP, env.addr)
-	if resp := connect(t, c, "example.com:443"); resp.StatusCode != 200 {
-		t.Fatalf("status %d", resp.StatusCode)
-	}
-	c.Write(helloWithECH("example.com"))
-	if ev := env.events(t, 1)[0]; ev.Reason != "ech_not_allowed" {
-		t.Fatalf("event %+v", ev)
-	}
-	if len(env.dialed) != 0 {
-		t.Fatal("dialed upstream for an ECH hello")
+func TestProxyECH(t *testing.T) {
+	for _, deny := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deny=%v", deny), func(t *testing.T) {
+			env := newProxyEnvWith(t, func(p *Proxy) { p.DenyECH = deny }, "example.com")
+			c := dialFrom(t, peerIP, env.addr)
+			if resp := connect(t, c, "example.com:443"); resp.StatusCode != 200 {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+			c.Write(helloWithECH("example.com"))
+			if deny {
+				if ev := env.events(t, 1)[0]; ev.Reason != "ech_not_allowed" || !ev.ECH {
+					t.Fatalf("event %+v", ev)
+				}
+				if len(env.dialed) != 0 {
+					t.Fatal("dialed upstream for an ECH hello")
+				}
+				return
+			}
+			// Default: forwarded to the upstream (which rejects the fake hello) and recorded.
+			if got := <-env.dialed; got != "203.0.113.7:443" {
+				t.Fatalf("dialed %s", got)
+			}
+			c.Close()
+			if ev := env.events(t, 1)[0]; ev.Decision != "allowed" || !ev.ECH {
+				t.Fatalf("event %+v", ev)
+			}
+		})
 	}
 }
 

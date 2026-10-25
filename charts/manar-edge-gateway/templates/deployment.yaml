@@ -64,6 +64,7 @@ spec:
             - {name: MANAR_API_URL, value: {{ .Values.manarApi.url | quote }}}
             - {name: MANAR_AGENT_UPSTREAM, value: {{ .Values.manarApi.agentUpstream | quote }}}
             - {name: MANAR_PROXY_PORTS, value: {{ join "," .Values.proxyPorts | quote }}}
+            - {name: MANAR_PROXY_DENY_ECH, value: {{ .Values.proxy.denyEch | toString | quote }}}
             - {name: MANAR_EDGE_PRIVATE_KEY_FILE, value: /etc/manar-edge-gateway/wireguard/private_key}
             - {name: MANAR_EDGE_GATEWAY_TOKEN_FILE, value: /etc/manar-edge-gateway/token/gateway_token}
           ports:

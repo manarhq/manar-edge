@@ -66,6 +66,7 @@ func run(log *slog.Logger) error {
 		queue     = flag.Int("events-queue", 10000, "egress events kept in memory while manar-api is unreachable")
 		idle      = flag.Duration("idle-timeout", envDuration("MANAR_IDLE_TIMEOUT", gateway.DefaultIdleTimeout), "close relay and proxy connections idle both ways this long")
 		perPeer   = flag.Int("max-conns-per-peer", gateway.DefaultMaxPerPeer, "open relay plus proxy connections per peer")
+		denyECH   = flag.Bool("deny-ech", env("MANAR_PROXY_DENY_ECH", "") == "true", "refuse ClientHellos with encrypted_client_hello (also refuses Chromium's GREASE)")
 		total     = flag.Int("max-conns", gateway.DefaultMaxTotal, "open relay plus proxy connections in total")
 	)
 	flag.Parse()
@@ -119,7 +120,7 @@ func run(log *slog.Logger) error {
 	relay := &gateway.Relay{Registry: reg, Upstream: *upstream, Dial: dialer.DialContext, Idle: *idle, Metrics: metrics, Log: log}
 	proxy := &gateway.Proxy{
 		Registry: reg, Events: events, Metrics: metrics, Log: log, Ports: proxyPorts, Overlay: overlay,
-		Dial: dialer.DialContext, Idle: *idle,
+		Dial: dialer.DialContext, Idle: *idle, DenyECH: *denyECH,
 		Resolve: func(ctx context.Context, host string) ([]netip.Addr, error) {
 			return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
 		},
