@@ -86,8 +86,9 @@ func ensureUser(name, home string) (uid, gid int, err error) {
 
 // ensureHome gives the agent a writable home outside the root-only state dir. A home left by an
 // earlier user with another uid is never re-owned as root (a tree walk would race the old owner's
-// symlinks and hard links): that uid's processes are killed, the old home is moved aside to
-// <home>.stale-<time>, root 0700, for an administrator, and a fresh home is created.
+// symlinks and hard links): it is moved aside to <home>.stale-<time>, root 0700, which cuts path
+// access, and a fresh home is created. Nothing is killed here: the old uid may belong to an
+// unrelated account now; `down` killed the agent's processes while the uid was still the agent's.
 func ensureHome(home string, uid, gid int) error {
 	if err := os.MkdirAll(homeBase, 0o755); err != nil {
 		return err
@@ -102,11 +103,6 @@ func ensureHome(home string, uid, gid int) error {
 				return err
 			}
 			return os.Chmod(home, 0o700)
-		}
-		if old != 0 && old != uid {
-			if err := killUser(old); err != nil {
-				return err
-			}
 		}
 		stale := fmt.Sprintf("%s.stale-%d", home, time.Now().UnixNano())
 		if err := os.Rename(home, stale); err != nil {

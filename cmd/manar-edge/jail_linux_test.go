@@ -270,13 +270,31 @@ func TestJail(t *testing.T) {
 		t.Error("down without --purge removed the home")
 	}
 
-	// Up again with the home owned by a stale uid: it is moved aside root-only, not re-owned, and
-	// the new home is fresh.
-	if err := os.Lchown(homeDir(st), 4242, 4242); err != nil {
+	// Up again with the home owned by a uid that now belongs to another live account: the home is
+	// moved aside root-only, not re-owned, the new home is fresh, and that account's processes
+	// are left alone.
+	if err := sh("", "useradd", "--system", "--user-group", "--no-create-home", "jt-other"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = exec.Command("userdel", "jt-other").Run() })
+	otherUID, otherGID, err := lookupUser("jt-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bystander := exec.Command("sleep", "60")
+	bystander.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: uint32(otherUID), Gid: uint32(otherGID)}}
+	if err := bystander.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = bystander.Process.Kill(); _ = bystander.Wait() })
+	if err := os.Lchown(homeDir(st), otherUID, otherGID); err != nil {
 		t.Fatal(err)
 	}
 	if err := buildJail(dir, st); err != nil {
 		t.Fatal(err)
+	}
+	if err := bystander.Process.Signal(syscall.Signal(0)); err != nil || len(userPIDs(otherUID)) == 0 {
+		t.Error("up killed a process of the stale home's uid, which belongs to another account")
 	}
 	uid2, _, _ := lookupUser(userName(st))
 	checkHome(uid2)

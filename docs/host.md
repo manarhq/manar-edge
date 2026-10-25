@@ -10,7 +10,7 @@ it.
 
 | Layer | What it does |
 |---|---|
-| User | System user `manar-<name>`, no login shell, home `/var/lib/manar-edge-home/<name>` (0700, owned by the agent; outside the root-only state dir). `down` keeps the home unless `--purge`. A home left by an earlier uid is never re-owned: that uid's processes are killed and the home is moved to `<home>.stale-<time>` (root 0700) for an administrator. |
+| User | System user `manar-<name>`, no login shell, home `/var/lib/manar-edge-home/<name>` (0700, owned by the agent; outside the root-only state dir). `down` keeps the home unless `--purge`. A home left by an earlier uid is never re-owned and nothing is killed (the uid may belong to another account now): the home is moved to `<home>.stale-<time>` (root 0700) for an administrator. |
 | Network | Netns `manar-<name>` whose only route is WireGuard `manar0`; nftables in the netns allow `lo` and the two overlay endpoints, drop everything else (IPv6 included). |
 | Root namespace | nftables `inet manar_edge`: sockets owned by any agent uid are dropped (set `agent_uids`), so the user reaches nothing even outside the netns. |
 | `run` | Refuses to start unless both nftables layers and the uid set entry are present. Then: setns, private mount namespace, `setgroups([])`, `setresgid`, `setresuid`, `PR_SET_NO_NEW_PRIVS`, a new session; on a terminal the agent gets its own pty as controlling terminal (never root's). |
