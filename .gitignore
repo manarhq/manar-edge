@@ -1,6 +1,10 @@
 bin/
 .go/
 *.test
+# go build output at the repo root (Linux and Windows)
+/manar-edge
+/manar-edge-gateway
+*.exe
 
 # Local agent and package-manager state, never committed
 .claude/
