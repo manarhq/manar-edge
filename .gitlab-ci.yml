@@ -1,6 +1,6 @@
-# manar-edge: vet, tests, static builds for Linux and Windows, and the usual security scans. On
-# protected main, release-image builds the gateway image and ci/release.yml signs it, publishes the
-# gateway chart and opens the digest bump MR in manar-infra (ADR-0007 there).
+# manar-edge: vet, tests, static builds for Linux and Windows, the gateway image (MRs) and the usual
+# security scans. On protected main, release-image builds the gateway image and ci/release.yml
+# signs it, publishes the gateway chart and opens the digest bump MR in manar-infra (ADR-0007).
 stages:
   - check
   - build
@@ -71,6 +71,33 @@ build:
       - bin
     expire_in: 1 week
 
+# The gateway image on every MR, so a broken Dockerfile, a lost file capability or a HIGH CVE in
+# the built binary fails before merge. Same BuildKit build as release-image; nothing is pushed.
+gateway-image:
+  stage: build
+  image:
+    name: docker.io/moby/buildkit:v0.31.2-rootless@sha256:0eeb84626c0cd01aecae7848c5ed8f095aec279dd936d0cdb5a64110f42ca65b
+    entrypoint: ['']
+  cache: []
+  variables:
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  needs: []
+  script:
+    - |
+      set -eu
+      mkdir -p "$HOME/bin" && export PATH="$HOME/bin:$PATH"
+      wget -q -O /tmp/trivy.tgz https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+      echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  /tmp/trivy.tgz" | sha256sum -c -
+      tar -xzf /tmp/trivy.tgz -C "$HOME/bin" trivy
+      buildctl-daemonless.sh build --progress plain --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=. --opt filename=Dockerfile \
+        --opt platform=linux/amd64 --opt build-arg:VERSION="$CI_COMMIT_SHORT_SHA" \
+        --output type=docker,name=manar-edge-gateway:ci,dest=/tmp/manar-edge-gateway.tar
+      ci/check-file-cap.sh /tmp/manar-edge-gateway.tar
+      trivy image --input /tmp/manar-edge-gateway.tar --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
+
 gitleaks:
   stage: security
   image:
@@ -138,6 +165,7 @@ release-image:
         --local context=. --local dockerfile=. --opt filename=Dockerfile "$@" \
         --output type=docker,name="$REF",dest="$TAR"
       SUM="$(sha256sum "$TAR" | cut -d' ' -f1)"
+      ci/check-file-cap.sh "$TAR"
       trivy image --input "$TAR" --format json --output "release-$IMAGE.trivy.json" --ignore-unfixed --no-progress
       trivy image --input "$TAR" --format cyclonedx --output "release-$IMAGE.cdx.json" --no-progress
       trivy image --input "$TAR" --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
