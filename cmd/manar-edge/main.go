@@ -2,17 +2,163 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
 	"os"
+	"strings"
 )
 
 var version = "dev"
 
+const usage = `usage:
+  manar-edge enroll --api <url> [--state-dir D]   (token on stdin or in MANAR_ENROLL_TOKEN)
+  manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
+  manar-edge down <agent> [--purge]
+  manar-edge run <agent> [--task <taskId>] -- <command> [args...]
+  manar-edge status [<agent>]
+  manar-edge hook claude-code <agent>
+  manar-edge install-claude-code <agent> [--force-coexist]
+  manar-edge version
+
+Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "version" {
-		fmt.Println(version)
-		return
+	args := os.Args[1:]
+	base := defaultStateBase
+	// A --state-dir before the subcommand applies to every subcommand.
+	if len(args) >= 2 && (args[0] == "--state-dir" || args[0] == "-state-dir") {
+		base, args = args[1], args[2:]
 	}
-	fmt.Fprintln(os.Stderr, "usage: manar-edge <enroll|up|down|run|status|hook|install-claude-code|version>")
-	os.Exit(2)
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(2)
+	}
+	cmd, rest := args[0], args[1:]
+	var err error
+	switch cmd {
+	case "version":
+		fmt.Println(version)
+	case "enroll":
+		if base != defaultStateBase {
+			rest = append([]string{"--state-dir", base}, rest...)
+		}
+		err = cmdEnroll(rest)
+	case "up":
+		err = cmdUp(base, rest)
+	case "down":
+		fs := flag.NewFlagSet("down", flag.ContinueOnError)
+		purge := fs.Bool("purge", false, "also delete the agent's home directory (Linux)")
+		var agent string
+		if agent, err = parseAgentFlags(fs, rest); err == nil {
+			err = cmdDown(base, agent, *purge)
+		}
+	case "run":
+		err = cmdRun(base, rest)
+	case "status":
+		if len(rest) > 1 {
+			err = errors.New("usage: manar-edge status [<agent>]")
+		} else {
+			err = cmdStatus(base, rest)
+		}
+	case "hook":
+		os.Exit(cmdHook(rest))
+	case "install-claude-code":
+		err = cmdInstallClaudeCode(base, rest)
+	case "gateway": // internal: started by the systemd unit or the Windows service
+		err = withAgent(rest, "gateway", func(a string) error { return runGatewayService(base, a) })
+	case "__jail-exec": // internal: the child `run` starts inside the jail (Linux)
+		err = jailExec(rest)
+	case "help", "-h", "--help":
+		fmt.Println(usage)
+	default:
+		fmt.Fprintln(os.Stderr, usage)
+		os.Exit(2)
+	}
+	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			os.Exit(2)
+		}
+		fmt.Fprintln(os.Stderr, "manar-edge:", err)
+		os.Exit(1)
+	}
+}
+
+func withAgent(args []string, cmd string, fn func(string) error) error {
+	if len(args) != 1 || strings.HasPrefix(args[0], "-") {
+		return fmt.Errorf("usage: manar-edge %s <agent>", cmd)
+	}
+	return fn(args[0])
+}
+
+type multiFlag []string
+
+func (m *multiFlag) String() string     { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error { *m = append(*m, v); return nil }
+
+// parseAgentFlags accepts `<agent>` before or after the flags.
+func parseAgentFlags(fs *flag.FlagSet, args []string) (string, error) {
+	var agent string
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		agent, args = args[0], args[1:]
+	}
+	if err := fs.Parse(args); err != nil {
+		return "", err
+	}
+	if agent == "" && fs.NArg() > 0 {
+		agent = fs.Arg(0)
+		if err := fs.Parse(fs.Args()[1:]); err != nil {
+			return "", err
+		}
+	}
+	if agent == "" {
+		return "", errors.New("missing <agent>")
+	}
+	return agent, nil
+}
+
+// agentEnv is the environment of a jailed agent: the caller's environment without credentials,
+// proxy settings or sudo variables, plus the Manar endpoints from the contract.
+func agentEnv(base []string, proxyAddr string) []string {
+	var env []string
+	for _, kv := range base {
+		k, _, _ := strings.Cut(kv, "=")
+		u := strings.ToUpper(k)
+		if strings.HasPrefix(u, "SUDO_") || strings.HasPrefix(u, "MANAR_") ||
+			strings.Contains(u, "KEY") || strings.Contains(u, "TOKEN") || strings.Contains(u, "SECRET") ||
+			strings.Contains(u, "PASSWORD") || strings.Contains(u, "CREDENTIAL") || strings.Contains(u, "PROXY") ||
+			strings.HasPrefix(u, "OPENAI_") || strings.HasPrefix(u, "ANTHROPIC_") ||
+			// host session sockets: none of them is reachable from the jail, and none should be
+			strings.HasPrefix(u, "DBUS_") || strings.HasPrefix(u, "SSH_A") || strings.HasPrefix(u, "XDG_RUNTIME") ||
+			u == "DISPLAY" || u == "WAYLAND_DISPLAY" || u == "GPG_AGENT_INFO" {
+			continue
+		}
+		env = append(env, kv)
+	}
+	proxy := "http://" + proxyAddr
+	return append(env,
+		"OPENAI_BASE_URL="+gatewayURL+"/v1", "OPENAI_API_KEY=manar",
+		"ANTHROPIC_BASE_URL="+gatewayURL, "ANTHROPIC_API_KEY=manar",
+		"MANAR_MCP_URL="+gatewayURL+"/mcp",
+		"HTTPS_PROXY="+proxy, "HTTP_PROXY="+proxy, "NO_PROXY=127.0.0.1,localhost",
+		"https_proxy="+proxy, "http_proxy="+proxy, "no_proxy=127.0.0.1,localhost",
+	)
+}
+
+// setEnv replaces or adds KEY=value entries.
+func setEnv(env []string, kvs ...string) []string {
+	var out []string
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		keep := true
+		for _, n := range kvs {
+			if strings.HasPrefix(n, k+"=") {
+				keep = false
+			}
+		}
+		if keep {
+			out = append(out, kv)
+		}
+	}
+	return append(out, kvs...)
 }

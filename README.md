@@ -14,6 +14,20 @@ Two binaries:
 - `manar-edge-gateway` (container, runs in the Manar cluster): the WireGuard server, the relay to
   manar-api's agent listener and the hostname-filtered egress proxy, kept in sync with manar-api.
 
+## Host quick start (Linux, as root)
+
+```bash
+manar-edge enroll --api https://manar.example        # paste <tenant>:<agent>:<secret> (hidden)
+manar-edge up <agent> --task <taskId>
+manar-edge install-claude-code <agent>               # optional: Claude Code hook and policy
+manar-edge run <agent> -- claude
+manar-edge status <agent>
+manar-edge down <agent> [--purge]
+```
+
+What the host binary enforces, the Claude Code policy it installs and the Windows limits are in
+[docs/host.md](docs/host.md).
+
 ## Build and test
 
 ```bash
