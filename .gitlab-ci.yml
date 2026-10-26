@@ -1,8 +1,14 @@
-# manar-edge: vet, tests, static builds for Linux and Windows, and the usual security scans.
+# manar-edge: vet, tests, static builds for Linux and Windows, and the usual security scans. On
+# protected main, release-image builds the gateway image and ci/release.yml signs it, publishes the
+# gateway chart and opens the digest bump MR in manar-infra (ADR-0007 there).
 stages:
   - check
   - build
   - security
+  - publish
+
+include:
+  - {project: manar/manar-infra, ref: main, file: ci/release.yml}
 
 workflow:
   rules:
@@ -16,6 +22,8 @@ default:
 variables:
   GOPATH: '$CI_PROJECT_DIR/.go'
   GOFLAGS: '-mod=readonly'
+  # Charts ci/release.yml packages, pushes and signs as OCI artifacts.
+  RELEASE_CHARTS: charts/manar-edge-gateway
 
 cache:
   key:
@@ -40,6 +48,17 @@ govulncheck:
   stage: check
   script:
     - go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+# The chart ci/release.yml publishes must lint and render with a digest-pinned image.
+chart:
+  stage: check
+  image:
+    name: docker.io/alpine/helm:3.19.0@sha256:aef9b56f64e866207d9591d0abd8f6d767b36aadd12edf68f8a719716d9d29c9
+    entrypoint: ['']
+  cache: []
+  script:
+    - helm lint charts/manar-edge-gateway --set image.repository=example/x --set image.digest=sha256:0
+    - helm template ci charts/manar-edge-gateway --set image.repository=example/x --set image.digest=sha256:0 >/dev/null
 
 build:
   stage: build
@@ -77,3 +96,62 @@ trivy-fs:
     entrypoint: ['']
   script:
     - trivy fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed --skip-dirs .go .
+
+# --- release (protected main only, runner manar-prod) ----------------------
+# Same job as manar-fleet and manar-web: on protected main, the protected runner (tag manar-prod)
+# rebuilds the gateway image from source, scans that exact tarball and pushes it, consuming no
+# artifact from any other job. release-publish (ci/release.yml) then signs it and attaches the
+# SBOM. Tool binaries are pinned by sha256.
+release-image:
+  stage: publish
+  inherit:
+    default: false
+  tags: [manar-prod]
+  image:
+    name: docker.io/moby/buildkit:v0.31.2-rootless@sha256:0eeb84626c0cd01aecae7848c5ed8f095aec279dd936d0cdb5a64110f42ca65b
+    entrypoint: ['']
+  interruptible: false
+  cache: []
+  variables:
+    BUILDKITD_FLAGS: --oci-worker-no-process-sandbox
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "push" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_COMMIT_REF_PROTECTED == "true"
+  dependencies: []
+  parallel:
+    matrix:
+      - {IMAGE: manar-edge-gateway, TARGET: '-'}
+  script:
+    - |
+      set -eu
+      mkdir -p "$HOME/bin" && export PATH="$HOME/bin:$PATH"
+      # Tool URLs and checksums are literals here, not variables, so a push option cannot swap them.
+      wget -q -O /tmp/trivy.tgz https://github.com/aquasecurity/trivy/releases/download/v0.74.0/trivy_0.74.0_Linux-64bit.tar.gz
+      echo "2ae6fe3ee734b7fdf11335663e18c75ea12dccc76062f09f164a3b0f8be4371a  /tmp/trivy.tgz" | sha256sum -c -
+      wget -q -O /tmp/crane.tgz https://github.com/google/go-containerregistry/releases/download/v0.22.1/go-containerregistry_Linux_x86_64.tar.gz
+      echo "0ab7a1d6932a213aed964ce97666c3077fe691c8606413674a8b3e0b9ec4cda0  /tmp/crane.tgz" | sha256sum -c -
+      tar -xzf /tmp/trivy.tgz -C "$HOME/bin" trivy && tar -xzf /tmp/crane.tgz -C "$HOME/bin" crane
+      REF="$CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA"
+      TAR="/tmp/release-$IMAGE.tar"
+      set -- --opt platform=linux/amd64 --opt build-arg:VERSION="$CI_COMMIT_SHORT_SHA"
+      if [ "$TARGET" != "-" ]; then set -- "$@" --opt target="$TARGET"; fi
+      buildctl-daemonless.sh build --progress plain --frontend dockerfile.v0 \
+        --local context=. --local dockerfile=. --opt filename=Dockerfile "$@" \
+        --output type=docker,name="$REF",dest="$TAR"
+      SUM="$(sha256sum "$TAR" | cut -d' ' -f1)"
+      trivy image --input "$TAR" --format json --output "release-$IMAGE.trivy.json" --ignore-unfixed --no-progress
+      trivy image --input "$TAR" --format cyclonedx --output "release-$IMAGE.cdx.json" --no-progress
+      trivy image --input "$TAR" --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
+      # Push exactly the bytes that were scanned.
+      echo "$SUM  $TAR" | sha256sum -c -
+      printf '%s' "$CI_REGISTRY_PASSWORD" | crane auth login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+      crane push "$TAR" "$REF" --image-refs "/tmp/$IMAGE.ref"
+      printf '%s %s tarball-sha256=%s scan=release-%s.trivy.json\n' "$IMAGE" "$(cat "/tmp/$IMAGE.ref")" "$SUM" "$IMAGE" \
+        | tee "published-$IMAGE.txt"
+  after_script:
+    - rm -f "$HOME/.docker/config.json"
+  artifacts:
+    paths:
+      - published-*.txt
+      - release-*.trivy.json
+      - release-*.cdx.json
+    expire_in: 90 days
