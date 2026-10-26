@@ -63,6 +63,7 @@ func secureMkdir(p string) error {
 
 // sh runs a command; its output is returned in the error only (no secrets go on these command lines).
 func sh(stdin string, name string, args ...string) error {
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (callers pass fixed program names)
 	cmd := exec.Command(name, args...)
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -819,6 +820,7 @@ func cmdRun(base string, args []string) error {
 		return fmt.Errorf("setns: %w", err)
 	}
 	f.Close()
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (re-exec of this binary; the command is the admin's own `run --` argv)
 	cmd := exec.Command(exe, append([]string{"__jail-exec", ns, strconv.Itoa(uid), strconv.Itoa(gid), path}, command...)...)
 	cmd.Env = env
 	// A new session always; on a terminal, a fresh pty becomes the agent's controlling terminal,

@@ -68,6 +68,7 @@ func wireguardExe() (string, error) {
 }
 
 func run(name string, args ...string) error {
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (callers pass the WireGuard path from ProgramFiles)
 	out, err := exec.Command(name, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%s %s: %v: %s", filepath.Base(name), strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -431,6 +432,7 @@ func cmdRun(base string, args []string) error {
 	if abs, err := filepath.Abs(path); err == nil && !slices.ContainsFunc(st.Programs, func(p string) bool { return strings.EqualFold(p, abs) }) {
 		fmt.Fprintf(os.Stderr, "warning: %s is not a confined program; add it with `manar-edge up %s --program %s`\n", abs, st.Name, abs)
 	}
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (the admin's own `run --` argv, by design)
 	cmd := exec.Command(path, command[1:]...)
 	cmd.Env = agentEnv(os.Environ(), st.Edge.ProxyAddress)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
