@@ -1,0 +1,20 @@
+{
+  "generator": "manar-api 81045a9: test/support/test-pki.ts + src/hosts/adcs/computer-proof.util.ts",
+  "input": {
+    "tenantSlug": "acme",
+    "machineId": "pc-01.lab",
+    "csrKeyFingerprint": "abababababababababababababababababababababababababababababababab",
+    "os": "Windows 10.0.20348",
+    "keyType": "SOFTWARE",
+    "timestamp": "2026-10-28T12:34:56.789Z"
+  },
+  "message": "manar-adcs-register-v2\nacme\npc-01.lab\nabababababababababababababababababababababababababababababababab\nWindows 10.0.20348\nSOFTWARE\n2026-10-28T12:34:56.789Z",
+  "rsa": {
+    "certPem": "-----BEGIN CERTIFICATE-----\nMIIC4zCCAcugAwIBAgIDCgsMMA0GCSqGSIb3DQEBCwUAMBUxEzARBgNVBAMTCkZp\neHR1cmUgQ0EwHhcNMjYxMDI3MTEyMTAxWhcNMjYxMTI3MTEyMTAxWjAcMRowGAYD\nVQQDExFwYzAxLmNvcnAuZXhhbXBsZTCCASIwDQYJKoZIhvcNAQEBBQADggEPADCC\nAQoCggEBAMgHXkeT0JO1CAYYbhxVib0UaAhH5vOeibAouxuZS5EWAebOgwRwKPEl\n4IEyCeC2o7qcRG/aNwikoI5t88e6pb2eANp5TC9TYsVsHPPjFv4KFQI6UXZ+xBdu\nTph7SngdAN/PoCXhhHfOSrglKw47ZmK314PIhOiD/7zh50vrhPZ++9RxlsJc/XBJ\n5TPQap/zAPsZYsgJHApJzUDBkg+IZaiGp11daAPSXL0rbcBiqwthrwn4xHbn8qOd\nQOsBxRYdxxoS5cTsxjAve6esBW1r9dLHLnI3v0Nv0EjtDSAv6EweAXifJeap/HZL\ntkX/98eliHKNcLRHX/9zvYmfV605oUkCAwEAAaM1MDMwHAYDVR0RBBUwE4IRcGMw\nMS5jb3JwLmV4YW1wbGUwEwYDVR0lBAwwCgYIKwYBBQUHAwIwDQYJKoZIhvcNAQEL\nBQADggEBAHYO2bc8z91KDtdo/Y3dNtpvFkTT9dfxPdX4ZEMM92Y8y3H7nbuyrrWY\no4/B9cDqJ35UAzCrqJdCTeM9ItyW5Wx2I24uNhwtX6f0oqNWalQmqhbBNRUAQzb2\nya5bxAymvlA6RlqkmnDJhdy6U2shNFPA2eXqrZk8TQsrcac4W5gQuF6wT4tLK5nP\n3vb5oLcrNDTPf6E19dJqNkw7/daZGuAhI8frnvb2H4N7bVo2GiVuItp6xPiNSDWH\n5kZF/5HKjCfZ+ThmDv6jo8IDUy0CxuQnUYmX51jQXEfiiFXCLd9aDys8zMQddsHX\nTnP3CD5meieXAWFeFm6Q+qDULKCDPqk=\n-----END CERTIFICATE-----",
+    "signature": "tMZMKEQm3jzTAFjWLZg+wKhcx8XhVfQp762P1r7CkzTWoj8WjRne3aIjPc8Ufn4541Ppv+BfzIcXebNne4Nqtd0TAP17+S4Vs6/enldapMPFP/vP59hArw135ThAY61Fsy8Q3MzPEePQkzCI1HcWOzd1q6vCP6Q2sblNf10BJFv17rQbrUbTnlvQ0590V1I6XwSYXnrgVm1IPqhcNgvyYiGVJweoH9SrNC/Srq96UUKbFhU11llMrGzH4bkhrORNmwYwbPurdwWeKNgALNzBc2KBRKnlOOnNe1x1hO3PfOAYMbfSQEz2qhZU8EO0XCLrh8BHUYYLgt0LkCMSpY8ZkA=="
+  },
+  "ec": {
+    "certPem": "-----BEGIN CERTIFICATE-----\nMIICGDCCAQCgAwIBAgIDCgsMMA0GCSqGSIb3DQEBCwUAMBUxEzARBgNVBAMTCkZp\neHR1cmUgQ0EwHhcNMjYxMDI3MTEyMTAxWhcNMjYxMTI3MTEyMTAxWjAcMRowGAYD\nVQQDExFwYzAxLmNvcnAuZXhhbXBsZTBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IA\nBE43dp96O72Xi0Ist8Hyn21TnEDkL1INKOEI0N4B+4YKKD57dezRZd/HpUzBugQ8\n5u5CaSNFyI/w49ajYpZaXgKjNTAzMBwGA1UdEQQVMBOCEXBjMDEuY29ycC5leGFt\ncGxlMBMGA1UdJQQMMAoGCCsGAQUFBwMCMA0GCSqGSIb3DQEBCwUAA4IBAQBTmFF8\nHZYFDNDXOZqWldjCjwbzDmW4EcW87IFSfO/uRoBiZohWvfQ4nBZoSbN0DqGPGxVg\n+IhbAsf8vmuqGCxH2FPlZpe4LGg13vAy43YHLOMaPygQFCvDhO7mL93j/tuzDHer\ngDQduaPRgbh6yTs1uWJ+NGNb8jCHhH4yT0NRI+cPe6/q8nYWRoBhQgH1psJ/Fxc2\nUgfr9rkyDaV+rfjUG959tGqVCiOMSMXsr6WMwWq+/ndjtxIpoVTHg4Obv0mNCBuN\n/fi4qAzA2lQZu8yLb9VuVsR7pMfMS6HHRUnEN7Hd7oOaeBlxcQMVoPHwZ4jZHAvr\nZ05rvLYxpS0Z/ZZ2\n-----END CERTIFICATE-----",
+    "signature": "MEYCIQDUmNrVGs1Av7d9gAuTmlD+0M1h5udvpwiVtGnSDNy5MQIhAMc69cPaGx5pxm00U48UeNpnBAa46Yzj4gJ1u4DDK39q"
+  }
+}
