@@ -5,16 +5,19 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/asn1"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
@@ -32,7 +35,6 @@ import (
 
 const (
 	softwareKSP    = "Microsoft Software Key Storage Provider"
-	hostKeyName    = "ManarEdgeHostKey"
 	ncryptMachine  = 0x20       // NCRYPT_MACHINE_KEY_FLAG
 	ntePExists     = 0x8009000F // NTE_EXISTS
 	nteBadKeyset   = 0x80090016 // NTE_BAD_KEYSET (key not found)
@@ -104,9 +106,9 @@ func (s *cngSigner) Sign(_ io.Reader, digest []byte, opts crypto.SignerOpts) ([]
 	return asn1.Marshal(struct{ R, S *big.Int }{new(big.Int).SetBytes(sig[:half]), new(big.Int).SetBytes(sig[half:])})
 }
 
-type winPlatform struct{}
+type winPlatform struct{ dir string } // dir: the protected host state dir
 
-func (winPlatform) machineID() (string, error) {
+func (w winPlatform) machineID() (string, error) {
 	k, err := registry.OpenKey(registry.LOCAL_MACHINE, `SOFTWARE\Microsoft\Cryptography`, registry.QUERY_VALUE|registry.WOW64_64KEY)
 	if err != nil {
 		return "", fmt.Errorf("reading MachineGuid: %w", err)
@@ -119,7 +121,7 @@ func (winPlatform) machineID() (string, error) {
 	return v, nil
 }
 
-func (winPlatform) osName() string {
+func (w winPlatform) osName() string {
 	v := windows.RtlGetVersion()
 	return fmt.Sprintf("Windows %d.%d.%d", v.MajorVersion, v.MinorVersion, v.BuildNumber)
 }
@@ -171,7 +173,7 @@ func keyOK(c *x509.Certificate) bool {
 	return false
 }
 
-func (winPlatform) computerCert(issuer string) ([]string, crypto.Signer, error) {
+func (w winPlatform) computerCert(issuer string) ([]string, crypto.Signer, error) {
 	my, err := openMachineStore("MY")
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening LocalMachine\\My: %w", err)
@@ -197,7 +199,7 @@ func (winPlatform) computerCert(issuer string) ([]string, crypto.Signer, error) 
 			continue // no private key, or not reachable
 		}
 		fmt.Fprintf(os.Stderr, "computer certificate: %s, issued by %s, serial %s\n",
-			sc.cert.DNSNames[0], sc.cert.Issuer.String(), sc.cert.SerialNumber.Text(16))
+			sc.cert.DNSNames[0], sc.cert.Issuer.CommonName, sc.cert.SerialNumber.Text(16))
 		chain := []string{certPEM(sc.cert)}
 		for _, ic := range intermediates(sc.cert) {
 			chain = append(chain, certPEM(ic))
@@ -238,30 +240,132 @@ func certPEM(c *x509.Certificate) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw}))
 }
 
-// hostKey opens the persisted machine key, creating an ECDSA P-256 key on first use.
-func (winPlatform) hostKey() (crypto.Signer, error) {
+const (
+	hostKeyNameFile = "host-key-name"
+	// Only SYSTEM and Administrators may use the host key.
+	hostKeySDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+	secDacl     = 0x4 // DACL_SECURITY_INFORMATION
+	secOwner    = 0x1 // OWNER_SECURITY_INFORMATION
+)
+
+var (
+	pGetProperty = ncrypt.NewProc("NCryptGetProperty")
+	pSetProperty = ncrypt.NewProc("NCryptSetProperty")
+)
+
+func getProp(key uintptr, name string, flags uintptr) ([]byte, error) {
+	n16, _ := windows.UTF16PtrFromString(name)
+	var n uint32
+	if r, _, _ := pGetProperty.Call(key, uintptr(unsafe.Pointer(n16)), 0, 0, uintptr(unsafe.Pointer(&n)), flags); r != 0 {
+		return nil, status("NCryptGetProperty "+name, r)
+	}
+	buf := make([]byte, n)
+	if r, _, _ := pGetProperty.Call(key, uintptr(unsafe.Pointer(n16)), uintptr(unsafe.Pointer(&buf[0])), uintptr(n), uintptr(unsafe.Pointer(&n)), flags); r != 0 {
+		return nil, status("NCryptGetProperty "+name, r)
+	}
+	return buf[:n], nil
+}
+
+func setProp(key uintptr, name string, val []byte, flags uintptr) error {
+	n16, _ := windows.UTF16PtrFromString(name)
+	r, _, _ := pSetProperty.Call(key, uintptr(unsafe.Pointer(n16)), uintptr(unsafe.Pointer(&val[0])), uintptr(len(val)), flags)
+	return status("NCryptSetProperty "+name, r)
+}
+
+func systemOrAdmins(sid *windows.SID) bool {
+	return sid != nil && (sid.IsWellKnown(windows.WinLocalSystemSid) || sid.IsWellKnown(windows.WinBuiltinAdministratorsSid))
+}
+
+// checkHostKey refuses a key that is exportable or that anyone other than SYSTEM and
+// Administrators owns or may use.
+func checkHostKey(key uintptr) error {
+	ep, err := getProp(key, "Export Policy", 0)
+	if err != nil || len(ep) < 4 || binary.LittleEndian.Uint32(ep) != 0 {
+		return errors.New("host key is exportable or its export policy cannot be read; refusing to use it")
+	}
+	raw, err := getProp(key, "Security Descr", secOwner|secDacl)
+	if err != nil {
+		return err
+	}
+	sd := (*windows.SECURITY_DESCRIPTOR)(unsafe.Pointer(&raw[0]))
+	owner, _, err := sd.Owner()
+	if err != nil || !systemOrAdmins(owner) {
+		return errors.New("host key is not owned by SYSTEM or Administrators; refusing to use it")
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return errors.New("host key has no access list; refusing to use it")
+	}
+	for i := uint32(0); i < uint32(dacl.AceCount); i++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, i, &ace); err != nil {
+			return err
+		}
+		if ace.Header.AceType == windows.ACCESS_ALLOWED_ACE_TYPE && !systemOrAdmins((*windows.SID)(unsafe.Pointer(&ace.SidStart))) {
+			return errors.New("host key can be used by a principal other than SYSTEM and Administrators; refusing to use it")
+		}
+	}
+	return nil
+}
+
+// hostKey opens this machine's host key, creating it on first use. Its name is random and kept in
+// the protected state dir, so a local user cannot pre-create a key under a name we would pick up;
+// the key is created non-exportable with an access list for SYSTEM and Administrators only, and
+// every open re-checks both.
+func (w winPlatform) hostKey() (crypto.Signer, error) {
+	if err := secureMkdir(filepath.Dir(w.dir)); err != nil {
+		return nil, err
+	}
+	if err := secureMkdir(w.dir); err != nil {
+		return nil, err
+	}
 	var prov uintptr
-	name, _ := windows.UTF16PtrFromString(softwareKSP)
-	r, _, _ := pOpenProvider.Call(uintptr(unsafe.Pointer(&prov)), uintptr(unsafe.Pointer(name)), 0)
+	pn, _ := windows.UTF16PtrFromString(softwareKSP)
+	r, _, _ := pOpenProvider.Call(uintptr(unsafe.Pointer(&prov)), uintptr(unsafe.Pointer(pn)), 0)
 	if err := status("NCryptOpenStorageProvider", r); err != nil {
 		return nil, err
 	}
-	kn, _ := windows.UTF16PtrFromString(hostKeyName)
 	var key uintptr
-	r, _, _ = pOpenKey.Call(prov, uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(kn)), 0, ncryptMachine)
-	if r != 0 {
-		if uint32(r) != nteBadKeyset && uint32(r) != nteNoKey {
+	namePath := filepath.Join(w.dir, hostKeyNameFile)
+	if b, err := os.ReadFile(namePath); err == nil {
+		kn, _ := windows.UTF16PtrFromString(strings.TrimSpace(string(b)))
+		r, _, _ = pOpenKey.Call(prov, uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(kn)), 0, ncryptMachine)
+		if r != 0 && uint32(r) != nteBadKeyset && uint32(r) != nteNoKey {
 			return nil, status("NCryptOpenKey", r)
 		}
+	}
+	if key == 0 {
+		var rnd [12]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return nil, err
+		}
+		name := "ManarEdgeHost-" + hex.EncodeToString(rnd[:])
+		kn, _ := windows.UTF16PtrFromString(name)
 		alg, _ := windows.UTF16PtrFromString("ECDSA_P256")
 		r, _, _ = pCreateKey.Call(prov, uintptr(unsafe.Pointer(&key)), uintptr(unsafe.Pointer(alg)), uintptr(unsafe.Pointer(kn)), 0, ncryptMachine)
 		if err := status("NCryptCreatePersistedKey", r); err != nil {
+			return nil, err
+		}
+		if err := setProp(key, "Export Policy", []byte{0, 0, 0, 0}, 0); err != nil {
+			return nil, err
+		}
+		sd, err := windows.SecurityDescriptorFromString(hostKeySDDL)
+		if err != nil {
+			return nil, err
+		}
+		if err := setProp(key, "Security Descr", unsafe.Slice((*byte)(unsafe.Pointer(sd)), sd.Length()), secDacl); err != nil {
 			return nil, err
 		}
 		r, _, _ = pFinalizeKey.Call(key, 0)
 		if err := status("NCryptFinalizeKey", r); err != nil {
 			return nil, err
 		}
+		if err := writePrivate(namePath, []byte(name+"\n")); err != nil {
+			return nil, err
+		}
+	}
+	if err := checkHostKey(key); err != nil {
+		return nil, err
 	}
 	blobType, _ := windows.UTF16PtrFromString("ECCPUBLICBLOB")
 	blob := make([]byte, 8+64)
@@ -278,5 +382,5 @@ func (winPlatform) hostKey() (crypto.Signer, error) {
 }
 
 func cmdEnrolHost(base string, args []string) error {
-	return cmdHostEnrol(base, args, winPlatform{}, os.Stdout)
+	return cmdHostEnrol(base, args, winPlatform{filepath.Join(base, hostStateDir)}, os.Stdout)
 }

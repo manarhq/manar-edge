@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -177,6 +178,7 @@ func cmdHostEnrol(base string, args []string, p hostPlatform, out io.Writer) err
 	tenant := fs.String("tenant", "", "tenant slug")
 	machine := fs.String("machine-id", "", "machine id (default: the Windows MachineGuid)")
 	issuer := fs.String("issuer", "", "only use a computer certificate whose issuer contains this text")
+	plainHTTP := fs.Bool("allow-http", false, "lab only: allow an http:// server (the request carries a signed proof and public certificates, no secret)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -190,6 +192,12 @@ func cmdHostEnrol(base string, args []string, p hostPlatform, out io.Writer) err
 		return err
 	}
 	api, err := checkAPIURL(*server)
+	if err != nil && *plainHTTP {
+		if u, perr := url.Parse(strings.TrimRight(*server, "/")); perr == nil && u.Scheme == "http" && u.Host != "" {
+			api, err = u, nil
+			fmt.Fprintln(os.Stderr, "warning: --allow-http: the registration is sent in clear text")
+		}
+	}
 	if err != nil {
 		return err
 	}

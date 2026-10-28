@@ -173,8 +173,10 @@ Contract: manar-api `docs/hosts.md`, "Key-less enrolment with an AD CS computer 
 1. Find the computer certificate in `LocalMachine\My`: not self-signed, Client Authentication EKU,
    in date, a DNS SAN, RSA 2048+ or P-256/P-384, and a private key. `--issuer` narrows by issuer
    text. The newest match wins. Intermediates come from `LocalMachine\CA`; the root is not sent.
-2. Host key: ECDSA P-256, persisted as machine key `ManarEdgeHostKey` in the Microsoft Software Key
-   Storage Provider, non-exportable. It is a software key: the request says `keyType: SOFTWARE`, there
+2. Host key: ECDSA P-256, persisted as a machine key in the Microsoft Software Key Storage Provider under a random
+   name kept in the protected state dir (`host-key-name`), so a local user cannot pre-create it. It is
+   created non-exportable with an access list for SYSTEM and Administrators only, and every run checks
+   the owner, access list and export policy again and refuses a key that fails. It is a software key: the request says `keyType: SOFTWARE`, there
    is no TPM key and no attestation yet. The same key is reused on later runs, so re-enrolling is not
    a rekey.
 3. CSR for the host key, SAN URI `host://<tenant>/<machineId>` only.
