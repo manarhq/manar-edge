@@ -13,6 +13,7 @@ var version = "dev"
 
 const usage = `usage:
   manar-edge enroll --api <url> [--state-dir D]   (token on stdin or in MANAR_ENROLL_TOKEN)
+  manar-edge enrol --server <url> --tenant <slug> [--machine-id ID]   (Windows, domain-joined: computer certificate)
   manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
   manar-edge down <agent> [--purge]
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
@@ -44,6 +45,8 @@ func main() {
 			rest = append([]string{"--state-dir", base}, rest...)
 		}
 		err = cmdEnroll(rest)
+	case "enrol":
+		err = cmdEnrolHost(base, rest)
 	case "up":
 		err = cmdUp(base, rest)
 	case "down":

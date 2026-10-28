@@ -161,6 +161,36 @@ manar-edge version
 as manar-agents and sdk-node), generate a WireGuard key pair, call `/agents/enroll` with `edge`,
 store key, cert, CA chain, WireGuard key and the `edge` response in the state dir (0600).
 
+### Machine enrolment with the AD CS computer certificate (Windows, `enrol`)
+
+```
+manar-edge enrol --server https://<api> --tenant <slug> [--machine-id ID] [--issuer TEXT] [--state-dir D]
+```
+
+Contract: manar-api `docs/hosts.md`, "Key-less enrolment with an AD CS computer certificate"
+(`POST /hosts/register/adcs`). Run as Administrator on a domain-joined machine.
+
+1. Find the computer certificate in `LocalMachine\My`: not self-signed, Client Authentication EKU,
+   in date, a DNS SAN, RSA 2048+ or P-256/P-384, and a private key. `--issuer` narrows by issuer
+   text. The newest match wins. Intermediates come from `LocalMachine\CA`; the root is not sent.
+2. Host key: ECDSA P-256, persisted as machine key `ManarEdgeHostKey` in the Microsoft Software Key
+   Storage Provider, non-exportable. It is a software key: the request says `keyType: SOFTWARE`, there
+   is no TPM key and no attestation yet. The same key is reused on later runs, so re-enrolling is not
+   a rekey.
+3. CSR for the host key, SAN URI `host://<tenant>/<machineId>` only.
+4. Proof: the computer certificate's key signs
+   `manar-adcs-register-v2\n<tenant>\n<machineId>\n<SHA-256 of the CSR SPKI, hex>\n<os>\nSOFTWARE\n<ISO time>`
+   (SHA-256; RSA PKCS#1 v1.5 or ECDSA DER). The key is non-exportable, so the signature is made by
+   CNG (`NCryptSignHash`) through `CryptAcquireCertificatePrivateKey`.
+5. `machineId` is the `MachineGuid` registry value (`HKLM\SOFTWARE\Microsoft\Cryptography`) unless
+   `--machine-id` is given. It is stable across reboots and changes when Windows is reinstalled; a
+   machine cloned from an image without sysprep shares it, so give such machines an explicit id.
+   `os` is `Windows <major>.<minor>.<build>`.
+6. POST, then save `host.cert.pem`, `host-ca.pem` and `host.json` under `<state-dir>\host\` and print
+   the host id and status (`PENDING` waits for an admin; `APPROVED` was auto-approved by a rule).
+   `401` means the certificate was not accepted (CA, template, revocation, proof); `409` means the
+   machine is known with another key or group and an admin must approve the change.
+
 ### Linux jail (`up`)
 
 1. Create system user `manar-<name>` (no login shell, no home) if missing.
