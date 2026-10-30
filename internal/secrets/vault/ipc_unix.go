@@ -20,7 +20,7 @@ func dialDaemon(timeout time.Duration) (io.ReadWriteCloser, error) {
 }
 
 // Serve answers helper calls until ctx ends.
-func Serve(ctx context.Context, b *Broker) error {
+func Serve(ctx context.Context, b *Broker, env Env) error {
 	if err := os.MkdirAll(filepath.Dir(SocketPath), 0o755); err != nil {
 		return err
 	}
@@ -42,11 +42,12 @@ func Serve(ctx context.Context, b *Broker) error {
 		go func() {
 			defer c.Close()
 			_ = c.SetDeadline(time.Now().Add(5 * time.Minute))
-			pid := peerPID(c)
+			pid, uid := peerCred(c)
 			if pid <= 0 {
 				return
 			}
-			handleConn(ctx, c, pid, b, parentExe)
+			peer := Peer{PID: pid, Owner: "u" + itoa(uid), Admin: uid == 0}
+			handleConn(ctx, c, peer, b, env)
 		}()
 	}
 }

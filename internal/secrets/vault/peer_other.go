@@ -4,4 +4,4 @@ package vault
 
 import "net"
 
-func peerPID(net.Conn) int { return 0 } // no helper channel on this OS
+func peerCred(net.Conn) (int, int) { return 0, -1 } // no helper channel on this OS

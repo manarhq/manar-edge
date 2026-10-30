@@ -14,7 +14,9 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
 )
 
-func cleanupPlatform(ctx context.Context) error { return RestoreAudit(execRunner(ctx), stateFile()) }
+func cleanupPlatform(ctx context.Context) error {
+	return RestoreAudit(execRunner(ctx), systemPolicy{}, stateFile())
+}
 
 // secretFiles lists existing secret files in the target directories plus discovered .env files.
 func secretFiles() []string {
@@ -38,7 +40,7 @@ func secretFiles() []string {
 // ponytail: wevtutil polling every 3 s; switch to EvtSubscribe if event latency matters.
 func runPlatform(ctx context.Context, out chan<- Event, _ bool) bool {
 	run := execRunner(ctx)
-	if _, err := EnableAudit(run, stateFile(), secretFiles()); err != nil {
+	if _, err := EnableAudit(run, systemPolicy{}, stateFile(), secretFiles()); err != nil {
 		log.Printf("manar-edge: secrets watcher unavailable: %v", err)
 		notice(out, TypeUnavailable)
 		<-ctx.Done()
@@ -56,7 +58,7 @@ func runPlatform(ctx context.Context, out chan<- Event, _ bool) bool {
 		case <-ctx.Done():
 			return false
 		case <-rescan.C:
-			_, _ = EnableAudit(run, stateFile(), secretFiles())
+			_, _ = EnableAudit(run, systemPolicy{}, stateFile(), secretFiles())
 		case <-poll.C:
 			raw, err := run("wevtutil", query4663Args(since)...)
 			if err != nil {

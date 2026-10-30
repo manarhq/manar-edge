@@ -2,12 +2,9 @@
 
 package vault
 
-import "os/exec"
+// The Windows ssh vault stays off. ssh-add run by the service (SYSTEM) would load the key into
+// SYSTEM's agent store, not the signed-in user's, and the key file would then be deleted. It
+// needs a process started with the user's session token; until that exists the vault refuses ssh.
+func platformAgent() Agent { return nil }
 
-func platformAgent() Agent { return ExecAgent{} }
-
-// ensureAgent starts the OpenSSH Authentication Agent service and sets it to start at boot.
-func ensureAgent() {
-	_ = exec.Command("powershell", "-NoProfile", "-NonInteractive", "-Command",
-		"Set-Service ssh-agent -StartupType Automatic; Start-Service ssh-agent").Run()
-}
+func ensureAgent() {}

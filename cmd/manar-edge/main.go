@@ -22,6 +22,7 @@ const usage = `usage:
   manar-edge uninstall   (stop the service, restore what Manar changed, remove its files)
   manar-edge service run|install|remove
   manar-edge secret aws <profile>   (credential_process helper for vaulted AWS keys)
+  manar-edge secret restore --all   (administrator: put every vaulted secret back in its file)
   manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
   manar-edge down <agent> [--purge]
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
@@ -71,10 +72,13 @@ func main() {
 	case "warden":
 		err = cmdWarden(base, rest)
 	case "secret":
-		if len(rest) != 2 || rest[0] != "aws" {
-			err = errors.New("usage: manar-edge secret aws <profile>")
-		} else {
+		switch {
+		case len(rest) == 2 && rest[0] == "aws":
 			err = vault.RunHelper(rest[0], rest[1], os.Stdout)
+		case len(rest) == 2 && rest[0] == "restore" && rest[1] == "--all":
+			err = cmdSecretRestoreAll()
+		default:
+			err = errors.New("usage: manar-edge secret aws <profile> | secret restore --all")
 		}
 	case "up":
 		err = cmdUp(base, rest)

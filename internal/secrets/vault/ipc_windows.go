@@ -37,7 +37,7 @@ func dialDaemon(timeout time.Duration) (io.ReadWriteCloser, error) {
 }
 
 // Serve answers helper calls over the named pipe until ctx ends.
-func Serve(ctx context.Context, b *Broker) error {
+func Serve(ctx context.Context, b *Broker, env Env) error {
 	sd, err := windows.SecurityDescriptorFromString(pipeSDDL)
 	if err != nil {
 		return err
@@ -78,6 +78,7 @@ func Serve(ctx context.Context, b *Broker) error {
 			return err
 		}
 		go func() {
+			// One owner for the handle, closed once here: no os.File wraps it.
 			defer func() {
 				_ = windows.FlushFileBuffers(cur)
 				_ = windows.DisconnectNamedPipe(cur)
@@ -87,7 +88,32 @@ func Serve(ctx context.Context, b *Broker) error {
 			if windows.GetNamedPipeClientProcessId(cur, &pid) != nil || pid == 0 {
 				return
 			}
-			handleConn(ctx, os.NewFile(uintptr(cur), pipeName), int(pid), b, parentExe)
+			owner, admin, err := peerOf(pid)
+			if err != nil {
+				return
+			}
+			handleConn(ctx, pipeRW{cur}, Peer{PID: int(pid), Owner: owner, Admin: admin}, b, env)
 		}()
 	}
+}
+
+// pipeRW reads and writes a pipe handle directly.
+type pipeRW struct{ h windows.Handle }
+
+func (p pipeRW) Read(b []byte) (int, error) {
+	var n uint32
+	err := windows.ReadFile(p.h, b, &n, nil)
+	if n > 0 {
+		return int(n), nil
+	}
+	if err != nil {
+		return 0, io.EOF
+	}
+	return 0, nil
+}
+
+func (p pipeRW) Write(b []byte) (int, error) {
+	var n uint32
+	err := windows.WriteFile(p.h, b, &n, nil)
+	return int(n), err
 }

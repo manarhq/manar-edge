@@ -64,7 +64,7 @@ func engineFor(src Source, procs fakeProcs, block bool) (*Engine, chan Event) {
 }
 
 var treeCursorAndTerminal = fakeProcs{
-	10: {PID: 10, PPID: 1, Exe: "/opt/Cursor/cursor", Cmdline: []string{"cursor", "--type=extensionHost"}},
+	10: {PID: 10, PPID: 1, Exe: "/home/alice/.local/share/cursor-agent/cursor-agent", Cmdline: []string{"cursor-agent"}},
 	11: {PID: 11, PPID: 10, Exe: "/bin/sh", Cmdline: []string{"sh", "-c", "cat"}, TTY: true},
 	12: {PID: 12, PPID: 11, Exe: "/usr/bin/cat"},
 	20: {PID: 20, PPID: 10, Exe: "/bin/bash", Cmdline: []string{"bash"}, TTY: true},

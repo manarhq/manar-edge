@@ -18,11 +18,16 @@ const (
 	Deny        Decision = "DENY"
 )
 
-// Request is a program asking for a vaulted secret.
+// Request is a program asking for a vaulted secret. Owner is the user the request comes from
+// (the OS says so, the caller cannot claim it); a vault entry belongs to one owner and is
+// never released to another. Program and SHA name the requesting binary: its full path and the
+// SHA-256 of the file as it was read through the pinned process.
 type Request struct {
 	Kind    string
 	Ref     string
-	Program string // path of the requesting executable; "" when it could not be found
+	Owner   string
+	Program string
+	SHA     string
 }
 
 // Approver asks the person. WARDEN's prompt replaces the console approval path by supplying
@@ -36,15 +41,22 @@ type grant struct {
 	Always bool      `json:"always,omitempty"`
 }
 
+type flight struct {
+	done chan struct{}
+	d    Decision
+}
+
 // Broker releases vaulted secrets: a standing grant, or an answer from the Approver. It never
-// releases on an error.
+// releases on an error. Prompts for different programs wait side by side; the lock is never
+// held while a person is asked.
 type Broker struct {
 	V        *Vault
 	A        Approver
 	Now      func() time.Time
 	OnDenied func(Request) // optional: reported to Manar
 
-	mu sync.Mutex // one prompt at a time; parallel calls for the same program then use its grant
+	mu       sync.Mutex
+	inflight map[string]*flight
 }
 
 func (b *Broker) now() time.Time {
@@ -54,8 +66,10 @@ func (b *Broker) now() time.Time {
 	return time.Now()
 }
 
+// The grant belongs to the owner, the secret, and the exact binary (path and hash): a changed
+// binary asks again.
 func grantKey(r Request) string {
-	return sum([]byte(r.Kind + "\x00" + r.Ref + "\x00" + r.Program))[:24]
+	return sum([]byte(r.Owner + "\x00" + r.Kind + "\x00" + r.Ref + "\x00" + r.Program + "\x00" + r.SHA))[:24]
 }
 
 func (b *Broker) grants() map[string]grant {
@@ -71,37 +85,70 @@ func (b *Broker) saveGrants(m map[string]grant) error {
 	return b.V.Store.Put("grants", raw)
 }
 
+var errNotAllowed = errors.New("Manar: access to this secret was not allowed")
+
 // Credential returns the secret for a request, or an error.
 func (b *Broker) Credential(ctx context.Context, r Request) ([]byte, error) {
-	if r.Kind != "aws" {
-		return nil, errors.New("unsupported secret kind")
+	if r.Kind != "aws" || r.Owner == "" {
+		return nil, errors.New("unsupported secret request")
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	if _, err := b.V.Entry(r.Owner, r.Kind, r.Ref); err != nil {
+		return nil, errors.New("no such secret in the vault for you")
+	}
 	key := grantKey(r)
+	b.mu.Lock()
 	g, ok := b.grants()[key]
-	allowed := r.Program != "" && ok && (g.Always || b.now().Before(g.Until))
-	if !allowed {
-		d, err := b.A.Ask(ctx, r)
-		if err != nil {
-			d = Deny
+	if r.Program != "" && r.SHA != "" && ok && (g.Always || b.now().Before(g.Until)) {
+		b.mu.Unlock()
+		return b.V.AWSCredentialProcess(r.Owner, r.Ref)
+	}
+	if f, running := b.inflight[key]; running { // the same program is already being asked
+		b.mu.Unlock()
+		select {
+		case <-f.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
-		switch {
-		case d == Deny || (d != AllowOnce && d != Allow8h && d != AllowAlways):
-			if b.OnDenied != nil {
-				b.OnDenied(r)
-			}
-			return nil, errors.New("Manar: access to this secret was not allowed")
-		case r.Program == "": // never keep a standing grant for a program we could not identify
-		case d == Allow8h:
+		if f.d == Deny || f.d == "" {
+			return nil, errNotAllowed
+		}
+		return b.V.AWSCredentialProcess(r.Owner, r.Ref)
+	}
+	f := &flight{done: make(chan struct{})}
+	if b.inflight == nil {
+		b.inflight = map[string]*flight{}
+	}
+	b.inflight[key] = f
+	b.mu.Unlock()
+
+	d, err := b.A.Ask(ctx, r) // no lock held while the person decides
+	if err != nil || (d != AllowOnce && d != Allow8h && d != AllowAlways) {
+		d = Deny
+	}
+
+	b.mu.Lock()
+	if r.Program != "" && r.SHA != "" { // never keep a standing grant for a binary we could not pin
+		switch d {
+		case Allow8h:
 			m := b.grants()
 			m[key] = grant{Until: b.now().Add(8 * time.Hour)}
 			_ = b.saveGrants(m)
-		case d == AllowAlways:
+		case AllowAlways:
 			m := b.grants()
 			m[key] = grant{Always: true}
 			_ = b.saveGrants(m)
 		}
 	}
-	return b.V.AWSCredentialProcess(r.Ref)
+	f.d = d
+	delete(b.inflight, key)
+	close(f.done)
+	b.mu.Unlock()
+
+	if d == Deny {
+		if b.OnDenied != nil {
+			b.OnDenied(r)
+		}
+		return nil, errNotAllowed
+	}
+	return b.V.AWSCredentialProcess(r.Owner, r.Ref)
 }

@@ -42,8 +42,8 @@ func TestFanotifyDeniesAIToolAllowsOthers(t *testing.T) {
 	if err := exec.Command("/bin/cat", cred).Run(); err != nil {
 		t.Fatalf("plain cat must be allowed: %v", err)
 	}
-	// Name the executable path like Cursor's so the catalogue matches.
-	dir := filepath.Join(t.TempDir(), "cursor")
+	// Name the executable path like the Cursor agent's so the catalogue matches.
+	dir := filepath.Join(t.TempDir(), ".local", "share", "cursor-agent")
 	_ = os.MkdirAll(dir, 0o755)
 	fake := filepath.Join(dir, "cat")
 	b, _ := os.ReadFile("/bin/cat")

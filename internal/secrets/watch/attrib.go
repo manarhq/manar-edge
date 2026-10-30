@@ -1,6 +1,7 @@
 package watch
 
 import (
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -20,34 +21,47 @@ type ProcSource interface {
 	Get(pid int) (Proc, error)
 }
 
-// Tool is one entry of the AI tool catalogue, matched against the executable path and command
-// line. Block says whether the open may be denied (Linux): false for tools that are also the
-// user's own editor, and for tools that are governed through a hook.
+// Tool is one entry of the AI tool catalogue. It is matched on the executable's install path,
+// never on arguments, with one exception: a script-run CLI (node, bun, python) is recognised by
+// the path of its script (argv[1]), and is only ever reported.
+//
+// Patterns work on the lower-case, slash-normalised path: "^x" must start with x, "$x" must end
+// with x, otherwise x must be a piece of the path made of whole folder names.
+//
+// Block says whether the open may be denied (Linux). It is true only for processes that belong to
+// an AI agent alone: its desktop app and its stand-alone CLI. Editors (Cursor, Windsurf, VS Code)
+// are the person's own tools: the git and ssh they run for the person must keep working, so they
+// are reported, never denied. Claude Code is governed through its hook.
+//
+// Limit worth knowing: a process can make itself look like a person's terminal (a pty with an
+// interactive shell), and the watcher then treats it as the person. That is why this is policy for
+// honest tools, not a security boundary against a hostile one.
 type Tool struct {
-	ID    string
-	Match []string // lower-case substrings of "exe cmdline"
-	Block bool
+	ID     string
+	Exe    []string
+	Script []string
+	Block  bool
 }
+
+var interpreters = map[string]bool{"node": true, "nodejs": true, "bun": true, "deno": true, "python": true, "python3": true}
 
 // Catalogue is the discovery catalogue as the watcher sees processes. The ids are the shared
 // tool ids (src/tools/host-actions.ts in manar-api).
 //
-// ponytail: substring matching on exe and command line; add exact install-path matching from the
-// discovery package when it exposes the paths.
+// ponytail: install-path patterns for the usual locations; add exact paths from the discovery
+// package when it exposes them.
 var Catalogue = []Tool{
-	// Governed through its PreToolUse hook: the hook asks, so the open is never denied here.
-	{ID: "host.claude-code", Match: []string{"/claude-code/", "@anthropic-ai/claude-code", "/bin/claude ", "/.claude/local/", `\claude-code\`}, Block: false},
-	{ID: "host.claude-desktop", Match: []string{"/claude-desktop", "/anthropic-claude", `\anthropicclaude\`, `\claude\claude.exe`, "/claude.app/"}, Block: true},
-	{ID: "host.cursor", Match: []string{"/cursor/", "/cursor-agent", `\cursor\`, "/cursor.app/", "/.cursor-server/", "cursor-agent"}, Block: true},
-	{ID: "host.windsurf", Match: []string{"/windsurf", `\windsurf\`, "/.windsurf-server/", "codeium"}, Block: true},
-	// Copilot's own agent processes can be denied; the editor itself is the user's, so it is only
-	// reported.
-	{ID: "host.vscode-copilot", Match: []string{"copilot-agent", "copilot-language-server", "github.copilot"}, Block: true},
-	{ID: "host.vscode-copilot", Match: []string{"/code/", "/visual studio code/", `\microsoft vs code\`, "/.vscode-server/", "/code-insiders"}, Block: false},
-	{ID: "host.copilot-cli", Match: []string{"@github/copilot", "/gh-copilot", "/copilot-cli", "github-copilot-cli"}, Block: true},
-	{ID: "host.codex-cli", Match: []string{"@openai/codex", "/codex-cli", "/bin/codex "}, Block: true},
-	{ID: "host.chatgpt-desktop", Match: []string{"/chatgpt", `\chatgpt\`, "/chatgpt.app/"}, Block: true},
-	{ID: "host.gemini-cli", Match: []string{"@google/gemini-cli", "/gemini-cli", "/bin/gemini "}, Block: true},
+	{ID: "host.claude-code", Script: []string{"/@anthropic-ai/claude-code/"}, Exe: []string{"/.local/share/claude/versions/"}},
+	{ID: "host.claude-desktop", Block: true, Exe: []string{"^/opt/claude/", "^/usr/lib/claude-desktop/", "/anthropicclaude/", "/appdata/local/programs/claude/", "^/applications/claude.app/"}},
+	{ID: "host.cursor", Block: true, Exe: []string{"$/cursor-agent", "/.local/share/cursor-agent/"}},
+	{ID: "host.cursor", Exe: []string{"^/opt/cursor/", "^/usr/share/cursor/", "/.cursor-server/", "/appdata/local/programs/cursor/", "^/applications/cursor.app/"}},
+	{ID: "host.windsurf", Exe: []string{"^/opt/windsurf/", "/.windsurf-server/", "/appdata/local/programs/windsurf/", "^/applications/windsurf.app/"}},
+	{ID: "host.vscode-copilot", Exe: []string{"^/usr/share/code/", "^/opt/visual-studio-code/", "/.vscode-server/", "/microsoft vs code/", "^/applications/visual studio code.app/", "/.vscode/extensions/github.copilot"}},
+	{ID: "host.copilot-cli", Script: []string{"/@github/copilot/"}, Exe: []string{"/@github/copilot/"}},
+	{ID: "host.codex-cli", Block: true, Exe: []string{"/@openai/codex/"}},
+	{ID: "host.codex-cli", Script: []string{"/@openai/codex/"}},
+	{ID: "host.chatgpt-desktop", Block: true, Exe: []string{"^/opt/chatgpt/", "/appdata/local/programs/chatgpt/", "/windowsapps/openai.chatgpt", "^/applications/chatgpt.app/"}},
+	{ID: "host.gemini-cli", Script: []string{"/@google/gemini-cli/"}},
 }
 
 var shells = map[string]bool{"bash": true, "zsh": true, "fish": true, "sh": true, "dash": true,
@@ -100,13 +114,32 @@ func Attribute(src ProcSource, pid int) Attribution {
 // catalogue allows blocking. Everything else, and every doubt, is allow.
 func (a Attribution) Deny() bool { return a.ToolID != "" && a.Block && !a.Interactive }
 
+func norm(p string) string { return strings.ToLower(strings.ReplaceAll(p, `\`, "/")) }
+
+func pat(path, p string) bool {
+	switch {
+	case strings.HasPrefix(p, "^"):
+		return strings.HasPrefix(path, p[1:])
+	case strings.HasPrefix(p, "$"):
+		return strings.HasSuffix(path, p[1:])
+	}
+	return strings.Contains(path, p)
+}
+
 func match(p Proc) *Tool {
-	hay := strings.ToLower(filepath.ToSlash(p.Exe) + " " + strings.Join(p.Cmdline, " ") + " ")
-	// Windows paths compare with backslashes in the catalogue, so test the raw form as well.
-	raw := strings.ToLower(p.Exe)
+	exe := norm(p.Exe)
+	script := ""
+	if interpreters[strings.TrimSuffix(path.Base(exe), ".exe")] && len(p.Cmdline) > 1 {
+		script = norm(p.Cmdline[1])
+	}
 	for i := range Catalogue {
-		for _, m := range Catalogue[i].Match {
-			if strings.Contains(hay, m) || strings.Contains(raw, m) {
+		for _, m := range Catalogue[i].Exe {
+			if exe != "" && pat(exe, m) {
+				return &Catalogue[i]
+			}
+		}
+		for _, m := range Catalogue[i].Script {
+			if script != "" && pat(script, m) {
 				return &Catalogue[i]
 			}
 		}

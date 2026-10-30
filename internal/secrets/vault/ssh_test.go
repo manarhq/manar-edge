@@ -103,7 +103,7 @@ func TestSSHRestoreDoesNotOverwriteADifferentFile(t *testing.T) {
 	if got, _ := os.ReadFile(p); string(got) != "someone else's key" {
 		t.Fatal("overwritten")
 	}
-	if _, err := v.Entry("ssh", "id_ed25519"); err != nil {
+	if es, _ := v.entriesFor("ssh", "id_ed25519"); len(es) != 1 {
 		t.Fatal("vault copy must be kept")
 	}
 }
@@ -134,3 +134,5 @@ func TestRestoreAllRestoresEverythingAndReportsEveryFailure(t *testing.T) {
 		t.Fatal("ssh key was not restored although another entry failed")
 	}
 }
+
+func fileExists(p string) bool { st, err := os.Lstat(p); return err == nil && st.Mode().IsRegular() }

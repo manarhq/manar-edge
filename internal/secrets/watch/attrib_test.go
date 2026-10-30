@@ -15,7 +15,8 @@ func (f fakeProcs) Get(pid int) (Proc, error) {
 }
 
 func TestAttributeAndDeny(t *testing.T) {
-	cursorHost := Proc{PID: 10, PPID: 1, Exe: "/opt/Cursor/cursor", Cmdline: []string{"/opt/Cursor/cursor", "--type=extensionHost"}}
+	agent := Proc{PID: 10, PPID: 1, Exe: "/home/alice/.local/share/cursor-agent/cursor-agent", Cmdline: []string{"cursor-agent"}}
+	editor := Proc{PID: 20, PPID: 1, Exe: "/opt/Cursor/cursor", Cmdline: []string{"/opt/Cursor/cursor", "--type=extensionHost"}}
 	for name, tc := range map[string]struct {
 		procs fakeProcs
 		pid   int
@@ -23,22 +24,35 @@ func TestAttributeAndDeny(t *testing.T) {
 		deny  bool
 		inter bool
 	}{
-		"extension host reading directly is denied": {
-			fakeProcs{10: cursorHost}, 10, "host.cursor", true, false},
-		"agent's non-interactive sh -c child is denied": {
-			fakeProcs{10: cursorHost,
+		"the agent reading directly is denied": {fakeProcs{10: agent}, 10, "host.cursor", true, false},
+		"the agent's non-interactive sh -c child is denied": {
+			fakeProcs{10: agent,
 				11: {PID: 11, PPID: 10, Exe: "/bin/sh", Cmdline: []string{"sh", "-c", "cat ~/.aws/credentials"}, TTY: true},
 				12: {PID: 12, PPID: 11, Exe: "/usr/bin/cat", Cmdline: []string{"cat", "x"}, TTY: true}},
 			12, "host.cursor", true, false},
-		"child of an interactive terminal shell is allowed": {
-			fakeProcs{10: cursorHost,
+		"the agent's child behind an interactive terminal shell is allowed": {
+			fakeProcs{10: agent,
 				11: {PID: 11, PPID: 10, Exe: "/bin/bash", Cmdline: []string{"bash", "-l"}, TTY: true},
 				12: {PID: 12, PPID: 11, Exe: "/usr/bin/ssh", Cmdline: []string{"ssh", "host"}, TTY: true}},
 			12, "host.cursor", false, true},
-		"CLI tool started by the user's shell, own process, is denied": {
-			fakeProcs{5: {PID: 5, PPID: 1, Exe: "/bin/bash", Cmdline: []string{"bash"}, TTY: true},
-				6: {PID: 6, PPID: 5, Exe: "/usr/bin/node", Cmdline: []string{"node", "/usr/lib/node_modules/@openai/codex/bin/codex.js"}, TTY: true}},
+		"the editor's own git and ssh are reported, never denied": {
+			fakeProcs{20: editor, 21: {PID: 21, PPID: 20, Exe: "/usr/bin/ssh", Cmdline: []string{"ssh", "h"}}},
+			21, "host.cursor", false, false},
+		"codex native binary is denied": {
+			fakeProcs{6: {PID: 6, PPID: 1, Exe: "/usr/lib/node_modules/@openai/codex/vendor/x86_64/codex/codex", Cmdline: []string{"codex"}}},
 			6, "host.codex-cli", true, false},
+		"a node CLI is recognised by its script but only reported": {
+			fakeProcs{6: {PID: 6, PPID: 1, Exe: "/usr/bin/node", Cmdline: []string{"node", "/usr/lib/node_modules/@google/gemini-cli/bin/gemini.js"}}},
+			6, "host.gemini-cli", false, false},
+		"an argument that merely mentions a tool is not a match": {
+			fakeProcs{6: {PID: 6, PPID: 1, Exe: "/usr/bin/git", Cmdline: []string{"git", "clone", "https://x/@openai/codex/"}}},
+			6, "", false, false},
+		"a folder named like a tool in the user's projects is not a match": {
+			fakeProcs{6: {PID: 6, PPID: 1, Exe: "/home/alice/code/opt/claude/bin/tool", Cmdline: []string{"tool"}}},
+			6, "", false, false},
+		"claude desktop app is denied": {
+			fakeProcs{6: {PID: 6, PPID: 1, Exe: "/opt/Claude/claude", Cmdline: []string{"claude"}}},
+			6, "host.claude-desktop", true, false},
 		"the user's own ssh, no tool in the chain, is allowed": {
 			fakeProcs{5: {PID: 5, PPID: 1, Exe: "/bin/bash", Cmdline: []string{"bash"}, TTY: true},
 				6: {PID: 6, PPID: 5, Exe: "/usr/bin/ssh", Cmdline: []string{"ssh", "h"}, TTY: true}},

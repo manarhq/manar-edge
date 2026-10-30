@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
@@ -51,8 +53,12 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 	b := &Broker{V: v, A: NewApprover(c), OnDenied: func(r Request) {
 		sendEvent(ctx, c, "secret.vault.denied", filepath.Base(r.Program), r)
 	}}
+	env := Env{Identify: Identify, RestoreAll: func() error {
+		quiesced.Store(true) // no new secrets move in while they are being put back
+		return v.RestoreAll()
+	}}
 	errc := make(chan error, 1)
-	go func() { errc <- Serve(ctx, b) }()
+	go func() { errc <- Serve(ctx, b, env) }()
 	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
 	for {
@@ -73,7 +79,13 @@ type instruction struct {
 	Action string `json:"action"`
 }
 
+// quiesced is set when uninstall starts: the module takes no more store instructions.
+var quiesced atomic.Bool
+
 func runInstructions(ctx context.Context, c *hostclient.Client, v *Vault) {
+	if quiesced.Load() {
+		return
+	}
 	var in struct {
 		Vault []instruction `json:"vault"`
 	}
@@ -131,9 +143,11 @@ type consoleApprover struct{ c *hostclient.Client }
 
 func (a consoleApprover) Ask(ctx context.Context, r Request) (Decision, error) {
 	var created struct{ ID string }
-	body := map[string]string{"kind": r.Kind, "ref": r.Ref, "program": filepath.Base(r.Program)}
+	// The console sees the full path (home masked) and the hash of the binary, not just a name.
+	body := map[string]string{"kind": r.Kind, "ref": r.Ref, "program": filepath.Base(r.Program),
+		"programPath": host.MaskPath(host.Homes(), r.Program), "programSha": r.SHA}
 	if r.Program == "" {
-		body["program"] = "unknown program"
+		body["program"], body["programPath"], body["programSha"] = "unknown program", "unknown", strings.Repeat("0", 64)
 	}
 	if err := a.c.Do(ctx, http.MethodPost, "/secrets/access", body, &created); err != nil {
 		return Deny, err

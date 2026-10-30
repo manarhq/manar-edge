@@ -18,7 +18,12 @@ type Entry struct {
 	ID           string    `json:"id"`
 	Kind         string    `json:"kind"` // aws | ssh
 	Ref          string    `json:"ref"`
+	Owner        string    `json:"owner"` // Who.Key() of the home's owner
+	UID          int       `json:"uid"`
+	GID          int       `json:"gid"`
+	Home         string    `json:"home"`
 	File         FileInfo  `json:"file"`
+	Line         string    `json:"line,omitempty"` // aws: the exact credential_process line written
 	OrigSHA      string    `json:"origSha"`
 	RewrittenSHA string    `json:"rewrittenSha,omitempty"` // aws: the file as Manar left it
 	Fingerprint  string    `json:"fingerprint,omitempty"`  // ssh: key fingerprint held by the agent
@@ -39,9 +44,23 @@ var (
 	ErrExists = errors.New("already in the vault")
 	// ErrNoSuchSecret is returned when no file holds the profile or key.
 	ErrNoSuchSecret = errors.New("no such secret on this computer")
+	// ErrAmbiguous is returned when more than one user has the same profile or key name; Manar
+	// will not guess whose it is.
+	ErrAmbiguous = errors.New("more than one user on this computer has that name")
 )
 
-func idOf(kind, ref string) string { return kind + "-" + sum([]byte(kind + "/" + ref))[:16] }
+func idOf(kind, ref, owner string) string {
+	return kind + "-" + sum([]byte(kind + "\x00" + ref + "\x00" + owner))[:16]
+}
+
+func (e *Entry) who() Who { return Who{UID: e.UID, GID: e.GID, SID: sidOf(e.Owner)} }
+
+func sidOf(owner string) string {
+	if strings.HasPrefix(owner, "S-") {
+		return owner
+	}
+	return ""
+}
 
 var (
 	sectionRe = regexp.MustCompile(`^\s*\[([^\]]+)\]\s*(?:[#;].*)?$`)
@@ -90,20 +109,33 @@ func (v *Vault) processLine(profile string) string {
 	return fmt.Sprintf(`credential_process = "%s" secret aws %s`, exe, profile)
 }
 
-// findCredentials locates the credentials file that holds the profile's keys.
-func (v *Vault) findCredentials(profile string) (path string, data []byte, err error) {
+// findCredentials locates the one credentials file that holds the profile's keys.
+func (v *Vault) findCredentials(profile string) (home string, who Who, path string, data []byte, err error) {
+	found := 0
 	for _, h := range v.Homes() {
+		w, werr := WhoOfHome(h)
+		if werr != nil {
+			continue
+		}
 		p := filepath.Join(h, ".aws", "credentials")
-		b, err := os.ReadFile(p)
-		if err != nil {
+		b, _, rerr := w.Read(h, p)
+		if rerr != nil {
 			continue
 		}
 		lines, _ := splitLines(b)
 		if _, vals, _ := awsProfile(lines, profile); vals["aws_access_key_id"] != "" && vals["aws_secret_access_key"] != "" {
-			return p, b, nil
+			home, who, path, data = h, w, p, b
+			found++
 		}
 	}
-	return "", nil, ErrNoSuchSecret
+	switch found {
+	case 0:
+		err = ErrNoSuchSecret
+	case 1:
+	default:
+		err = ErrAmbiguous
+	}
+	return
 }
 
 // StoreAWS moves the profile's keys into the vault and replaces them in the file with a
@@ -113,20 +145,20 @@ func (v *Vault) StoreAWS(profile string) (*Entry, error) {
 	if !profileRe.MatchString(profile) {
 		return nil, errors.New("bad profile name")
 	}
-	id := idOf("aws", profile)
-	if _, err := v.Store.Get("m-" + id); err == nil {
-		return nil, ErrExists
-	}
-	path, orig, err := v.findCredentials(profile)
+	home, who, path, orig, err := v.findCredentials(profile)
 	if err != nil {
 		return nil, err
+	}
+	id := idOf("aws", profile, who.Key())
+	if _, err := v.Store.Get("m-" + id); err == nil {
+		return nil, ErrExists
 	}
 	lines, eol := splitLines(orig)
 	idx, vals, hasProc := awsProfile(lines, profile)
 	if hasProc {
 		return nil, errors.New("this profile already uses credential_process")
 	}
-	_, fi, err := readFile(path)
+	_, fi, err := who.Read(home, path)
 	if err != nil {
 		return nil, err
 	}
@@ -135,11 +167,12 @@ func (v *Vault) StoreAWS(profile string) (*Entry, error) {
 		"SessionToken": vals["aws_session_token"],
 	})
 	// The rewritten file: key lines out, marker and credential_process in at the first key line.
+	line := v.processLine(profile)
 	var out []string
 	for i, l := range lines {
 		switch {
 		case i == idx[0]:
-			out = append(out, marker, v.processLine(profile))
+			out = append(out, marker, line)
 		case contains(idx, i):
 		default:
 			out = append(out, l)
@@ -149,16 +182,16 @@ func (v *Vault) StoreAWS(profile string) (*Entry, error) {
 	if bytes.Contains(rewritten, []byte(vals["aws_secret_access_key"])) {
 		return nil, errors.New("the rewritten file would still hold the secret")
 	}
-	e := &Entry{ID: id, Kind: "aws", Ref: profile, File: fi, OrigSHA: sum(orig), RewrittenSHA: sum(rewritten), StoredAt: time.Now().UTC()}
+	e := &Entry{ID: id, Kind: "aws", Ref: profile, Owner: who.Key(), UID: who.UID, GID: who.GID, Home: home, File: fi, Line: line, OrigSHA: sum(orig), RewrittenSHA: sum(rewritten), StoredAt: time.Now().UTC()}
 	if err := v.put(id, e, orig, secret); err != nil {
 		return nil, err
 	}
-	if err := writeFile(fi, rewritten); err != nil {
+	if err := who.Write(fi, rewritten); err != nil {
 		v.drop(id)
 		return nil, fmt.Errorf("rewriting the credentials file: %w", err)
 	}
-	if got, _, err := readFile(path); err != nil || !bytes.Equal(got, rewritten) {
-		_ = writeFile(fi, orig) // put it back before anything else
+	if got, _, err := who.Read(home, path); err != nil || !bytes.Equal(got, rewritten) {
+		_ = who.Write(fi, orig) // put it back before anything else
 		v.drop(id)
 		return nil, errors.New("the credentials file did not read back as written: restored")
 	}
@@ -204,14 +237,26 @@ func (v *Vault) drop(id string) {
 	}
 }
 
-// Entry loads a manifest.
-func (v *Vault) Entry(kind, ref string) (*Entry, error) {
-	b, err := v.Store.Get("m-" + idOf(kind, ref))
+// Entry loads one manifest by owner.
+func (v *Vault) Entry(owner, kind, ref string) (*Entry, error) {
+	b, err := v.Store.Get("m-" + idOf(kind, ref, owner))
 	if err != nil {
 		return nil, err
 	}
 	var e Entry
 	return &e, json.Unmarshal(b, &e)
+}
+
+// entriesFor lists the entries of a kind and reference, one per owner.
+func (v *Vault) entriesFor(kind, ref string) ([]*Entry, error) {
+	all, err := v.Entries()
+	var out []*Entry
+	for _, e := range all {
+		if e.Kind == kind && e.Ref == ref {
+			out = append(out, e)
+		}
+	}
+	return out, err
 }
 
 // Entries lists everything in the vault.
@@ -239,40 +284,50 @@ func (v *Vault) Entries() ([]*Entry, error) {
 }
 
 // AWSCredentialProcess returns the JSON a credential_process prints for the profile.
-func (v *Vault) AWSCredentialProcess(profile string) ([]byte, error) {
-	return v.Store.Get("s-" + idOf("aws", profile))
+func (v *Vault) AWSCredentialProcess(owner, profile string) ([]byte, error) {
+	return v.Store.Get("s-" + idOf("aws", profile, owner))
 }
 
-// RestoreAWS puts the profile's keys back in the file. When the file is as Manar left it, the
-// original bytes and permissions come back exactly; when the person edited it since, only
-// Manar's lines are swapped for the original key lines.
+// RestoreAWS puts the profile's keys back for every user who has it in the vault.
 func (v *Vault) RestoreAWS(profile string) error {
-	e, err := v.Entry("aws", profile)
-	if err != nil {
-		return err
+	es, err := v.entriesFor("aws", profile)
+	errs := []error{err}
+	for _, e := range es {
+		errs = append(errs, v.restoreAWS(e))
 	}
+	return errors.Join(errs...)
+}
+
+// restoreAWS: when the file is as Manar left it, the original bytes and permissions come back
+// exactly; when the person edited it since, only Manar's lines are swapped for the original key
+// lines.
+func (v *Vault) restoreAWS(e *Entry) error {
+	who := e.who()
 	orig, err := v.Store.Get("o-" + e.ID)
 	if err != nil {
 		return fmt.Errorf("the vault has no original for this profile: %w", err)
 	}
-	cur, _, rerr := readFile(e.File.Path)
+	cur, _, rerr := who.Read(e.Home, e.File.Path)
 	switch {
-	case rerr != nil: // file removed meanwhile
-		_ = os.MkdirAll(filepath.Dir(e.File.Path), 0o700)
-		err = writeFile(e.File, orig)
+	case rerr != nil && os.IsNotExist(rerr): // file removed meanwhile
+		if err = who.MkdirAll(filepath.Dir(e.File.Path)); err == nil {
+			err = who.Write(e.File, orig)
+		}
+	case rerr != nil:
+		return rerr
 	case sum(cur) == e.OrigSHA:
 		err = nil
 	case sum(cur) == e.RewrittenSHA:
-		err = writeFile(e.File, orig)
+		err = who.Write(e.File, orig)
 	default:
-		err = v.swapBack(e, cur, orig)
+		err = v.swapBack(who, e, cur, orig)
 	}
 	if err != nil {
 		return err
 	}
 	// Verify before the vault forgets: the keys are in the file again.
-	got, _, err := readFile(e.File.Path)
-	if err != nil || !restored(got, orig, profile) {
+	got, _, err := who.Read(e.Home, e.File.Path)
+	if err != nil || !restored(got, orig, e.Ref) {
 		return errors.New("the file does not hold the keys after restore: the vault copy is kept")
 	}
 	v.drop(e.ID)
@@ -288,18 +343,23 @@ func restored(got, orig []byte, profile string) bool {
 		gv["aws_session_token"] == ov["aws_session_token"]
 }
 
-func (v *Vault) swapBack(e *Entry, cur, orig []byte) error {
+// swapBack replaces exactly the two lines Manar wrote for this entry (the marker and this
+// entry's own credential_process line) with the original key lines.
+func (v *Vault) swapBack(who Who, e *Entry, cur, orig []byte) error {
 	ol, _ := splitLines(orig)
 	oidx, _, _ := awsProfile(ol, e.Ref)
 	var keyLines []string
 	for _, i := range oidx {
 		keyLines = append(keyLines, ol[i])
 	}
+	if e.Line == "" {
+		return errors.New("the vault entry has no record of the line it wrote: edit the file by hand; the vault copy is kept")
+	}
 	cl, eol := splitLines(cur)
 	var out []string
 	done := false
 	for i := 0; i < len(cl); i++ {
-		if cl[i] == marker && i+1 < len(cl) && strings.HasPrefix(cl[i+1], "credential_process") && strings.Contains(cl[i+1], " secret aws ") {
+		if !done && cl[i] == marker && i+1 < len(cl) && cl[i+1] == e.Line {
 			out = append(out, keyLines...)
 			i++
 			done = true
@@ -310,5 +370,5 @@ func (v *Vault) swapBack(e *Entry, cur, orig []byte) error {
 	if !done {
 		return errors.New("Manar's lines are no longer in the credentials file: edit it by hand; the vault copy is kept")
 	}
-	return writeFile(e.File, []byte(strings.Join(out, eol)))
+	return who.Write(e.File, []byte(strings.Join(out, eol)))
 }

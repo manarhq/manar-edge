@@ -15,86 +15,65 @@ import (
 // The Windows side is written so its decisions can be tested anywhere: it builds the commands
 // and reads the output, a Runner executes them.
 
-// fileSystemGUID is the "File System" audit subcategory, used instead of its name so the
-// setting works on any display language.
-const fileSystemGUID = "{0CCE921D-69AE-11D9-BED3-505054503030}"
-
 // Runner runs a command and returns its output.
 type Runner func(name string, args ...string) ([]byte, error)
 
+// Policy reads and sets the File System success/failure audit setting. The Windows version uses
+// AuditQuerySystemPolicy and AuditSetSystemPolicy, which do not depend on the display language.
+type Policy interface {
+	Get() (success, failure bool, err error)
+	Set(success, failure bool) error
+}
+
 // AuditState is what the installer changed, kept so uninstall can undo exactly that.
 type AuditState struct {
-	PolicyKnown   bool     `json:"policyKnown"`
-	PriorSuccess  bool     `json:"priorSuccess"`
-	PriorFailure  bool     `json:"priorFailure"`
-	PolicyChanged bool     `json:"policyChanged"`
-	AuditedPaths  []string `json:"auditedPaths"`
-}
-
-// parseAuditpol reads `auditpol /get /subcategory:<guid> /r` (CSV) into success/failure.
-func parseAuditpol(out string) (success, failure bool, err error) {
-	for _, line := range strings.Split(out, "\n") {
-		if !strings.Contains(line, strings.Trim(fileSystemGUID, "{}")) && !strings.Contains(strings.ToLower(line), fileSystemGUID[:9]) {
-			continue
-		}
-		f := strings.Split(strings.TrimSpace(line), ",")
-		setting := strings.ToLower(f[len(f)-2])
-		return strings.Contains(setting, "success"), strings.Contains(setting, "failure"), nil
-	}
-	return false, false, errors.New("auditpol output has no File System row")
-}
-
-func setAuditpolArgs(success, failure bool) []string {
-	on := func(b bool) string {
-		if b {
-			return "enable"
-		}
-		return "disable"
-	}
-	return []string{"/set", "/subcategory:" + fileSystemGUID, "/success:" + on(success), "/failure:" + on(failure)}
+	PolicyKnown   bool `json:"policyKnown"`
+	PriorSuccess  bool `json:"priorSuccess"`
+	PriorFailure  bool `json:"priorFailure"`
+	PolicyChanged bool `json:"policyChanged"`
+	// AuditedPaths are files where Manar added its own audit entry. A file that already had an
+	// identical entry is not listed, so uninstall never removes what was there before.
+	AuditedPaths []string `json:"auditedPaths"`
 }
 
 // psQuote single-quotes a value for PowerShell.
 func psQuote(s string) string { return "'" + strings.ReplaceAll(s, "'", "''") + "'" }
 
-// auditRuleScript adds (or removes) the SACL entry that makes a successful read of the file
-// produce event 4663. It never touches the DACL.
+// auditRuleScript adds (or removes) one audit entry: Everyone (S-1-1-0), read data, success. It
+// reads and writes only the audit part of the security descriptor, so the owner and the access
+// list are not rewritten. Removal takes out exactly this entry. Output: ADDED, PRESENT (an
+// identical entry was already there; nothing is changed) or REMOVED.
 func auditRuleScript(path string, add bool) string {
-	verb := "RemoveAuditRuleAll"
-	rule := ""
-	if add {
-		verb = "AddAuditRule"
-		rule = "; $a." + verb + "($r)"
-	} else {
-		rule = "; $a.RemoveAuditRuleAll($r)"
+	head := "$ErrorActionPreference='Stop'; $p=" + psQuote(path) +
+		"; $s=[System.IO.File]::GetAccessControl($p,[System.Security.AccessControl.AccessControlSections]::Audit)" +
+		"; $sid=New-Object System.Security.Principal.SecurityIdentifier('S-1-1-0')" +
+		"; $r=New-Object System.Security.AccessControl.FileSystemAuditRule($sid,'ReadData','None','None','Success')"
+	if !add {
+		return head + "; $s.RemoveAuditRuleSpecific($r) | Out-Null; [System.IO.File]::SetAccessControl($p,$s); 'REMOVED'"
 	}
-	return "$ErrorActionPreference='Stop'; $p=" + psQuote(path) +
-		"; $a=Get-Acl -LiteralPath $p -Audit; $r=New-Object System.Security.AccessControl.FileSystemAuditRule('Everyone','ReadData','None','None','Success')" +
-		rule + "; Set-Acl -LiteralPath $p -AclObject $a"
+	return head + "; $have=@($s.GetAuditRules($true,$false,[System.Security.Principal.SecurityIdentifier]) | Where-Object {" +
+		" $_.IdentityReference.Value -eq 'S-1-1-0' -and $_.FileSystemRights -eq 'ReadData' -and $_.AuditFlags -eq 'Success' })" +
+		"; if($have.Count -gt 0){ 'PRESENT' } else { $s.AddAuditRule($r); [System.IO.File]::SetAccessControl($p,$s); 'ADDED' }"
 }
 
 // EnableAudit turns File System success auditing on (remembering the old value) and puts an
-// audit rule on each existing file. The state is saved before the first change.
-func EnableAudit(run Runner, stateFile string, files []string) (*AuditState, error) {
+// audit entry on each existing file. The state is saved before the first change.
+func EnableAudit(run Runner, pol Policy, stateFile string, files []string) (*AuditState, error) {
 	st := &AuditState{}
 	if b, err := os.ReadFile(stateFile); err == nil {
 		_ = json.Unmarshal(b, st)
 	}
 	if !st.PolicyKnown {
-		out, err := run("auditpol", "/get", "/subcategory:"+fileSystemGUID, "/r")
+		s, f, err := pol.Get()
 		if err != nil {
 			return nil, fmt.Errorf("reading the audit policy: %w", err)
-		}
-		s, f, err := parseAuditpol(string(out))
-		if err != nil {
-			return nil, err
 		}
 		st.PolicyKnown, st.PriorSuccess, st.PriorFailure = true, s, f
 		if err := saveAuditState(stateFile, st); err != nil {
 			return nil, err
 		}
 		if !s {
-			if _, err := run("auditpol", setAuditpolArgs(true, f)...); err != nil {
+			if err := pol.Set(true, f); err != nil {
 				return st, fmt.Errorf("enabling File System auditing: %w", err)
 			}
 			st.PolicyChanged = true
@@ -116,16 +95,21 @@ func EnableAudit(run Runner, stateFile string, files []string) (*AuditState, err
 		if err := saveAuditState(stateFile, st); err != nil {
 			return st, err
 		}
-		if _, err := run("powershell", "-NoProfile", "-NonInteractive", "-Command", auditRuleScript(p, true)); err != nil {
-			continue // a file we cannot audit is simply not watched
+		out, err := run("powershell", "-NoProfile", "-NonInteractive", "-Command", auditRuleScript(p, true))
+		if err != nil || strings.Contains(string(out), "PRESENT") {
+			// Not ours (already there) or not possible: do not claim it, so it is never removed.
+			st.AuditedPaths = st.AuditedPaths[:len(st.AuditedPaths)-1]
+			if err := saveAuditState(stateFile, st); err != nil {
+				return st, err
+			}
 		}
 	}
 	return st, nil
 }
 
-// RestoreAudit removes the audit rules it added and puts the audit policy back to the value it
+// RestoreAudit removes the audit entries it added and puts the audit policy back to the value it
 // had. It tries every step and returns all failures.
-func RestoreAudit(run Runner, stateFile string) error {
+func RestoreAudit(run Runner, pol Policy, stateFile string) error {
 	b, err := os.ReadFile(stateFile)
 	if err != nil {
 		return nil // nothing was changed
@@ -138,15 +122,15 @@ func RestoreAudit(run Runner, stateFile string) error {
 	var left []string
 	for _, p := range st.AuditedPaths {
 		if _, err := os.Stat(p); err != nil {
-			continue // file is gone, so is its rule
+			continue // file is gone, so is its entry
 		}
 		if _, err := run("powershell", "-NoProfile", "-NonInteractive", "-Command", auditRuleScript(p, false)); err != nil {
-			errs = append(errs, fmt.Errorf("audit rule on %s: %w", p, err))
+			errs = append(errs, fmt.Errorf("audit entry on %s: %w", p, err))
 			left = append(left, p)
 		}
 	}
 	if st.PolicyChanged {
-		if _, err := run("auditpol", setAuditpolArgs(st.PriorSuccess, st.PriorFailure)...); err != nil {
+		if err := pol.Set(st.PriorSuccess, st.PriorFailure); err != nil {
 			errs = append(errs, fmt.Errorf("restoring the audit policy: %w", err))
 		} else {
 			st.PolicyChanged = false

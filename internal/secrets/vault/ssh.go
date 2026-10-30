@@ -23,23 +23,31 @@ func (v *Vault) StoreSSH(name string) (*Entry, error) {
 	if !keyNameRe.MatchString(name) || strings.HasSuffix(name, ".pub") {
 		return nil, errors.New("bad key name")
 	}
-	id := idOf("ssh", name)
-	if _, err := v.Store.Get("m-" + id); err == nil {
-		return nil, ErrExists
-	}
-	var path string
+	var home, path string
+	var who Who
+	var orig []byte
+	var fi FileInfo
+	found := 0
 	for _, h := range v.Homes() {
-		if p := filepath.Join(h, ".ssh", name); fileExists(p) {
-			path = p
-			break
+		w, err := WhoOfHome(h)
+		if err != nil {
+			continue
+		}
+		p := filepath.Join(h, ".ssh", name)
+		if b, f, err := w.Read(h, p); err == nil {
+			home, path, who, orig, fi = h, p, w, b, f
+			found++
 		}
 	}
-	if path == "" {
+	if found == 0 {
 		return nil, ErrNoSuchSecret
 	}
-	orig, fi, err := readFile(path)
-	if err != nil {
-		return nil, err
+	if found > 1 {
+		return nil, ErrAmbiguous
+	}
+	id := idOf("ssh", name, who.Key())
+	if _, err := v.Store.Get("m-" + id); err == nil {
+		return nil, ErrExists
 	}
 	fp, encrypted, err := v.Agent.Fingerprint(path)
 	if err != nil {
@@ -48,7 +56,8 @@ func (v *Vault) StoreSSH(name string) (*Entry, error) {
 	if encrypted {
 		return nil, errors.New("this key has a passphrase; it is already protected, so Manar leaves it where it is")
 	}
-	e := &Entry{ID: id, Kind: "ssh", Ref: name, File: fi, OrigSHA: sum(orig), Fingerprint: fp, StoredAt: time.Now().UTC()}
+	e := &Entry{ID: id, Kind: "ssh", Ref: name, Owner: who.Key(), UID: who.UID, GID: who.GID, Home: home,
+		File: fi, OrigSHA: sum(orig), Fingerprint: fp, StoredAt: time.Now().UTC()}
 	if err := v.put(id, e, orig, []byte(fp)); err != nil {
 		return nil, err
 	}
@@ -61,33 +70,41 @@ func (v *Vault) StoreSSH(name string) (*Entry, error) {
 		v.drop(id)
 		return nil, errors.New("the ssh agent does not hold the key: the file was kept")
 	}
-	if err := os.Remove(path); err != nil {
+	if err := who.Remove(path); err != nil {
 		return nil, fmt.Errorf("removing the key file: %w (the key is also in the agent and the vault)", err)
 	}
 	return e, nil
 }
 
-// RestoreSSH writes the exact key file back (bytes and mode), checks it, then drops the key from
-// the agent and the vault.
+// RestoreSSH writes the exact key file back (bytes and mode) for every user who has it in the
+// vault, checks it, then drops the key from the agent and the vault.
 func (v *Vault) RestoreSSH(name string) error {
-	e, err := v.Entry("ssh", name)
-	if err != nil {
-		return err
+	es, err := v.entriesFor("ssh", name)
+	errs := []error{err}
+	for _, e := range es {
+		errs = append(errs, v.restoreSSH(e))
 	}
+	return errors.Join(errs...)
+}
+
+func (v *Vault) restoreSSH(e *Entry) error {
+	who := e.who()
 	orig, err := v.Store.Get("o-" + e.ID)
 	if err != nil {
 		return fmt.Errorf("the vault has no original for this key: %w", err)
 	}
-	if cur, _, err := readFile(e.File.Path); err == nil && !bytes.Equal(cur, orig) {
+	if cur, _, err := who.Read(e.Home, e.File.Path); err == nil && !bytes.Equal(cur, orig) {
 		return errors.New("a different file now exists at the key's path: move it away first; the vault copy is kept")
 	}
-	if !sameFile(e.File, orig) {
-		_ = os.MkdirAll(filepath.Dir(e.File.Path), 0o700)
-		if err := writeFile(e.File, orig); err != nil {
+	if !who.Same(e.Home, e.File, orig) {
+		if err := who.MkdirAll(filepath.Dir(e.File.Path)); err != nil {
+			return err
+		}
+		if err := who.Write(e.File, orig); err != nil {
 			return err
 		}
 	}
-	if !sameFile(e.File, orig) {
+	if !who.Same(e.Home, e.File, orig) {
 		return errors.New("the key file did not read back identically: the vault copy is kept")
 	}
 	if v.Agent != nil {
@@ -110,6 +127,9 @@ func (v *Vault) RestoreAll() error {
 			errs = append(errs, wrap(e, v.RestoreSSH(e.Ref)))
 		}
 	}
+	if left, _ := v.Entries(); len(left) > 0 && errors.Join(errs...) == nil {
+		errs = append(errs, fmt.Errorf("%d secrets are still in the vault", len(left)))
+	}
 	return errors.Join(errs...)
 }
 
@@ -119,8 +139,6 @@ func wrap(e *Entry, err error) error {
 	}
 	return fmt.Errorf("restoring %s %s: %w", e.Kind, e.Ref, err)
 }
-
-func fileExists(p string) bool { st, err := os.Stat(p); return err == nil && st.Mode().IsRegular() }
 
 // ExecAgent drives ssh-add and ssh-keygen. Sock is the agent socket (empty: the platform
 // default, which on Windows is the OpenSSH Authentication Agent service).

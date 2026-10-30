@@ -13,64 +13,146 @@ import (
 type FileInfo struct {
 	Path string `json:"path"`
 	Mode uint32 `json:"mode"`
-	UID  int    `json:"uid"`
-	GID  int    `json:"gid"`
 }
 
 func sum(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 
-// readFile returns a file's bytes and what is needed to recreate it.
-func readFile(path string) ([]byte, FileInfo, error) {
-	st, err := os.Stat(path)
-	if err != nil {
-		return nil, FileInfo{}, err
-	}
-	if !st.Mode().IsRegular() {
-		return nil, FileInfo{}, errors.New("not a regular file")
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil, FileInfo{}, err
-	}
-	uid, gid := owner(st)
-	return b, FileInfo{Path: path, Mode: uint32(st.Mode().Perm()), UID: uid, GID: gid}, nil
+// Who is the person whose home a secret lives in. Every read and write below the home is done as
+// that person (Linux: filesystem uid on the thread; Windows: reparse points are refused), so the
+// service, which runs as root or SYSTEM, can never be steered by a link in the user's folders
+// into reading or writing something the user could not.
+type Who struct {
+	UID, GID int
+	SID      string // Windows
 }
 
-// writeFile writes data with the recorded mode and owner: temp file in the same directory, sync,
-// rename. The file never exists with wider permissions than the original had.
-func writeFile(fi FileInfo, data []byte) error {
-	dir := filepath.Dir(fi.Path)
-	f, err := os.CreateTemp(dir, ".manar-*")
-	if err != nil {
-		return err
+// Key identifies the owner inside vault ids and grants.
+func (w Who) Key() string {
+	if w.SID != "" {
+		return w.SID
 	}
-	tmp := f.Name()
-	fail := func(e error) error { _ = f.Close(); _ = os.Remove(tmp); return e }
-	if err := f.Chmod(os.FileMode(fi.Mode)); err != nil {
-		return fail(err)
-	}
-	if err := chownFile(f, fi); err != nil {
-		return fail(err)
-	}
-	if _, err := f.Write(data); err != nil {
-		return fail(err)
-	}
-	if err := f.Sync(); err != nil {
-		return fail(err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, fi.Path); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return nil
+	return "u" + itoa(w.UID)
 }
 
-// sameFile reports whether the file holds exactly want with the recorded mode.
-func sameFile(fi FileInfo, want []byte) bool {
-	got, cur, err := readFile(fi.Path)
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b []byte
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for ; n > 0; n /= 10 {
+		b = append([]byte{byte('0' + n%10)}, b...)
+	}
+	if neg {
+		b = append([]byte{'-'}, b...)
+	}
+	return string(b)
+}
+
+var errLink = errors.New("a link or mount point is in the way")
+
+// noLinks refuses a path whose final element, or the folders from home down to it, are links.
+func noLinks(home, path string) error {
+	for p := path; ; p = filepath.Dir(p) {
+		st, err := os.Lstat(p)
+		if err != nil {
+			return err
+		}
+		if st.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return errLink
+		}
+		if p == home || filepath.Dir(p) == p {
+			return nil
+		}
+	}
+}
+
+// Read returns a regular file's bytes and what is needed to recreate it. The file must belong to
+// the home's owner.
+func (w Who) Read(home, path string) ([]byte, FileInfo, error) {
+	var b []byte
+	var fi FileInfo
+	err := w.do(func() error {
+		if err := noLinks(home, path); err != nil {
+			return err
+		}
+		f, err := openNoFollow(path)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if !st.Mode().IsRegular() {
+			return errors.New("not a regular file")
+		}
+		if !w.owns(st) {
+			return errors.New("the file does not belong to the owner of this home")
+		}
+		b = make([]byte, 0, st.Size())
+		buf := bytes.NewBuffer(b)
+		if _, err := buf.ReadFrom(f); err != nil {
+			return err
+		}
+		b = buf.Bytes()
+		fi = FileInfo{Path: path, Mode: uint32(st.Mode().Perm())}
+		return nil
+	})
+	return b, fi, err
+}
+
+// Write replaces the file: temp file in the same folder, sync, rename, with the recorded mode.
+func (w Who) Write(fi FileInfo, data []byte) error {
+	return w.do(func() error {
+		dir := filepath.Dir(fi.Path)
+		f, err := os.CreateTemp(dir, ".manar-*")
+		if err != nil {
+			return err
+		}
+		tmp := f.Name()
+		fail := func(e error) error { _ = f.Close(); _ = os.Remove(tmp); return e }
+		if err := f.Chmod(os.FileMode(fi.Mode)); err != nil {
+			return fail(err)
+		}
+		if _, err := f.Write(data); err != nil {
+			return fail(err)
+		}
+		if err := f.Sync(); err != nil {
+			return fail(err)
+		}
+		if err := f.Close(); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, fi.Path); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		return nil
+	})
+}
+
+// MkdirAll creates folders as the owner with mode 0700.
+func (w Who) MkdirAll(dir string) error {
+	return w.do(func() error { return os.MkdirAll(dir, 0o700) })
+}
+
+func (w Who) Remove(path string) error {
+	return w.do(func() error { return os.Remove(path) })
+}
+
+func (w Who) Exists(home, path string) bool {
+	_, _, err := w.Read(home, path)
+	return err == nil
+}
+
+// Same reports whether the file holds exactly want with the recorded mode.
+func (w Who) Same(home string, fi FileInfo, want []byte) bool {
+	got, cur, err := w.Read(home, fi.Path)
 	return err == nil && bytes.Equal(got, want) && cur.Mode == fi.Mode
 }
