@@ -8,7 +8,7 @@ Report it privately, by either route:
 
 1. **GitHub Security Advisories.** Open this repository's **Security** tab and choose
    **Report a vulnerability**. This creates a private advisory that only the maintainers can see.
-2. **Email** security@manar.vax.sh. Put the repository name in the subject. If you need an
+2. **Email** security@fixio.ae. Put the repository name in the subject. If you need an
    encrypted channel, say so in a first message without details and we will arrange one.
 
 Please include what you found, the version or commit, steps to reproduce, and the impact you

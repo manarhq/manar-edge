@@ -24,6 +24,6 @@ right to use these marks; section 6 of that licence says so explicitly.
 
 ## Questions
 
-For a written permission or a partnership, email security@manar.vax.sh with the subject
+For a written permission or a partnership, email security@fixio.ae with the subject
 "Trademark" (until a dedicated address is published). Unofficial community projects that follow
 this page do not need to ask.
