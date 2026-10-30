@@ -1,0 +1,45 @@
+# manar-edge release: on a v* tag, build the device binaries and publish them with SHA256SUMS as a
+# GitHub Release. The binaries are unsigned (decision 10). manar-api templates the checksums it
+# serves in the install one-liner from MANAR_EDGE_VERSION and the SHA256SUMS of this release.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+# The only job that holds a write token. It runs tag-triggered code from this repo only.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10' # same as ci.yml
+      - run: go test ./...
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -eu
+          mkdir dist
+          build() { # goos goarch name
+            CGO_ENABLED=0 GOOS="$1" GOARCH="$2" go build -trimpath \
+              -ldflags "-s -w -X main.version=${VERSION}" -o "dist/$3" ./cmd/manar-edge
+          }
+          build windows amd64 manar-edge-windows-amd64.exe
+          build linux amd64 manar-edge-linux-amd64
+          build linux arm64 manar-edge-linux-arm64
+          (cd dist && sha256sum manar-edge-* > SHA256SUMS && cat SHA256SUMS)
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" \
+            --notes "Unsigned device binaries for Windows (amd64) and Linux (amd64, arm64). Verify with SHA256SUMS."
