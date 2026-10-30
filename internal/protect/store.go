@@ -344,3 +344,31 @@ func mkdirOwned(dir string, mode os.FileMode, owner *Owner) error {
 	}
 	return nil
 }
+
+// Has reports whether Manar currently changes anything for this tool and user.
+func (s *Store) Has(tool, user string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.load()
+	return err == nil && len(m.Tools[tool+"|"+user]) > 0
+}
+
+// Describe lists what Manar changed for a tool and user, one line per file, for the install
+// report and the console's AI tools page.
+func (s *Store) Describe(tool, user string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.load()
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, e := range m.Tools[tool+"|"+user] {
+		if e.Existed {
+			out = append(out, e.Path+" (edited; the original is backed up and comes back when protection is turned off)")
+		} else {
+			out = append(out, e.Path+" (created by Manar; removed when protection is turned off)")
+		}
+	}
+	return out
+}

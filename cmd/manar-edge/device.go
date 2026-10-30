@@ -82,6 +82,7 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 		return fmt.Errorf("installing the service: %w", err)
 	}
 	fmt.Fprintf(out, "Installed the Manar device service and started it (host %s).\n", info.HostID)
+	printCoverage(out)
 	fmt.Fprintln(out, "Done, approve it in the console.")
 	return nil
 }
