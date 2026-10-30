@@ -16,10 +16,11 @@ var writeTimeout = 3 * time.Second
 // the approval stays pending, and a vault release is denied.
 var ErrNoHelper = errors.New("warden: no helper is connected")
 
-// PeerCheck decides whether the process on the other end of conn may talk to the broker. The
-// real checks are in peer_linux.go (SO_PEERCRED) and pipe_windows.go (the pipe's DACL, plus the
-// client's SID). A nil error means allowed.
-type PeerCheck func(conn net.Conn) error
+// PeerCheck decides whether the process on the other end of conn may talk to the broker, and says
+// which session it is (the user id on Linux). The real checks are in listen_linux.go (SO_PEERCRED,
+// then the peer's executable) and listen_windows.go (the pipe's DACL, then the client's image).
+// A nil error means allowed. At most one helper per id is accepted.
+type PeerCheck func(conn net.Conn) (id string, err error)
 
 // Broker is the service side: it accepts helper connections that pass the peer check, sends
 // prompts to them and returns the first answer.
@@ -28,6 +29,7 @@ type Broker struct {
 
 	mu      sync.Mutex
 	helpers map[*helper]struct{}
+	ids     map[string]bool
 }
 
 type helper struct {
@@ -48,7 +50,7 @@ func (h *helper) send(m msg) error {
 }
 
 func NewBroker(check PeerCheck) *Broker {
-	return &Broker{check: check, helpers: map[*helper]struct{}{}}
+	return &Broker{check: check, helpers: map[*helper]struct{}{}, ids: map[string]bool{}}
 }
 
 // Serve accepts connections until the listener closes.
@@ -64,17 +66,26 @@ func (b *Broker) Serve(l net.Listener) error {
 
 func (b *Broker) handle(conn net.Conn) {
 	defer conn.Close()
-	if err := b.check(conn); err != nil {
+	id, err := b.check(conn)
+	if err != nil {
 		log.Printf("warden: refused a connection: %v", err)
 		return
 	}
 	h := &helper{conn: conn, c: newCodec(conn), waiting: map[string]chan Decision{}}
 	b.mu.Lock()
+	if b.ids[id] {
+		// One helper per session: a second connection never replaces the first.
+		b.mu.Unlock()
+		log.Printf("warden: refused a second helper for the same session")
+		return
+	}
+	b.ids[id] = true
 	b.helpers[h] = struct{}{}
 	b.mu.Unlock()
 	defer func() {
 		b.mu.Lock()
 		delete(b.helpers, h)
+		delete(b.ids, id)
 		b.mu.Unlock()
 	}()
 	for {

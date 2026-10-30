@@ -24,9 +24,8 @@ type notifyEvent struct {
 }
 
 const (
-	actOnce  = "approve_once"
-	actEight = "approve_8h"
-	actDeny  = "deny"
+	actOnce = "approve_once"
+	actDeny = "deny"
 )
 
 // notifyPrompter shows prompts through a notifier.
@@ -57,7 +56,7 @@ func (p *notifyPrompter) dispatch() {
 func (p *notifyPrompter) Show(ctx context.Context, pr Prompt, t Text) (Decision, error) {
 	var actions []string
 	if !pr.ConsoleOnly {
-		actions = []string{actOnce, t.Once, actEight, t.Eight, actDeny, t.Deny}
+		actions = []string{actOnce, t.Once, actDeny, t.Deny}
 	}
 	body := t.Body
 	if pr.ConsoleOnly {
@@ -104,8 +103,6 @@ func DecisionFromAction(key string) Decision {
 	switch key {
 	case actOnce:
 		return ApproveOnce
-	case actEight:
-		return ApproveEight
 	case actDeny:
 		return Deny
 	}

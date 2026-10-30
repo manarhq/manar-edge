@@ -3,6 +3,7 @@ package warden
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
@@ -29,8 +30,9 @@ func (l fakeListener) Close() error   { close(l.ch); return nil }
 func (l fakeListener) Addr() net.Addr { return &net.UnixAddr{} }
 
 func uidCheck(allowed ...uint32) PeerCheck {
-	return func(c net.Conn) error {
-		return CheckUID(c.(fakeConn).uid, allowed)
+	return func(c net.Conn) (string, error) {
+		fc := c.(fakeConn)
+		return fmt.Sprintf("uid-%d", fc.uid), CheckUID(fc.uid, allowed)
 	}
 }
 
@@ -135,9 +137,26 @@ func TestBrokerIgnoresInvalidDecisionsAndTimesOut(t *testing.T) {
 	}
 }
 
+func TestPipeUserCannotCreatePipeInstances(t *testing.T) {
+	// FILE_CREATE_PIPE_INSTANCE is 0x4 (same bit as FILE_APPEND_DATA); it must not be granted.
+	var mask uint32
+	if _, err := fmt.Sscanf(pipeUserRights, "0x%x", &mask); err != nil {
+		t.Fatal(err)
+	}
+	if mask&0x4 != 0 {
+		t.Fatalf("user rights %s include FILE_CREATE_PIPE_INSTANCE", pipeUserRights)
+	}
+	// but connecting still needs read, write data and synchronize
+	for _, bit := range []uint32{0x1, 0x2, 0x100000} {
+		if mask&bit == 0 {
+			t.Fatalf("user rights %s miss %#x", pipeUserRights, bit)
+		}
+	}
+}
+
 func TestPipeSDDLAllowsOnlySystemAndOneSID(t *testing.T) {
 	got, err := PipeSDDL("S-1-5-21-1004336348-1177238915-682003330-1001")
-	want := "D:P(A;;GA;;;SY)(A;;GRGW;;;S-1-5-21-1004336348-1177238915-682003330-1001)"
+	want := "D:P(A;;GA;;;SY)(A;;0x12019b;;;S-1-5-21-1004336348-1177238915-682003330-1001)"
 	if err != nil || got != want {
 		t.Fatalf("PipeSDDL = %q, %v", got, err)
 	}
@@ -145,5 +164,22 @@ func TestPipeSDDLAllowsOnlySystemAndOneSID(t *testing.T) {
 		if _, err := PipeSDDL(bad); err == nil {
 			t.Errorf("PipeSDDL(%q) accepted", bad)
 		}
+	}
+}
+
+func TestOnlyOneHelperPerSession(t *testing.T) {
+	b, l := serve(t, uidCheck(1000))
+	first := connect(t, l, 1000)
+	defer first.Close()
+	waitHelper(t, b, true)
+	second := connect(t, l, 1000)
+	defer second.Close()
+	// The second connection is closed by the broker; the first stays the helper.
+	_ = second.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := second.Read(make([]byte, 1)); err == nil {
+		t.Fatal("a second helper for the same session was kept")
+	}
+	if !b.HasHelper() {
+		t.Fatal("the first helper was dropped")
 	}
 }

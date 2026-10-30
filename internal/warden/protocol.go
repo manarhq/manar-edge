@@ -17,7 +17,9 @@ import (
 type Decision string
 
 const (
-	ApproveOnce  Decision = "approve_once"
+	ApproveOnce Decision = "approve_once"
+	// ApproveEight exists only as the console's answer. A device never sends it: 8 hours is a
+	// standing permission and is decided in a browser session.
 	ApproveEight Decision = "approve_8h"
 	Deny         Decision = "deny"
 	// Dismissed is not a decision: the prompt was closed or timed out. The approval stays pending
@@ -34,8 +36,6 @@ type Kind string
 const (
 	// KindAction is an AI tool asking to do something (from the API's pending approvals).
 	KindAction Kind = "action"
-	// KindSecret is a program asking for a secret in the vault (asked locally).
-	KindSecret Kind = "secret"
 )
 
 // Prompt is what the service asks the helper to show.
@@ -44,7 +44,6 @@ type Prompt struct {
 	Kind     Kind   `json:"kind"`
 	ToolID   string `json:"toolId,omitempty"`   // KindAction: host.cursor
 	ActionID string `json:"actionId,omitempty"` // KindAction: file.read
-	Program  string `json:"program,omitempty"`  // KindSecret: the program asking
 	Resource string `json:"resource"`           // masked path, or the secret's name
 	// ConsoleOnly: a high-risk action. The prompt says to open the console and has no approve button.
 	ConsoleOnly bool `json:"consoleOnly,omitempty"`

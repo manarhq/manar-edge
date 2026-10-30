@@ -30,37 +30,69 @@ func listen(base string) (net.Listener, PeerCheck, error) {
 		l.Close()
 		return nil, nil, err
 	}
+	want, err := installedExe()
+	if err != nil {
+		l.Close()
+		return nil, nil, err
+	}
+	ops := procOps{
+		exeOf: func(pid int) (string, error) { return os.Readlink(fmt.Sprintf("/proc/%d/exe", pid)) },
+		stat: func(p string) (fileInfo, error) {
+			var st unix.Stat_t
+			if err := unix.Stat(p, &st); err != nil {
+				return fileInfo{}, err
+			}
+			return fileInfo{OwnerUID: st.Uid, Mode: os.FileMode(st.Mode & 0o7777)}, nil
+		},
+	}
 	// The allowed users are read on every connection, so `allowed-uids` can change without a restart.
-	return l, func(c net.Conn) error {
-		uid, err := peerUID(c)
+	return l, func(c net.Conn) (string, error) {
+		cred, err := peerCred(c)
 		if err != nil {
-			return err
+			return "", err
 		}
-		return CheckUID(uid, LoadAllowedUIDs(base))
+		if err := CheckUID(cred.Uid, LoadAllowedUIDs(base)); err != nil {
+			return "", err
+		}
+		// Right user is not enough: any process of that user can open the socket. Only the
+		// installed manar-edge binary may be the helper.
+		if err := verifyHelperExe(ops, int(cred.Pid), want); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("uid-%d", cred.Uid), nil
 	}, nil
 }
 
-// peerUID reads the connecting process's uid from the kernel (SO_PEERCRED), which the peer cannot forge.
-func peerUID(c net.Conn) (uint32, error) {
+// installedExe is the service's own binary, resolved: the one the helper must be.
+func installedExe() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(exe)
+}
+
+// peerCred reads the connecting process's uid and pid from the kernel (SO_PEERCRED), which the peer cannot forge.
+func peerCred(c net.Conn) (*unix.Ucred, error) {
 	uc, ok := c.(*net.UnixConn)
 	if !ok {
-		return 0, errors.New("warden: not a unix connection")
+		return nil, errors.New("warden: not a unix connection")
 	}
 	raw, err := uc.SyscallConn()
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	var cred *unix.Ucred
 	var serr error
 	if err := raw.Control(func(fd uintptr) {
 		cred, serr = unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
 	}); err != nil {
-		return 0, err
+		return nil, err
 	}
 	if serr != nil {
-		return 0, fmt.Errorf("warden: reading peer credentials: %w", serr)
+		return nil, fmt.Errorf("warden: reading peer credentials: %w", serr)
 	}
-	return cred.Uid, nil
+	return cred, nil
 }
 
 // Dial connects the helper to the service.

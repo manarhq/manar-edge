@@ -13,7 +13,7 @@ func ParseToastArgs(args string) (id string, d Decision, ok bool) {
 		return "", "", false
 	}
 	d = Decision(parts[2])
-	if !d.Valid() {
+	if d != ApproveOnce && d != Deny {
 		return "", "", false
 	}
 	return parts[1], d, true

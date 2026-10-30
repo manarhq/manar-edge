@@ -5,6 +5,7 @@ package warden
 import (
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/godbus/dbus/v5"
@@ -21,6 +22,9 @@ type dbusNotifier struct {
 	conn *dbus.Conn
 	obj  dbus.BusObject
 	ev   chan notifyEvent
+
+	mu    sync.Mutex
+	owner string // unique bus name of the notification service
 }
 
 // NewPrompter returns the prompt for this desktop: a notification with action buttons.
@@ -31,6 +35,7 @@ func NewPrompter() (Prompter, error) {
 	}
 	n := &dbusNotifier{conn: conn, obj: conn.Object(notifDest, notifPath), ev: make(chan notifyEvent, 16)}
 	if err := conn.AddMatchSignal(
+		dbus.WithMatchSender(notifDest),
 		dbus.WithMatchObjectPath(notifPath), dbus.WithMatchInterface(notifIface),
 	); err != nil {
 		return nil, err
@@ -39,6 +44,12 @@ func NewPrompter() (Prompter, error) {
 	conn.Signal(sig)
 	go func() {
 		for s := range sig {
+			// Any program on the session bus can emit a signal with these names. Only the
+			// current owner of the notification service's name is believed (the match rule above
+			// is a filter for efficiency; this is the check).
+			if !n.fromNotificationService(s.Sender) {
+				continue
+			}
 			switch s.Name {
 			case notifIface + ".ActionInvoked":
 				if len(s.Body) == 2 {
@@ -55,6 +66,23 @@ func NewPrompter() (Prompter, error) {
 		}
 	}()
 	return &notifyPrompter{n: n, timeout: 10 * time.Minute}, nil
+}
+
+// fromNotificationService reports whether sender is the unique bus name that owns
+// org.freedesktop.Notifications now. The owner is looked up again when it differs, because the
+// service can restart under a new unique name.
+func (n *dbusNotifier) fromNotificationService(sender string) bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if sender != "" && sender == n.owner {
+		return true
+	}
+	var owner string
+	if err := n.conn.BusObject().Call("org.freedesktop.DBus.GetNameOwner", 0, notifDest).Store(&owner); err != nil {
+		return false
+	}
+	n.owner = owner
+	return sender != "" && sender == owner
 }
 
 func (n *dbusNotifier) Notify(summary, body string, actions []string, urgent bool) (uint32, error) {

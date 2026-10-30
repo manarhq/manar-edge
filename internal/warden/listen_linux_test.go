@@ -24,8 +24,8 @@ func TestPeerUIDIsTheKernelsAnswer(t *testing.T) {
 			return
 		}
 		defer c.Close()
-		uid, _ := peerUID(c)
-		got <- uid
+		cred, _ := peerCred(c)
+		got <- cred.Uid
 	}()
 	c, err := net.Dial("unix", sock)
 	if err != nil {

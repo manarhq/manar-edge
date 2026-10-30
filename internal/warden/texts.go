@@ -27,7 +27,6 @@ type Text struct {
 	Title    string // "WARDEN · Manar app on this device"
 	Body     string
 	Once     string
-	Eight    string
 	Deny     string
 	Console  string // shown instead of the buttons for a high-risk action
 	RTL      bool
@@ -67,21 +66,18 @@ func clip(s string, n int) string {
 func Render(p Prompt, lang Lang) Text {
 	res := clip(p.Resource, 120)
 	name := ToolName(p.ToolID)
-	if p.Kind == KindSecret {
-		name = clip(p.Program, 40)
-	}
 	t := Text{}
 	if lang == AR {
 		t = Text{
 			Title: "WARDEN · تطبيق منار على هذا الجهاز",
-			Once:  "موافقة مرة واحدة", Eight: "لمدة 8 ساعات", Deny: "رفض",
+			Once:  "موافقة مرة واحدة", Deny: "رفض",
 			Console: "افتح وحدة التحكم لاتخاذ القرار", RTL: true,
 		}
 		t.Body = fmt.Sprintf("يريد ⁨%s⁩ %s ⁦%s⁩", name, arabicVerb(p), res)
 	} else {
 		t = Text{
 			Title: "WARDEN · Manar app on this device",
-			Once:  "Approve once", Eight: "For 8 hours", Deny: "Deny",
+			Once:  "Approve once", Deny: "Deny",
 			Console: "Open the console to decide",
 		}
 		t.Body = fmt.Sprintf("%s wants to %s %s", name, englishVerb(p), res)
@@ -91,10 +87,9 @@ func Render(p Prompt, lang Lang) Text {
 }
 
 func englishVerb(p Prompt) string {
-	if p.Kind == KindSecret {
-		return "use the secret"
-	}
 	switch {
+	case p.ActionID == "secret.use":
+		return "use the secret"
 	case strings.HasPrefix(p.ActionID, "file.read"):
 		return "read"
 	case strings.HasPrefix(p.ActionID, "file.write"), strings.HasPrefix(p.ActionID, "file.delete"):
@@ -106,10 +101,9 @@ func englishVerb(p Prompt) string {
 }
 
 func arabicVerb(p Prompt) string {
-	if p.Kind == KindSecret {
-		return "استخدام السر"
-	}
 	switch {
+	case p.ActionID == "secret.use":
+		return "استخدام السر"
 	case strings.HasPrefix(p.ActionID, "file.read"):
 		return "قراءة"
 	case strings.HasPrefix(p.ActionID, "file.write"), strings.HasPrefix(p.ActionID, "file.delete"):

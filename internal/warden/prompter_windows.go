@@ -62,7 +62,7 @@ func (p *toastPrompter) Show(ctx context.Context, pr Prompt, t Text) (Decision, 
 		for _, a := range []struct {
 			label string
 			d     Decision
-		}{{t.Once, ApproveOnce}, {t.Eight, ApproveEight}, {t.Deny, Deny}} {
+		}{{t.Once, ApproveOnce}, {t.Deny, Deny}} {
 			n.Actions = append(n.Actions, toast.Action{Type: toast.Foreground, Content: a.label, Arguments: ToastArgs(pr.ID, a.d)})
 		}
 	}

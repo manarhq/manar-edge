@@ -56,8 +56,8 @@ func (m *module) Start(ctx context.Context, c *hostclient.Client) error {
 	}
 	defer l.Close()
 	b := NewBroker(check)
-	current.Store(b)
-	defer current.Store(nil)
+	setAPI(c)
+	defer vaultAPI.Store(nil)
 	go func() { _ = b.Serve(l) }()
 
 	w := &watcher{broker: b, api: c, seen: map[string]context.CancelFunc{}}
@@ -147,8 +147,10 @@ func (w *watcher) handle(ctx context.Context, it pendingItem, ownerMayApprove bo
 		}
 		return
 	}
-	if p.ConsoleOnly || !d.Valid() {
-		return // dismissed or console-only: the approval stays pending for the console
+	// A device answers once or deny, nothing else: whatever else arrives (a modified helper
+	// sending approve_8h) is dropped and the approval stays pending for the console.
+	if p.ConsoleOnly || (d != ApproveOnce && d != Deny) {
+		return
 	}
 	var res struct{ Status string }
 	if err := w.api.Do(ctx, http.MethodPost, "/approvals/"+it.ID+"/decide", map[string]string{"decision": string(d)}, &res); err != nil {
