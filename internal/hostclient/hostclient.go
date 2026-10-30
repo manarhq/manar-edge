@@ -55,10 +55,13 @@ type Info struct {
 
 // EnrolInput is what Enrol needs. WriteDir must already exist with the right permissions.
 type EnrolInput struct {
-	StateDir   string
-	APIURL     string // https base URL of the Manar API (loopback http allowed)
-	HostURL    string // https base URL of the mTLS listener
+	StateDir string
+	APIURL   string // https base URL of the Manar API (loopback http allowed)
+	HostURL  string // https base URL of the mTLS listener
+	// InstallKey is a `mik_<tenant>_...` key, or the short code from the console's Add device
+	// (then TenantSlug names the tenant: the code does not).
 	InstallKey string
+	TenantSlug string
 	MachineID  string
 	Hostname   string
 	OS         string
@@ -87,7 +90,10 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 	}
 	slug, ok := tenantSlugOf(in.InstallKey)
 	if !ok {
-		return nil, errors.New("the install code is not valid")
+		if !shortCode.MatchString(in.InstallKey) || !slugPattern.MatchString(in.TenantSlug) {
+			return nil, errors.New("the install code is not valid")
+		}
+		slug = in.TenantSlug
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -269,6 +275,11 @@ func (c *Client) Config(ctx context.Context) (*Config, error) {
 	}
 	return &cfg, nil
 }
+
+var (
+	shortCode   = regexp.MustCompile(`^[A-HJKMNP-Z2-9]{10}$`)
+	slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+)
 
 var keyPattern = regexp.MustCompile(`^mik_([a-z0-9][a-z0-9-]*)_[A-Za-z0-9_-]{43}$`)
 

@@ -158,6 +158,19 @@ func TestEnrolRefusals(t *testing.T) {
 	}
 }
 
+func TestEnrolWithShortCodeNeedsTheTenant(t *testing.T) {
+	in := EnrolInput{StateDir: t.TempDir(), APIURL: "https://example.com", InstallKey: "ABCDEFGH23", MachineID: "m"}
+	if _, err := Enrol(context.Background(), in); err == nil || !strings.Contains(err.Error(), "not valid") {
+		t.Fatalf("err = %v", err)
+	}
+	// With the tenant it gets as far as the network (which fails here), not the validation.
+	in.TenantSlug = "me"
+	in.APIURL = "http://127.0.0.1:1"
+	if _, err := Enrol(context.Background(), in); err == nil || strings.Contains(err.Error(), "not valid") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
 func TestEnrolRejectsBadInput(t *testing.T) {
 	for name, in := range map[string]EnrolInput{
 		"plain http":     {APIURL: "http://example.com", InstallKey: goodKey, MachineID: "m"},

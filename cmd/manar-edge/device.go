@@ -33,13 +33,14 @@ const (
 func cmdInstall(base string, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	code := fs.String("code", "", "install code from the console (Add device)")
+	tenant := fs.String("tenant", "", "tenant slug (with a short code; not needed for a mik_ key)")
 	api := fs.String("api", defaultAPIURL, "Manar API base URL")
 	hostURL := fs.String("host-url", defaultHostURL, "Manar device (mTLS) URL")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *code == "" || fs.NArg() != 0 {
-		return errors.New("usage: manar-edge install --code <code> [--api URL] [--host-url URL]")
+		return errors.New("usage: manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL]")
 	}
 	if err := requireAdmin(); err != nil {
 		return err
@@ -62,7 +63,7 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	defer cancel()
 	fmt.Fprintln(out, "Registering this computer with Manar...")
 	info, err := hostclient.Enrol(ctx, hostclient.EnrolInput{
-		StateDir: base, APIURL: *api, HostURL: *hostURL, InstallKey: strings.TrimSpace(*code),
+		StateDir: base, APIURL: *api, HostURL: *hostURL, InstallKey: strings.TrimSpace(*code), TenantSlug: *tenant,
 		MachineID: mid, Hostname: hostname, OS: osLabel(),
 	})
 	if err != nil {
