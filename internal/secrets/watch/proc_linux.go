@@ -56,25 +56,21 @@ func parseStat(s string) (Proc, error) {
 	return Proc{Comm: s[o+1 : i], PPID: ppid, TTY: tty != 0}, nil
 }
 
-// selfFunc reports Manar's own pid, its executable, and anything it started (ssh-add run by the
-// vault must read the key it loads).
+// selfFunc reports Manar's own process and any process running Manar's own binary (the
+// credential_process helper). It does NOT cover processes Manar merely started: exempting
+// descendants would let anything launched from the service, including a test's fake AI tool, read
+// secrets unseen. The Linux vault runs no child that reads a watched file.
 func selfFunc(procs ProcSource) func(int) bool {
 	me := os.Getpid()
 	exe, _ := os.Executable()
 	return func(pid int) bool {
-		for n, p := 0, pid; n < 20 && p > 1; n++ {
-			if p == me {
-				return true
-			}
-			pr, err := procs.Get(p)
-			if err != nil {
-				return false
-			}
-			if n == 0 && exe != "" && pr.Exe == exe {
-				return true
-			}
-			p = pr.PPID
+		if pid == me {
+			return true
 		}
-		return false
+		if exe == "" {
+			return false
+		}
+		pr, err := procs.Get(pid)
+		return err == nil && pr.Exe == exe
 	}
 }

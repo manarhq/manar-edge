@@ -68,6 +68,8 @@ type Engine struct {
 	// fails open.
 	StallAfter time.Duration
 	Now        func() time.Time
+	// Trace, if set, receives one line per decision about a secret file (tests and debugging).
+	Trace func(format string, args ...any)
 
 	busySince atomic.Int64 // unix nanos of the event being decided, 0 when idle
 	lastTick  atomic.Int64
@@ -161,6 +163,7 @@ func (e *Engine) decide(ev PermEvent) (allow bool) {
 		}
 	}()
 	if e.Self != nil && e.Self(ev.PID) {
+		e.trace("pid=%d path=%s: Manar itself: allow", ev.PID, ev.Path)
 		return true
 	}
 	class := ClassOf(ev.Path)
@@ -169,9 +172,12 @@ func (e *Engine) decide(ev PermEvent) (allow bool) {
 	}
 	a := Attribute(e.Procs, ev.PID)
 	if a.ToolID == "" {
+		e.trace("pid=%d process=%q path=%s: no AI tool in the chain (%d processes read): allow", ev.PID, a.Process, ev.Path, len(a.Chain))
 		return true
 	}
 	deny := a.Deny() && e.Block != nil && e.Block()
+	e.trace("pid=%d process=%q path=%s tool=%s toolCanBlock=%v interactive=%v blockingOn=%v: deny=%v",
+		ev.PID, a.Process, ev.Path, a.ToolID, a.Block, a.Interactive, e.Block != nil && e.Block(), deny)
 	e.report(Event{
 		Type: TypeTouched, ToolID: a.ToolID, Process: a.Process, PathClass: class,
 		MaskedPath: host.MaskPath(e.homes(), ev.Path), Blocked: deny, At: e.now().UTC(),
@@ -244,4 +250,10 @@ func (e *Engine) Observe(hint Proc, path string) {
 	}
 	e.report(Event{Type: TypeTouched, ToolID: a.ToolID, Process: a.Process, PathClass: class,
 		MaskedPath: host.MaskPath(e.homes(), path), At: e.now().UTC()})
+}
+
+func (e *Engine) trace(format string, args ...any) {
+	if e.Trace != nil {
+		e.Trace(format, args...)
+	}
 }

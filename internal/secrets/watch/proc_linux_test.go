@@ -4,6 +4,7 @@ package watch
 
 import (
 	"os"
+	"os/exec"
 	"testing"
 )
 
@@ -26,5 +27,17 @@ func TestProcfsReadsThisProcess(t *testing.T) {
 	self := selfFunc(newProcSource())
 	if !self(os.Getpid()) {
 		t.Fatal("own pid is self")
+	}
+}
+
+// A process Manar started is not Manar: only its own pid and its own binary are exempt.
+func TestSelfDoesNotCoverChildren(t *testing.T) {
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Skip(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	if selfFunc(newProcSource())(cmd.Process.Pid) {
+		t.Fatal("a child of the service was treated as the service")
 	}
 }

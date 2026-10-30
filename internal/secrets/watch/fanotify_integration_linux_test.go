@@ -33,17 +33,18 @@ func TestFanotifyDeniesAIToolAllowsOthers(t *testing.T) {
 	procs := newProcSource()
 	out := make(chan Event, 8)
 	e := &Engine{Src: src, Procs: procs, Block: func() bool { return true }, Self: selfFunc(procs), Out: out,
-		Homes: func() []string { return []string{home} }}
+		Homes: func() []string { return []string{home} }, Trace: t.Logf}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go e.Run(ctx)
+	runDone := make(chan struct{})
+	go func() { _ = e.Run(ctx); close(runDone) }()
 	time.Sleep(200 * time.Millisecond)
 
 	if err := exec.Command("/bin/cat", cred).Run(); err != nil {
 		t.Fatalf("plain cat must be allowed: %v", err)
 	}
 	// Name the executable path like the Cursor agent's so the catalogue matches.
-	dir := filepath.Join(t.TempDir(), ".local", "share", "cursor-agent")
+	dir := filepath.Join(home, ".local", "share", "cursor-agent")
 	_ = os.MkdirAll(dir, 0o755)
 	fake := filepath.Join(dir, "cat")
 	b, _ := os.ReadFile("/bin/cat")
@@ -58,5 +59,7 @@ func TestFanotifyDeniesAIToolAllowsOthers(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("open hung")
 	}
+	t.Logf("fake AI tool exe: %s", fake)
 	cancel()
+	<-runDone // no trace line after the test ends
 }
