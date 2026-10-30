@@ -149,3 +149,22 @@ func runDeviceService(base string) error {
 	}
 	return svc.Run(deviceServiceName, &deviceSvc{base: base})
 }
+
+// deviceServiceStop stops the service if it is installed; the exe cannot be replaced while it runs.
+func deviceServiceStop() error {
+	m, err := mgr.Connect()
+	if err != nil {
+		return err
+	}
+	defer m.Disconnect()
+	s, err := m.OpenService(deviceServiceName)
+	if err != nil {
+		return nil // not installed
+	}
+	defer s.Close()
+	stopService(s)
+	if st, err := s.Query(); err == nil && st.State != svc.Stopped {
+		return errors.New("the service did not stop")
+	}
+	return nil
+}

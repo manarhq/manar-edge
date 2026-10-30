@@ -95,7 +95,10 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 		}
 		slug = in.TenantSlug
 	}
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	// The key is written BEFORE the request and reused by every later run: a re-install after a
+	// failed or interrupted one presents the same key, so the server sees the same machine, not
+	// a rekey that waits for an admin.
+	key, err := loadOrCreateKey(Dir(in.StateDir))
 	if err != nil {
 		return nil, err
 	}
@@ -142,10 +145,6 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 	if out.HostID == "" || out.CertificatePEM == "" || out.CAChainPEM == "" {
 		return nil, errors.New("registration response has no host id or certificate")
 	}
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		return nil, err
-	}
 	info := &Info{
 		TenantSlug: slug, MachineID: in.MachineID, HostID: out.HostID, Status: out.Status, KeyType: "SOFTWARE",
 		EnrolledAt: time.Now().UTC().Format(time.RFC3339), APIURL: strings.TrimRight(in.APIURL, "/"),
@@ -160,7 +159,6 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 		name string
 		data []byte
 	}{
-		{fileKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})},
 		{fileCert, []byte(out.CertificatePEM)},
 		{fileCA, []byte(out.CAChainPEM)},
 		{fileInfo, append(infoJSON, '\n')},
@@ -281,7 +279,7 @@ var (
 	slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
-var keyPattern = regexp.MustCompile(`^mik_([a-z0-9][a-z0-9-]*)_[A-Za-z0-9_-]{43}$`)
+var keyPattern = regexp.MustCompile(`^mik_([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)_[A-Za-z0-9_-]{43}$`)
 
 func tenantSlugOf(installKey string) (string, bool) {
 	m := keyPattern.FindStringSubmatch(installKey)
@@ -289,6 +287,37 @@ func tenantSlugOf(installKey string) (string, bool) {
 		return "", false
 	}
 	return m[1], true
+}
+
+// loadOrCreateKey returns the host key in dir/host.key.pem, creating (and writing, 0600) it first.
+func loadOrCreateKey(dir string) (*ecdsa.PrivateKey, error) {
+	path := filepath.Join(dir, fileKey)
+	if b, err := os.ReadFile(path); err == nil {
+		blk, _ := pem.Decode(b)
+		if blk != nil {
+			if k, err := x509.ParsePKCS8PrivateKey(blk.Bytes); err == nil {
+				if ec, ok := k.(*ecdsa.PrivateKey); ok {
+					return ec, nil
+				}
+			}
+		}
+		// An unreadable key file is replaced, not trusted.
+	}
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return nil, err
+	}
+	if err := writePrivate(path, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func csrPEM(key *ecdsa.PrivateKey, tenant, machineID string) (string, error) {

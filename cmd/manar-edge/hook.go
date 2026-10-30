@@ -292,6 +292,92 @@ func claudeSettings(existing []byte, exe, agent string) ([]byte, error) {
 	return append(b, '\n'), err
 }
 
+// removeClaudeSettings is the inverse of claudeSettings: it takes out the Manar hook and the
+// keys claudeSettings set, only where they still hold the value Manar wrote. Anything else in the
+// file stays. It reports whether anything changed and whether the file is now empty.
+func removeClaudeSettings(existing []byte) (out []byte, changed, empty bool, err error) {
+	s := map[string]any{}
+	if err := json.Unmarshal(existing, &s); err != nil {
+		return nil, false, false, fmt.Errorf("managed settings are not valid JSON: %w", err)
+	}
+	hooks, _ := s["hooks"].(map[string]any)
+	ours := false
+	if list, ok := hooks["PreToolUse"].([]any); ok {
+		var keep []any
+		for _, g := range list {
+			if isManarHookGroup(g) {
+				ours = true
+			} else {
+				keep = append(keep, g)
+			}
+		}
+		if ours {
+			if len(keep) == 0 {
+				delete(hooks, "PreToolUse")
+			} else {
+				hooks["PreToolUse"] = keep
+			}
+		}
+	}
+	if !ours {
+		return existing, false, false, nil // not ours: leave the file alone
+	}
+	if len(hooks) == 0 {
+		delete(s, "hooks")
+	}
+	delete(s, "allowManagedHooksOnly")
+	delete(s, "allowManagedPermissionRulesOnly")
+	if perms, ok := s["permissions"].(map[string]any); ok {
+		if perms["defaultMode"] == "dontAsk" {
+			delete(perms, "defaultMode")
+		}
+		for _, k := range []string{"disableBypassPermissionsMode", "disableAutoMode"} {
+			if perms[k] == "disable" {
+				delete(perms, k)
+			}
+		}
+		if len(perms) == 0 {
+			delete(s, "permissions")
+		}
+	}
+	if env, ok := s["env"].(map[string]any); ok {
+		if env["ANTHROPIC_BASE_URL"] == gatewayURL {
+			delete(env, "ANTHROPIC_BASE_URL")
+		}
+		if len(env) == 0 {
+			delete(s, "env")
+		}
+	}
+	if s["requiredMinimumVersion"] == minClaudeCode {
+		delete(s, "requiredMinimumVersion")
+	}
+	if len(s) == 0 {
+		return nil, true, true, nil
+	}
+	b, err := json.MarshalIndent(s, "", "  ")
+	return append(b, '\n'), true, false, err
+}
+
+// uninstallClaudeCode takes Manar's policy out of the managed settings file (and the file if
+// nothing else is in it).
+func uninstallClaudeCode() error {
+	b, err := os.ReadFile(managedSettingsPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	out, changed, empty, err := removeClaudeSettings(b)
+	if err != nil || !changed {
+		return err
+	}
+	if empty {
+		return os.Remove(managedSettingsPath)
+	}
+	return writePrivateMode(managedSettingsPath, out, 0o644)
+}
+
 // versionLess compares dotted numeric versions; an empty or invalid a is less.
 func versionLess(a, b string) bool {
 	pa, pb := strings.Split(a, "."), strings.Split(b, ".")

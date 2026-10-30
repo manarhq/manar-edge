@@ -59,3 +59,14 @@ func runDeviceService(base string) error {
 	defer stop()
 	return serveDevice(ctx, base)
 }
+
+// deviceServiceStop stops the service if it is running (nothing to do when it is not installed).
+func deviceServiceStop() error {
+	if _, err := exec.LookPath("systemctl"); err != nil {
+		return nil
+	}
+	if _, err := os.Stat(filepath.Join(unitDir, deviceUnit)); err != nil {
+		return nil
+	}
+	return sh("", "systemctl", "stop", deviceUnit)
+}

@@ -171,6 +171,47 @@ func TestEnrolWithShortCodeNeedsTheTenant(t *testing.T) {
 	}
 }
 
+func TestAFailedEnrolKeepsTheKeyAndTheNextRunReusesIt(t *testing.T) {
+	dir := t.TempDir()
+	var csrs []*x509.CertificateRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		blk, _ := pem.Decode([]byte(body["csr"]))
+		c, _ := x509.ParseCertificateRequest(blk.Bytes)
+		csrs = append(csrs, c)
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	in := EnrolInput{StateDir: dir, APIURL: srv.URL, InstallKey: goodKey, MachineID: "m", Hostname: "h", OS: "linux"}
+	for range 2 {
+		if _, err := Enrol(context.Background(), in); err == nil {
+			t.Fatal("want an error")
+		}
+	}
+	if len(csrs) != 2 {
+		t.Fatalf("requests = %d", len(csrs))
+	}
+	a, _ := x509.MarshalPKIXPublicKey(csrs[0].PublicKey)
+	b, _ := x509.MarshalPKIXPublicKey(csrs[1].PublicKey)
+	if string(a) != string(b) {
+		t.Fatal("the second run made a new key")
+	}
+	if st, err := os.Stat(filepath.Join(Dir(dir), fileKey)); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("key file: %v %v", st, err)
+	}
+}
+
+func TestTenantSlugRuleMatchesTheAPI(t *testing.T) {
+	good := "mik_me-1_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"
+	if _, ok := tenantSlugOf(good); !ok {
+		t.Fatal("a normal slug is refused")
+	}
+	if _, ok := tenantSlugOf("mik_me-_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ"); ok {
+		t.Fatal("a slug ending in a dash is accepted")
+	}
+}
+
 func TestEnrolRejectsBadInput(t *testing.T) {
 	for name, in := range map[string]EnrolInput{
 		"plain http":     {APIURL: "http://example.com", InstallKey: goodKey, MachineID: "m"},

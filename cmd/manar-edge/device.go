@@ -69,6 +69,11 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Stop a running service first: on Windows its exe is locked, and the copy below would fail
+	// or leave the old binary running.
+	if err := deviceServiceStop(); err != nil {
+		return fmt.Errorf("stopping the running service: %w", err)
+	}
 	exe, err := installedBinary()
 	if err != nil {
 		return err
@@ -81,34 +86,93 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	return nil
 }
 
-// cmdUninstall stops the service, lets every module restore what it changed, and removes the
-// device's files. The binary itself is removed last, on Linux; on Windows a running exe cannot
+// uninstallSteps are the pieces of uninstall, as values so the order can be tested.
+type uninstallSteps struct {
+	removeService func() error
+	cleanup       func(ctx context.Context) []error
+	agents        func() []string // every enrolled agent's name
+	down          func(agent string) error
+	claudeCode    func() error
+	removeHost    func() error
+	removeBinary  func() error
+}
+
+// runUninstall: service, module cleanups, every agent (jail, gateway units, namespaces, users),
+// the Claude Code policy, the host files, and the binary LAST and only when every step before it
+// worked: the units that are left run that binary. It returns what failed.
+func runUninstall(ctx context.Context, st uninstallSteps, out io.Writer) []error {
+	var errs []error
+	note := func(what string, err error) {
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", what, err))
+			fmt.Fprintf(out, "warning: %s: %v\n", what, err)
+		}
+	}
+	note("removing the service", st.removeService())
+	for _, err := range st.cleanup(ctx) {
+		note("restore step", err)
+	}
+	for _, agent := range st.agents() {
+		note("taking down agent "+agent, st.down(agent))
+	}
+	note("removing the Claude Code policy", st.claudeCode())
+	note("removing the host files", st.removeHost())
+	if len(errs) == 0 {
+		note("removing the program", st.removeBinary())
+	} else {
+		fmt.Fprintln(out, "the program was left in place because some steps above failed: fix them and run uninstall again")
+	}
+	return errs
+}
+
+// cmdUninstall removes everything Manar put on this computer. On Windows a running exe cannot
 // delete itself, so the uninstall one-liner removes the folder after this process exits.
 func cmdUninstall(base string, out io.Writer) error {
 	if err := requireAdmin(); err != nil {
 		return err
 	}
-	if err := deviceServiceRemove(); err != nil {
-		fmt.Fprintf(out, "warning: removing the service: %v\n", err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	failed := false
-	for _, err := range daemon.Cleanup(ctx) {
-		failed = true
-		fmt.Fprintf(out, "warning: restore step failed: %v\n", err)
-	}
-	if err := os.RemoveAll(hostclient.Dir(base)); err != nil {
-		return err
-	}
-	if exe, err := installedBinary(); err == nil && runtime.GOOS != "windows" {
-		_ = os.Remove(exe)
-	}
-	if failed {
-		return errors.New("Manar was removed, but some restore steps failed (see above): check those tools' settings by hand")
+	errs := runUninstall(ctx, uninstallSteps{
+		removeService: deviceServiceRemove,
+		cleanup:       daemon.Cleanup,
+		agents: func() []string {
+			var names []string
+			for _, dir := range listAgents(base) {
+				if st, err := loadState(dir); err == nil {
+					names = append(names, st.Name)
+				}
+			}
+			return names
+		},
+		down:       func(agent string) error { return cmdDown(base, agent, true) },
+		claudeCode: uninstallClaudeCode,
+		removeHost: func() error { return os.RemoveAll(hostclient.Dir(base)) },
+		removeBinary: func() error {
+			if runtime.GOOS == "windows" {
+				return nil
+			}
+			exe, err := installedBinary()
+			if err != nil {
+				return err
+			}
+			return os.Remove(exe)
+		},
+	}, out)
+	if len(errs) > 0 {
+		return errors.New("some steps failed (see above): Manar is only partly removed")
 	}
 	fmt.Fprintln(out, "Manar is removed from this computer.")
 	return nil
+}
+
+// writePrivateMode writes through a temp file and rename.
+func writePrivateMode(path string, data []byte, mode os.FileMode) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func cmdService(base string, args []string) error {
