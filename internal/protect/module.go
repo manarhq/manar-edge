@@ -79,6 +79,13 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 	if st == nil {
 		return states
 	}
+	if cfg.Status == discovery.StatusRevoked || cfg.Status == "REJECTED" || cfg.Status == "REVOKED" {
+		for _, err := range st.RestoreAll() {
+			logOnce("restore after revocation: " + err.Error())
+		}
+		logOnce("this device was revoked or rejected: Manar's hooks and wrappers are removed")
+		return states
+	}
 	off := map[string]bool{}
 	for _, id := range cfg.Tools.Unprotect {
 		off[id] = true
@@ -131,7 +138,7 @@ func reconcileTool(st *Store, f discovery.Found, ctx Ctx, approved, off bool) di
 		for i, it := range items {
 			edits[i] = it.FileEdit
 		}
-		out, err := st.Apply(f.Key, u.Name, Owner{UID: u.UID, GID: u.GID}, edits)
+		out, err := st.Apply(f.Key, u.Name, Owner{UID: u.UID, GID: u.GID, Home: u.Home}, edits)
 		if err != nil {
 			logOnce("apply " + f.Name + " for " + u.Name + ": " + err.Error())
 			res.Protected, res.Mode = false, "none"
@@ -192,17 +199,29 @@ func (*relayModule) Cleanup(context.Context) error {
 	return errors.Join(st.RestoreAll()...)
 }
 
+type callerKey struct{}
+
+func newRelayServer(b backend) *http.Server {
+	return &http.Server{
+		Handler:           relayHandler(b),
+		ReadHeaderTimeout: 5 * time.Second,
+		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			return context.WithValue(ctx, callerKey{}, callerOf(conn))
+		},
+	}
+}
+
 type backend interface {
-	Authorize(ctx context.Context, toolID, actionID, resource string) (*hostclient.AuthorizeResult, error)
+	Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*hostclient.AuthorizeResult, error)
 	ApprovalStatus(ctx context.Context, id string) (string, error)
 }
 
 func (m *relayModule) Start(ctx context.Context, c *hostclient.Client) error {
-	l, err := net.Listen("tcp", RelayAddr)
+	l, err := listenRelay()
 	if err != nil {
 		return err
 	}
-	srv := &http.Server{Handler: relayHandler(c), ReadHeaderTimeout: 5 * time.Second}
+	srv := newRelayServer(c)
 	go func() { <-ctx.Done(); srv.Close() }()
 	if err := srv.Serve(l); err != nil && ctx.Err() == nil {
 		return err
@@ -229,7 +248,8 @@ func relayHandler(b backend) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
-		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource)
+		caller, _ := r.Context().Value(callerKey{}).(string)
+		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller)
 		if err != nil {
 			http.Error(w, "upstream", 502)
 			return

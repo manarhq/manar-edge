@@ -7,15 +7,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 	"unicode/utf16"
 )
 
-// RelayAddr is where the device service listens for hooks. Hooks run as the user and cannot read
-// the host key, so they ask the service, which asks Manar over mTLS.
-const RelayAddr = "127.0.0.1:8481"
+// Hooks run as the user and cannot read the host key, so they ask the device service over a local
+// socket (Linux: unix socket, caller from SO_PEERCRED; Windows: named pipe), which asks Manar over
+// mTLS. See relay_linux.go and relay_windows.go.
+
+// restoreHint ends every message that means Manar itself cannot answer, so a person stuck behind a
+// hook that denies everything knows how to take it out.
+const restoreHint = " If Manar was removed or this device was revoked, run: manar-edge protect restore"
 
 const (
 	maxResource = 2048
@@ -155,7 +160,8 @@ type Relay struct {
 
 // NewRelay returns a client for the local service.
 func NewRelay() *Relay {
-	return &Relay{Base: "http://" + RelayAddr, HTTP: &http.Client{Timeout: 30 * time.Second}, PollMin: 2 * time.Second, PollMax: 10 * time.Second}
+	tr := &http.Transport{Proxy: nil, DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) { return dialRelay(ctx) }}
+	return &Relay{Base: "http://manar-relay", HTTP: &http.Client{Timeout: 30 * time.Second, Transport: tr}, PollMin: 2 * time.Second, PollMax: 10 * time.Second}
 }
 
 type authorizeReply struct {
@@ -171,7 +177,7 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	var dec authorizeReply
 	body := map[string]string{"toolId": "host." + key, "actionId": actionID, "resource": resource}
 	if err := r.call(ctx, http.MethodPost, "/v1/authorize", body, &dec); err != nil {
-		return Verdict{false, "Manar: authorization failed: " + err.Error()}
+		return Verdict{false, "Manar: authorization failed: " + err.Error() + "." + restoreHint}
 	}
 	switch dec.Decision {
 	case "ALLOW":
@@ -244,12 +250,10 @@ func Render(key string, v Verdict) (stdout, stderr []byte, exit int) {
 		return nil, []byte(v.Reason + "\n"), 2
 	}
 	switch key {
-	case "cursor":
-		return []byte(`{"permission":"allow"}` + "\n"), nil, 0
-	case "gemini-cli":
-		return []byte(`{"decision":"allow"}` + "\n"), nil, 0
-	case "copilot-cli":
-		return []byte("{}\n"), nil, 0 // no decision: the tool's own permission prompts still apply
+	case "cursor", "gemini-cli", "copilot-cli":
+		// Valid JSON with no decision: Manar only ever asserts a deny, so the tool's own
+		// permission prompts still apply to what Manar lets through.
+		return []byte("{}\n"), nil, 0
 	}
 	return nil, nil, 0
 }

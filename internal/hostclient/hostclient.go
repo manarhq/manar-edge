@@ -300,9 +300,9 @@ type AuthorizeResult struct {
 	ApprovalID string `json:"approvalId"`
 }
 
-func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource string) (*AuthorizeResult, error) {
+func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*AuthorizeResult, error) {
 	var out AuthorizeResult
-	err := c.Do(ctx, http.MethodPost, "/authorize", map[string]string{"toolId": toolID, "actionId": actionID, "resource": resource}, &out)
+	err := c.Do(ctx, http.MethodPost, "/authorize", map[string]string{"toolId": toolID, "actionId": actionID, "resource": resource, "caller": caller}, &out)
 	if err != nil {
 		return nil, err
 	}

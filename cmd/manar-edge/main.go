@@ -84,6 +84,8 @@ func main() {
 		os.Exit(cmdHook(rest))
 	case "hook-tool":
 		os.Exit(cmdHookTool(rest))
+	case "__userfs": // internal: runs as a user's own uid to touch that user's files (Linux service)
+		os.Exit(protect.ServeUserFS(os.Stdin, os.Stdout))
 	case "mcp-wrap":
 		os.Exit(cmdMCPWrap(rest))
 	case "protect":

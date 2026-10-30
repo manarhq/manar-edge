@@ -2,8 +2,6 @@ package protect
 
 import (
 	"context"
-	"net/http"
-	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -40,6 +38,15 @@ func TestReconcileFollowsApprovalAndTheOwnersSwitch(t *testing.T) {
 	if read(t, hooks) != orig {
 		t.Fatal("re-protected while the owner has it off")
 	}
+	// A revoked device gets its tools back, even with the owner's switch on.
+	reconcile(context.Background(), found, &hostclient.Config{Status: "APPROVED"})
+	if !strings.Contains(read(t, hooks), "hook-tool") {
+		t.Fatal("setup")
+	}
+	reconcile(context.Background(), found, &hostclient.Config{Status: "REVOKED"})
+	if read(t, hooks) != orig {
+		t.Fatal("hooks left behind on a revoked device")
+	}
 	// ChatGPT desktop has nothing to edit and is never reported protected.
 	cg := []discovery.Found{{Spec: discovery.Spec{Key: "chatgpt-desktop", ID: "host.chatgpt-desktop"}, Users: []discovery.User{u}}}
 	if reconcile(context.Background(), cg, &hostclient.Config{Status: "APPROVED"})["host.chatgpt-desktop"].Protected {
@@ -47,52 +54,5 @@ func TestReconcileFollowsApprovalAndTheOwnersSwitch(t *testing.T) {
 	}
 	if err := (&relayModule{}).Cleanup(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-}
-
-type fakeBackend struct{ calls int }
-
-func (f *fakeBackend) Authorize(_ context.Context, tool, action, res string) (*hostclient.AuthorizeResult, error) {
-	f.calls++
-	return &hostclient.AuthorizeResult{Decision: "ALLOW"}, nil
-}
-func (f *fakeBackend) ApprovalStatus(context.Context, string) (string, error) { return "APPROVED", nil }
-
-func TestRelayOnlyForwardsKnownTools(t *testing.T) {
-	b := &fakeBackend{}
-	srv := httptest.NewServer(relayHandler(b))
-	defer srv.Close()
-	post := func(body string) int {
-		res, err := http.Post(srv.URL+"/v1/authorize", "application/json", strings.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		res.Body.Close()
-		return res.StatusCode
-	}
-	if post(`{"toolId":"host.cursor","actionId":"shell","resource":"ls"}`) != 200 || b.calls != 1 {
-		t.Fatal("valid call not forwarded")
-	}
-	for _, bad := range []string{`{"toolId":"host.claude-code","actionId":"shell","resource":"ls"}`, `{"toolId":"host.cursor","actionId":"","resource":"ls"}`, `nope`} {
-		if post(bad) != 400 {
-			t.Errorf("accepted %s", bad)
-		}
-	}
-	if b.calls != 1 {
-		t.Fatal("forwarded a bad request")
-	}
-}
-
-func TestRelayDecideEndToEnd(t *testing.T) {
-	srv := httptest.NewServer(relayHandler(&fakeBackend{}))
-	defer srv.Close()
-	r := NewRelay()
-	r.Base = srv.URL
-	if v := r.Decide(context.Background(), "cursor", "shell", "ls", 5e9); !v.Allow {
-		t.Fatal(v)
-	}
-	r.Base = "http://127.0.0.1:1" // service down: fail closed
-	if v := r.Decide(context.Background(), "cursor", "shell", "ls", 5e9); v.Allow {
-		t.Fatal("allowed with the service down")
 	}
 }

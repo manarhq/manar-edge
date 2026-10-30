@@ -1,11 +1,14 @@
 package protect
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -41,7 +44,7 @@ func apply(t *testing.T, s *Store, key string, u discovery.User, c Ctx) ([]Item,
 	for i, it := range items {
 		edits[i] = it.FileEdit
 	}
-	out, err := s.Apply(key, u.Name, Owner{-1, -1}, edits)
+	out, err := s.Apply(key, u.Name, Owner{UID: -1, GID: -1, Home: u.Home}, edits)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,21 +130,23 @@ func TestProtectIsIdempotent(t *testing.T) {
 		t.Fatalf("new server not wrapped:\n%s", read(t, p))
 	}
 	// The user edits the file after Manar's last edit; restoring must not lose that.
-	write(t, p, read(t, p)+"\n")
+	write(t, p, strings.Replace(read(t, p), `"mcpServers": {`, `"mcpServers": {"c":{"command":"ruby","args":["c.rb"]},`, 1))
 	if err := s.Restore("gemini-cli", u.Name); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(read(t, p), `"command":"node"`) || strings.Contains(read(t, p), "hook-tool") {
-		t.Fatal("restore did not bring back the very first original")
+	got := read(t, p)
+	if strings.Contains(got, "hook-tool") || strings.Contains(got, "mcp-wrap") || strings.Contains(got, "manar-edge") {
+		t.Fatalf("Manar's entries are still there:\n%s", got)
 	}
-	// The edit made after Manar's is kept beside the backup, not lost.
-	found := false
-	filepath.Walk(filepath.Join(s.dir, "backups"), func(p string, _ os.FileInfo, _ error) error {
-		found = found || strings.Contains(p, ".edited-")
-		return nil
-	})
-	if !found {
-		t.Fatal("changes made after Manar's edit were not kept")
+	for _, keep := range []string{`"a"`, `"command": "node"`, `"a.js"`, `"b"`, `"command": "py"`, `"c"`, `"command": "ruby"`, `"c.rb"`} {
+		if !strings.Contains(got, keep) {
+			t.Fatalf("lost %s:\n%s", keep, got)
+		}
+	}
+	// A copy of the file as the user left it is kept next to it.
+	m, _ := filepath.Glob(p + ".manar-before-restore-*")
+	if len(m) != 1 {
+		t.Fatalf("no kept copy: %v", m)
 	}
 }
 
@@ -252,11 +257,14 @@ func TestMCPWrapDeniesCallsAndPassesTheRest(t *testing.T) {
 	for _, l := range []string{
 		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read"}}`,
 		`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`,
-		`not json`,
 	} {
 		if f, r := screen([]byte(l), "fs", deny); string(f) != l || r != nil {
 			t.Fatalf("%q was not passed through: %s %s", l, f, r)
 		}
+	}
+	// A line that is not JSON-RPC is answered with an error and never reaches the server.
+	if f, r := screen([]byte(`not json`), "fs", deny); f != nil || len(r) != 1 || !bytes.Contains(r[0], []byte("-32700")) {
+		t.Fatalf("%s %s", f, r)
 	}
 	// A batch cannot smuggle a denied call past the wrapper.
 	f, r = screen([]byte(`[{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"delete"}},{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"read"}}]`), "fs", deny)
@@ -313,4 +321,147 @@ func TestRenderDeniesWithExitTwo(t *testing.T) {
 			t.Errorf("%s allow exit %d", k, code)
 		}
 	}
+}
+
+func TestRestoreReversesCodexBaseURLAndKeepsTheUsersLines(t *testing.T) {
+	s, u, c := setup(t)
+	toml := filepath.Join(u.Home, ".codex", "config.toml")
+	write(t, toml, "model = \"o4\"\n")
+	apply(t, s, "codex-cli", u, c)
+	write(t, toml, read(t, toml)+"approval = \"never\"\n")
+	if err := s.Restore("codex-cli", u.Name); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, toml) != "model = \"o4\"\napproval = \"never\"\n" {
+		t.Fatalf("%q", read(t, toml))
+	}
+}
+
+func TestRestoreRemovesAFileManarCreatedOnceTheUserHasNothingInIt(t *testing.T) {
+	s, u, c := setup(t)
+	p := filepath.Join(u.Home, ".cursor", "hooks.json")
+	apply(t, s, "cursor", u, c)
+	write(t, p, read(t, p)+" ") // touched: the byte-for-byte shortcut no longer applies
+	if err := s.Restore("cursor", u.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Fatal("left an empty file Manar created")
+	}
+}
+
+func TestLinksAreRefused(t *testing.T) {
+	s, u, c := setup(t)
+	outside := t.TempDir()
+	// A parent folder that is a link to somewhere else (~/.copilot -> a system folder).
+	if err := os.Symlink(outside, filepath.Join(u.Home, ".copilot")); err != nil {
+		t.Fatal(err)
+	}
+	_, out := apply(t, s, "copilot-cli", u, c)
+	for _, o := range out {
+		if o.Changed {
+			t.Fatalf("wrote through a linked folder: %+v", o)
+		}
+	}
+	if n := countFiles(t, outside); n != 0 {
+		t.Fatalf("%d files appeared in the linked folder", n)
+	}
+	if out[0].Warning == "" || !strings.Contains(out[0].Warning, "link") {
+		t.Fatalf("no warning about the link: %+v", out[0])
+	}
+	// The file itself is a link to a file elsewhere.
+	target := filepath.Join(outside, "target.json")
+	write(t, target, `{"mcpServers":{}}`)
+	if err := os.MkdirAll(filepath.Join(u.Home, ".cursor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(u.Home, ".cursor", "hooks.json")); err != nil {
+		t.Fatal(err)
+	}
+	_, out = apply(t, s, "cursor", u, c)
+	if out[0].Changed || read(t, target) != `{"mcpServers":{}}` {
+		t.Fatalf("followed a linked file: %+v", out[0])
+	}
+}
+
+func TestRestoreRefusesALinkPlantedAfterProtection(t *testing.T) {
+	s, u, c := setup(t)
+	p := filepath.Join(u.Home, ".gemini", "settings.json")
+	write(t, p, `{}`)
+	apply(t, s, "gemini-cli", u, c)
+	secret := filepath.Join(t.TempDir(), "victim")
+	write(t, secret, "do not touch")
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, p); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Restore("gemini-cli", u.Name); err == nil {
+		t.Fatal("restored through a link")
+	}
+	if read(t, secret) != "do not touch" {
+		t.Fatal("the link target was changed")
+	}
+	if !s.Has("gemini-cli", u.Name) {
+		t.Fatal("dropped the way back after a failed restore")
+	}
+}
+
+func TestServeUserFSRefusesLinksToo(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the user-level helper is Linux only")
+	}
+	home := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(home, "d")); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	req := `{"op":"write","home":"` + home + `","path":"` + filepath.Join(home, "d", "x.json") + `","data":"e30=","mode":420}`
+	if ServeUserFS(strings.NewReader(req), &out) != 0 || !strings.Contains(out.String(), "link") {
+		t.Fatalf("%s", out.String())
+	}
+	if countFiles(t, outside) != 0 {
+		t.Fatal("wrote through the link")
+	}
+}
+
+func TestMCPWrapDoesNotHoldUpOtherMessagesWhileACallWaits(t *testing.T) {
+	release := make(chan struct{})
+	decide := func(ctx context.Context, _, _ string) Verdict {
+		<-release
+		return Verdict{true, ""}
+	}
+	pr, pw := io.Pipe()
+	outR, outW := io.Pipe()
+	done := make(chan int)
+	go func() { done <- RunMCPWrap("cursor", "fs", []string{"cat"}, pr, outW, io.Discard, decide) }()
+	go func() {
+		io.WriteString(pw, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"slow"}}`+"\n")
+		io.WriteString(pw, `{"jsonrpc":"2.0","id":2,"method":"ping"}`+"\n")
+		io.WriteString(pw, "garbage\n")
+	}()
+	sc := bufio.NewScanner(outR)
+	var got []string
+	for len(got) < 2 && sc.Scan() {
+		got = append(got, sc.Text())
+	}
+	all := strings.Join(got, "\n")
+	if !strings.Contains(all, `"method":"ping"`) || !strings.Contains(all, "-32700") || strings.Contains(all, `"id":1`) {
+		t.Fatalf("the ping or the garbage reply was held behind the pending call: %q", all)
+	}
+	close(release)
+	if sc.Scan(); !strings.Contains(sc.Text(), `"id":1`) {
+		t.Fatalf("the released call did not go through: %q", sc.Text())
+	}
+	pw.Close()
+	<-done
+}
+
+func TestAsUserFSRunsTheHelperAsTheOwner(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Geteuid() != 0 {
+		t.Skip("needs root on Linux to become another user")
+	}
+	t.Skip("run by hand: build the binary, then asUserFS{UID: 65534, Exe: <binary>}.Write to a nobody-owned folder")
 }

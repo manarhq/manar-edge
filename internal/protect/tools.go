@@ -64,10 +64,10 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 		appdata = filepath.Join(h, "AppData", "Roaming")
 	}
 	hook := func(path string, role Role, f func(map[string]any) error) Item {
-		return Item{FileEdit{Path: path, Edit: jsonObject(f), Mode: 0o644}, role}
+		return Item{FileEdit{Path: path, Edit: jsonObject(f), Kind: KindJSON, Mode: 0o644}, role}
 	}
 	mcp := func(path, field string) Item {
-		return Item{FileEdit{Path: path, Mode: 0o644, Edit: jsonObject(func(r map[string]any) error {
+		return Item{FileEdit{Path: path, Kind: KindJSON, Mode: 0o644, Edit: jsonObject(func(r map[string]any) error {
 			_, _, err := wrapMCP(r, field, c.Exe, key)
 			return err
 		})}, RoleMCP}
@@ -118,7 +118,7 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 			}}})
 		})}
 		if c.GatewayUp && c.GatewayURL != "" {
-			items = append(items, Item{FileEdit{Path: filepath.Join(h, ".codex", "config.toml"), Edit: codexBaseURL(c.GatewayURL + "/v1"), Mode: 0o600}, RoleGateway})
+			items = append(items, Item{FileEdit{Path: filepath.Join(h, ".codex", "config.toml"), Edit: codexBaseURL(c.GatewayURL + "/v1"), Kind: KindCodexTOML, Mode: 0o600}, RoleGateway})
 		}
 		return items
 	case "copilot-cli":

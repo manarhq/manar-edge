@@ -107,3 +107,37 @@ func TestModuleReportsOnChangeNotEveryPoll(t *testing.T) {
 		t.Fatalf("%+v", api.sent)
 	}
 }
+
+type refusingAPI struct{ fakeAPI }
+
+func (r *refusingAPI) Config(context.Context) (*hostclient.Config, error) {
+	return nil, &hostclient.StatusError{Code: 401, Message: "Certificate is unknown or has been revoked"}
+}
+
+func TestModuleTellsProtectWhenManarKeepsRefusingTheDevice(t *testing.T) {
+	u := fakeHome(t, ".cursor")
+	p := probe()
+	var mu sync.Mutex
+	var statuses []string
+	SetReconciler(func(_ context.Context, _ []Found, cfg *hostclient.Config) map[string]State {
+		mu.Lock()
+		statuses = append(statuses, cfg.Status)
+		mu.Unlock()
+		return nil
+	})
+	defer SetReconciler(nil)
+	m := &Module{Poll: 5 * time.Millisecond, Report: time.Hour, Probe: &p, Users: func() []User { return []User{u} }, GOOS: "linux"}
+	ctx, cancel := context.WithCancel(context.Background())
+	go m.run(ctx, &refusingAPI{})
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	mu.Lock()
+	defer mu.Unlock()
+	found := false
+	for _, st := range statuses {
+		found = found || st == StatusRevoked
+	}
+	if !found {
+		t.Fatalf("got %v, want a revoked report after three refusals", statuses)
+	}
+}

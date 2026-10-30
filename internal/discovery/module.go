@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"runtime"
 	"sort"
@@ -13,6 +14,10 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
 )
+
+// StatusRevoked is the status the module reports to the reconciler when Manar keeps refusing the
+// device's certificate.
+const StatusRevoked = "REVOKED"
 
 // State is what protection did for one tool across the accounts that use it.
 type State struct {
@@ -86,6 +91,7 @@ func (m *Module) run(ctx context.Context, c api) error {
 	}
 	var last []byte
 	var lastAt time.Time
+	refused := 0
 	t := time.NewTicker(poll)
 	defer t.Stop()
 	for {
@@ -94,6 +100,16 @@ func (m *Module) run(ctx context.Context, c api) error {
 		cfg, cerr := c.Config(ctx)
 		if cerr != nil && ctx.Err() == nil {
 			log.Printf("manar-edge: discovery: config: %v", cerr)
+			// Manar refuses this device's certificate (revoked or rejected): after three refusals in
+			// a row take Manar's hooks out, so the tools are not left denying everything.
+			var se *hostclient.StatusError
+			if errors.As(cerr, &se) && (se.Code == 401 || se.Code == 403) {
+				if refused++; refused >= 3 {
+					cfg = &hostclient.Config{Status: StatusRevoked}
+				}
+			}
+		} else if cerr == nil {
+			refused = 0
 		}
 		if r := currentReconciler(); r != nil && cfg != nil {
 			states = r(ctx, found, cfg)
