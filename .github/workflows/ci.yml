@@ -1,0 +1,132 @@
+# manar-edge: vet, tests, static builds for Linux and Windows, the gateway image (PRs) and the usual
+# security scans. Releases are not built here: manar-infra picks up new commits on main, rebuilds,
+# scans, signs and publishes them on the release runner (decision 72), so this repo holds no secrets.
+#
+# Private repo: jobs run on the self-hosted `manar` runner. Public repo: GitHub-hosted runners, so
+# code from a fork never reaches our machines.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  vet:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l $(git ls-files '*.go'))" || { gofmt -l $(git ls-files '*.go'); exit 1; }
+      - run: go vet ./...
+      - run: GOOS=windows go vet ./...
+
+  test:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go test -race ./...
+
+  govulncheck:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+  # The chart manar-infra publishes must lint and render with a digest-pinned image.
+  chart:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.19.0
+      - run: helm lint charts/manar-edge-gateway --set image.repository=example/x --set image.digest=sha256:0
+      - run: helm template ci charts/manar-edge-gateway --set image.repository=example/x --set image.digest=sha256:0 >/dev/null
+
+  build:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - run: |
+          CGO_ENABLED=0 go build -trimpath -o bin/linux-amd64/ ./cmd/...
+          CGO_ENABLED=0 GOARCH=arm64 go build -trimpath -o bin/linux-arm64/ ./cmd/...
+          CGO_ENABLED=0 GOOS=windows go build -trimpath -o bin/windows-amd64/ ./cmd/manar-edge
+
+  # The gateway image on every PR, so a broken Dockerfile, a lost file capability or a HIGH CVE in
+  # the built binary fails before merge. Nothing is pushed.
+  gateway-image:
+    if: github.event_name == 'pull_request'
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    env:
+      TAG: manar-edge-gateway:ci-${{ github.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: docker build --platform linux/amd64 --build-arg VERSION="${GITHUB_SHA::8}" -t "$TAG" .
+      - run: docker save "$TAG" -o gateway.tar && sh ci/check-file-cap.sh gateway.tar
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0
+          image --input gateway.tar --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --no-progress
+      - if: always()
+        run: docker rmi "$TAG" || true; rm -f gateway.tar
+
+  gitleaks:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" ghcr.io/gitleaks/gitleaks:v8.30.1
+          git --log-opts="--all" --exit-code 1 --redact -v .
+
+  semgrep:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" semgrep/semgrep:1.172.0
+          semgrep scan --config auto --severity ERROR --error .
+
+  trivy-fs:
+    runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: >-
+          docker run --rm -v "$PWD:$PWD" -w "$PWD" aquasec/trivy:0.74.0
+          fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 --format table --ignore-unfixed .
