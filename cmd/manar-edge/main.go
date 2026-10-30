@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/protect"
+	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
 )
 
 var version = "dev"
@@ -40,6 +41,7 @@ func main() {
 	if len(args) >= 2 && (args[0] == "--state-dir" || args[0] == "-state-dir") {
 		base, args = args[1], args[2:]
 	}
+	host.SetStateDir(base)
 	if len(args) == 0 {
 		fmt.Fprintln(os.Stderr, usage)
 		os.Exit(2)

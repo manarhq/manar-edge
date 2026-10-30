@@ -45,8 +45,11 @@ type Event struct {
 
 // Event types the watcher produces.
 const (
-	TypeTouched     = "secret.touched"
+	TypeTouched = "secret.touched"
+	// TypeUnavailable and TypeAvailable tell Manar the watcher stopped or started, so the device
+	// shows `monitoring unavailable` honestly.
 	TypeUnavailable = "secret.watch.unavailable"
+	TypeAvailable   = "secret.watch.available"
 )
 
 // Engine turns permission events into verdicts and reports.
@@ -208,4 +211,37 @@ func (e *Engine) report(ev Event) {
 	default:
 		e.dropped.Add(1)
 	}
+}
+
+// hinted answers for one process from what the log said (the process may already be gone) and
+// asks the real source for the rest of the tree.
+type hinted struct {
+	base ProcSource
+	hint Proc
+}
+
+func (h hinted) Get(pid int) (Proc, error) {
+	if pr, err := h.base.Get(pid); err == nil {
+		return pr, nil
+	}
+	if pid == h.hint.PID {
+		return h.hint, nil
+	}
+	return Proc{}, errors.New("gone")
+}
+
+// Observe handles an open that already happened (Windows, event 4663): alert only, never a
+// verdict. hint carries the process id and image name the log gave.
+func (e *Engine) Observe(hint Proc, path string) {
+	defer func() { _ = recover() }()
+	class := ClassOf(path)
+	if class == "" {
+		return
+	}
+	a := Attribute(hinted{e.Procs, hint}, hint.PID)
+	if a.ToolID == "" {
+		return
+	}
+	e.report(Event{Type: TypeTouched, ToolID: a.ToolID, Process: a.Process, PathClass: class,
+		MaskedPath: host.MaskPath(e.homes(), path), At: e.now().UTC()})
 }
