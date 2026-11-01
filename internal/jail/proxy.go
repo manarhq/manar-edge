@@ -56,16 +56,26 @@ const (
 	onceWindow    = 60 * time.Second
 	refusedWindow = 60 * time.Second
 	maxHeader     = 8 << 10
+	maxConns      = 2048
 )
 
 // Serve accepts until ln is closed.
 func (p *Proxy) Serve(ln net.Listener) error {
+	sem := make(chan struct{}, maxConns)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			return err
 		}
-		go p.handle(c)
+		select {
+		case sem <- struct{}{}:
+			go func() {
+				defer func() { <-sem }()
+				p.handle(c)
+			}()
+		default:
+			c.Close() // a flood must not exhaust the service
+		}
 	}
 }
 
@@ -246,6 +256,11 @@ func httpHost(head []byte) string {
 	}
 	parts := strings.Fields(lines[0])
 	if len(parts) != 3 || !strings.HasPrefix(parts[2], "HTTP/") {
+		return ""
+	}
+	// A request to a forward proxy (CONNECT host:443, GET http://host/...) is addressed to the
+	// proxy, not to the site in it: the site is then the address the client connected to.
+	if parts[0] == "CONNECT" || !strings.HasPrefix(parts[1], "/") {
 		return ""
 	}
 	for _, l := range lines[1:] {

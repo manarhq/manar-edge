@@ -331,11 +331,14 @@ func TestUnknownProtocolIsAskedAboutAsTheAddress(t *testing.T) {
 
 func TestHTTPHostParsing(t *testing.T) {
 	cases := map[string]string{
-		"GET / HTTP/1.1\r\nHost: Example.COM:8080\r\n\r\n": "example.com",
-		"GET / HTTP/1.1\r\nhost: [::1]:80\r\n\r\n":         "::1",
-		"GET / HTTP/1.1\r\nHost: bad host\r\n\r\n":         "",
-		"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n":            "",
-		"SSH-2.0-OpenSSH_9\r\n":                            "",
+		"GET / HTTP/1.1\r\nHost: Example.COM:8080\r\n\r\n":                          "example.com",
+		"GET / HTTP/1.1\r\nhost: [::1]:80\r\n\r\n":                                  "::1",
+		"GET / HTTP/1.1\r\nHost: bad host\r\n\r\n":                                  "",
+		"GET / HTTP/1.1\r\nAccept: */*\r\n\r\n":                                     "",
+		"SSH-2.0-OpenSSH_9\r\n":                                                     "",
+		"CONNECT api.example.com:443 HTTP/1.1\r\nHost: api.example.com:443\r\n\r\n": "",
+		"GET http://evil.example/ HTTP/1.1\r\nHost: evil.example\r\n\r\n":           "",
+		"OPTIONS * HTTP/1.1\r\nHost: x.example\r\n\r\n":                             "",
 	}
 	for in, want := range cases {
 		if got := httpHost([]byte(in)); got != want {

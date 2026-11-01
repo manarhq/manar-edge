@@ -89,6 +89,8 @@ type runner struct {
 	mu      sync.Mutex
 	running map[string]*toolProxy
 	last    string
+	lastErr string
+	applied bool // the OS rules are installed
 	// resolve replaces the system resolver (tests).
 	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 }
@@ -137,10 +139,16 @@ func (r *runner) reconcile(cfg *hostclient.Config) {
 			ports[t] = tp.port
 		}
 	}
+	if len(ports) == 0 && !r.applied {
+		return // nothing wanted and nothing installed
+	}
 	if err := r.pf.Apply(ports); err != nil {
 		// Could not install the rules: do not leave proxies running for nothing, and make sure no
 		// half-installed rules stay.
-		log.Printf("jail: applying the filter: %v", err)
+		if msg := err.Error(); msg != r.lastErr {
+			r.lastErr = msg // once per distinct problem, not every 20 seconds
+			log.Printf("jail: applying the filter: %v", err)
+		}
 		_ = r.pf.Teardown()
 		for t, tp := range r.running {
 			tp.close()
@@ -148,6 +156,7 @@ func (r *runner) reconcile(cfg *hostclient.Config) {
 		}
 		return
 	}
+	r.applied = len(ports) > 0
 	for t, tp := range r.running {
 		if !want[t] {
 			tp.close()

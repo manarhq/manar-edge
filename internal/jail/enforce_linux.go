@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -58,9 +59,15 @@ func (e *enforcer) Apply(ports map[string]int) error {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	// Nothing changed and our table is still there (a firewall reload that flushes the ruleset
+	// would otherwise leave the tools unfiltered without anyone noticing): nothing to do.
+	if e.scan != nil && maps.Equal(e.ports, ports) && tableExists() {
+		return nil
+	}
 	for t := range e.ports {
 		if _, keep := ports[t]; !keep && e.scan != nil {
 			e.scan.release(t)
+			sweepCgroup(t)
 		}
 	}
 	if len(ports) == 0 {
@@ -85,6 +92,21 @@ func (e *enforcer) Apply(ports map[string]int) error {
 		}()
 	}
 	return nil
+}
+
+// tableExists says whether our nftables table is installed.
+func tableExists() bool {
+	return exec.Command("nft", "list", "table", "inet", nftTable).Run() == nil
+}
+
+// sweepCgroup moves whatever is still in a released tool's cgroup (children of its processes)
+// to the cgroup root and removes the directory.
+func sweepCgroup(tool string) {
+	dir := filepath.Join(cgRoot, cgParent, cgName(tool))
+	for _, pid := range readPids(filepath.Join(dir, "cgroup.procs")) {
+		_ = os.WriteFile(filepath.Join(cgRoot, "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644)
+	}
+	_ = os.Remove(dir)
 }
 
 func (e *enforcer) tools() []string {

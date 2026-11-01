@@ -173,6 +173,18 @@ func TestLinuxFilterEndToEnd(t *testing.T) {
 		}
 	}
 
+	// A firewall reload that flushes the ruleset must not leave the tools unfiltered: the next
+	// Apply (every config poll) puts the table back.
+	if out, err := exec.Command("nft", "delete", "table", "inet", nftTable).CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	if err := e.Apply(map[string]int{claude: tp.port}); err != nil {
+		t.Fatal(err)
+	}
+	if err := exec.Command("nft", "list", "table", "inet", nftTable).Run(); err != nil {
+		t.Fatal("table not restored after a flush")
+	}
+
 	addr := ip + ":9000"
 	// The tool: an allowed site goes through the proxy, the destination really is that name's address.
 	if out := getAfter(t, bin("claude"), 1000, addr, "allowed.test:9000", "1s"); out != "hello allowed.test:9000" {
