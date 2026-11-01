@@ -71,7 +71,8 @@ func TestHookDecisions(t *testing.T) {
 		{"deny", "t1", reply(201, `{"decision":"DENY","reason":"policy_denied","decisionId":"d"}`), nil, bashInput, false, "policy_denied"},
 		{"approved", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING", "PENDING", "APPROVED"}, bashInput, true, "approved"},
 		{"approval denied", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING", "DENIED"}, bashInput, false, "DENIED"},
-		{"approval expired", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"EXPIRED"}, bashInput, false, "EXPIRED"},
+		{"approval expired", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"EXPIRED"}, bashInput, false, "denied: no answer"},
+		{"paused", "t1", reply(200, `{"decision":"DENY","reason":"paused"}`), nil, bashInput, false, "denied: paused"},
 		{"approval timeout", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING"}, bashInput, false, "not decided in time"},
 		{"approval poll error", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"ERROR"}, bashInput, false, "approval check failed"},
 		{"approval without id", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"risk","riskScore":80}`), nil, bashInput, false, "no approval id"},
@@ -284,5 +285,19 @@ func TestSettingsDConflict(t *testing.T) {
 	}
 	if len(settingsDFiles(dir)) != 1 {
 		t.Error("managed-settings.d file not reported")
+	}
+}
+
+func TestHookNoAnswerDeniesAfterTheLimit(t *testing.T) {
+	gw, _ := fakeGateway(t, "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING"})
+	h := testHook(gw.URL)
+	h.deadline, h.noAnswer = 5*time.Second, 30*time.Millisecond
+	start := time.Now()
+	allow, reason := h.decide(context.Background(), []byte(bashInput))
+	if allow || reason != "Manar denied: no answer" || time.Since(start) > 2*time.Second {
+		t.Fatalf("got (%v, %q) after %v", allow, reason, time.Since(start))
+	}
+	if noAnswerAfter != 2*time.Minute {
+		t.Fatalf("the founder's limit is 2 minutes, got %v", noAnswerAfter)
 	}
 }

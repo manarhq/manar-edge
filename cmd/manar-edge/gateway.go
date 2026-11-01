@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 const (
@@ -80,6 +82,8 @@ type localGateway struct {
 	transport http.RoundTripper
 	task      string
 	agent     string
+	// paused says "Pause all AI" is on for this device; nil means never paused (tests).
+	paused func() bool
 }
 
 // hookHandler serves only what the Claude Code hook needs, on the hook socket.
@@ -150,6 +154,11 @@ func (g *localGateway) proxy(target func(*http.Request) (string, bool), needTask
 		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Model calls and MCP stop too while AI is paused; reading an approval does not.
+		if needTask && g.paused != nil && g.paused() {
+			writeJSONError(w, http.StatusForbidden, pause.Reason)
+			return
+		}
 		if needTask && g.task == "" {
 			writeJSONError(w, http.StatusPreconditionFailed, "manar_task_required")
 			return
@@ -171,6 +180,11 @@ func (g *localGateway) proxy(target func(*http.Request) (string, bool), needTask
 // agent cannot ask Manar about another task with this identity. The body is not rewritten.
 func (g *localGateway) pinTask(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.paused != nil && g.paused() {
+			// The hook reads this as a normal DENY and tells the agent why.
+			writeJSON(w, http.StatusOK, map[string]string{"decision": "DENY", "reason": pause.Reason})
+			return
+		}
 		if g.task == "" {
 			writeJSONError(w, http.StatusPreconditionFailed, "manar_task_required")
 			return
@@ -283,7 +297,8 @@ func serveGateway(ctx context.Context, base, arg string) error {
 	if task != "" && !idPattern.MatchString(task) {
 		return errors.New("task id has characters this gateway does not accept")
 	}
-	g := &localGateway{host: st.Edge.ManarServerName, transport: tr, task: task, agent: st.Name}
+	g := &localGateway{host: st.Edge.ManarServerName, transport: tr, task: task, agent: st.Name,
+		paused: func() bool { return pause.Paused(base) }}
 	ln, err := net.Listen("tcp", gatewayListen)
 	if err != nil {
 		return err
