@@ -41,7 +41,7 @@ func (r *runner) startProxy(tool string) (*toolProxy, error) {
 		port = l4.Addr().(*net.TCPAddr).Port
 		log.Printf("jail: no IPv6 loopback for %s: IPv6 connections are rejected", tool)
 	}
-	p := &Proxy{Tool: tool, Policy: r.policy, Asker: r.asker, OrigDst: OrigDst, Log: log.Printf}
+	p := &Proxy{Tool: tool, Policy: r.policy, Asker: r.asker, OrigDst: OrigDst, Resolve: r.resolve, Log: log.Printf}
 	tp := &toolProxy{port: port, lns: []net.Listener{l4}}
 	go p.Serve(l4)
 	if l6 != nil {

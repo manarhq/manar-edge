@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"runtime"
 	"sync"
 	"time"
@@ -88,6 +89,8 @@ type runner struct {
 	mu      sync.Mutex
 	running map[string]*toolProxy
 	last    string
+	// resolve replaces the system resolver (tests).
+	resolve func(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
 // reconcile starts proxies for newly wanted tools, applies the OS rules, then stops proxies of

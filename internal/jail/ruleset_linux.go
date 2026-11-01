@@ -35,12 +35,12 @@ func Ruleset(ports map[string]int) string {
 	sort.Strings(tools)
 	var b strings.Builder
 	fmt.Fprintf(&b, "table inet %[1]s\ndelete table inet %[1]s\ntable inet %[1]s {\n", nftTable)
-	b.WriteString("\tchain redirect {\n\t\ttype nat hook output priority -100; policy accept;\n")
+	b.WriteString("\tchain to_proxy {\n\t\ttype nat hook output priority -100; policy accept;\n")
 	b.WriteString("\t\tip daddr 127.0.0.0/8 return\n\t\tip6 daddr ::1 return\n\t\ttcp dport 53 return\n")
 	for _, t := range tools {
 		fmt.Fprintf(&b, "\t\tsocket cgroupv2 level 2 \"%s/%s\" meta l4proto tcp redirect to :%d\n", cgParent, cgName(t), ports[t])
 	}
-	b.WriteString("\t}\n\tchain filter {\n\t\ttype filter hook output priority 0; policy accept;\n")
+	b.WriteString("\t}\n\tchain egress {\n\t\ttype filter hook output priority 0; policy accept;\n")
 	for _, t := range tools {
 		fmt.Fprintf(&b, "\t\tsocket cgroupv2 level 2 \"%s/%s\" jump jailed\n", cgParent, cgName(t))
 	}

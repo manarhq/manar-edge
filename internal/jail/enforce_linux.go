@@ -188,6 +188,7 @@ type scanner struct {
 	mu    sync.Mutex
 	moved map[int]moved // pid -> where it came from
 	self  int
+	tools func() []string
 }
 
 type moved struct {
@@ -198,10 +199,18 @@ type moved struct {
 func newScanner() *scanner { return &scanner{moved: map[int]moved{}, self: os.Getpid()} }
 
 func (s *scanner) run(ctx context.Context, tools func() []string) {
+	s.tools = tools
+	// Exec events catch a tool within a millisecond of its start; the periodic scan below is the
+	// safety net (a lost event, a kernel without the connector, tools already running).
+	go func() {
+		if err := watchExec(ctx, s.consider); err != nil && ctx.Err() == nil {
+			log.Printf("jail: no exec events (%v): new tool processes are found within %s", err, scanEvery)
+		}
+	}()
 	t := time.NewTicker(scanEvery)
 	defer t.Stop()
 	for {
-		s.once(tools())
+		s.once()
 		select {
 		case <-ctx.Done():
 			return
@@ -210,9 +219,8 @@ func (s *scanner) run(ctx context.Context, tools func() []string) {
 	}
 }
 
-// once looks at every process. It never touches root's processes, its own, or anything it cannot
-// name as one of the tools.
-func (s *scanner) once(want []string) {
+// once looks at every process.
+func (s *scanner) once() {
 	ents, err := os.ReadDir("/proc")
 	if err != nil {
 		return
@@ -220,50 +228,64 @@ func (s *scanner) once(want []string) {
 	live := map[int]bool{}
 	for _, e := range ents {
 		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid == s.self {
+		if err != nil {
 			continue
 		}
 		live[pid] = true
-		s.mu.Lock()
-		_, done := s.moved[pid]
-		s.mu.Unlock()
-		if done {
-			continue
-		}
-		st, err := os.Stat("/proc/" + e.Name())
-		if err != nil {
-			continue
-		}
-		if sys, ok := st.Sys().(*syscall.Stat_t); !ok || sys.Uid == 0 {
-			continue // the service and root's own programs are never filtered
-		}
-		comm, err := os.ReadFile("/proc/" + e.Name() + "/comm")
-		if err != nil {
-			continue
-		}
-		tool := matchProc(strings.TrimSpace(string(comm)), func() []string { return cmdline(pid) }, want)
-		if tool == "" {
-			continue
-		}
-		from := currentCgroup(pid)
-		if strings.HasPrefix(from, "/"+cgParent+"/") {
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(cgRoot, cgParent, cgName(tool), "cgroup.procs"), []byte(strconv.Itoa(pid)), 0o644); err != nil {
-			if !errors.Is(err, syscall.ESRCH) {
-				log.Printf("jail: moving %d (%s): %v", pid, tool, err)
-			}
-			continue
-		}
-		s.mu.Lock()
-		s.moved[pid] = moved{tool, from}
-		s.mu.Unlock()
+		s.consider(pid)
 	}
 	s.mu.Lock()
 	for pid := range s.moved {
 		if !live[pid] {
 			delete(s.moved, pid)
 		}
+	}
+	s.mu.Unlock()
+}
+
+// consider moves pid into its tool's cgroup if it is one of the tools. It never touches root's
+// processes, its own, or anything it cannot name as one of the tools.
+func (s *scanner) consider(pid int) {
+	if pid == s.self || pid <= 1 {
+		return
+	}
+	s.mu.Lock()
+	_, done := s.moved[pid]
+	s.mu.Unlock()
+	if done {
+		return
+	}
+	name := strconv.Itoa(pid)
+	st, err := os.Stat("/proc/" + name)
+	if err != nil {
+		return
+	}
+	if sys, ok := st.Sys().(*syscall.Stat_t); !ok || sys.Uid == 0 {
+		return // the service and root's own programs are never filtered
+	}
+	comm, err := os.ReadFile("/proc/" + name + "/comm")
+	if err != nil {
+		return
+	}
+	tool := matchProc(strings.TrimSpace(string(comm)), func() []string { return cmdline(pid) }, s.tools())
+	if tool == "" {
+		return
+	}
+	from := currentCgroup(pid)
+	if strings.HasPrefix(from, "/"+cgParent+"/") {
+		return
+	}
+	// The same process may be considered from the event and the scan at once: whoever writes
+	// first wins, the other write is a no-op into the same cgroup.
+	if err := os.WriteFile(filepath.Join(cgRoot, cgParent, cgName(tool), "cgroup.procs"), []byte(name), 0o644); err != nil {
+		if !errors.Is(err, syscall.ESRCH) {
+			log.Printf("jail: moving %d (%s): %v", pid, tool, err)
+		}
+		return
+	}
+	s.mu.Lock()
+	if _, ok := s.moved[pid]; !ok {
+		s.moved[pid] = moved{tool, from}
 	}
 	s.mu.Unlock()
 }
