@@ -65,9 +65,10 @@ func Run(ctx context.Context, c *hostclient.Client) error {
 	if c != nil && c.Info != nil {
 		SetIdentity(c.Info.HostID, c.Info.TenantSlug)
 	}
-	done := make(chan struct{})
-	defer close(done)
-	go statusWriter(done)
+	// Run returns only after the status writer has stopped, so nothing writes the file after it.
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() { statusWriter(done); close(stopped) }()
+	defer func() { close(done); <-stopped }()
 	var wg sync.WaitGroup
 	for _, m := range ms {
 		wg.Add(1)
