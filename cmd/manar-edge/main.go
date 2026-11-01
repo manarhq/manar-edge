@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/protect"
 )
 
 var version = "dev"
@@ -23,6 +25,9 @@ const usage = `usage:
   manar-edge status [<agent>]
   manar-edge hook claude-code <agent>
   manar-edge install-claude-code <agent> [--force-coexist]
+  manar-edge protect list|restore [<tool>]   (what Manar changed in other AI tools; undo it)
+  manar-edge hook-tool <tool> <event>   (internal: the hook installed in Cursor, Gemini CLI and the others)
+  manar-edge mcp-wrap <tool> <server> -- <command> [args...]   (internal: asks Manar before each MCP tool call)
   manar-edge version
 
 Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`
@@ -39,6 +44,8 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, rest := args[0], args[1:]
+	protect.Configure(base)
+	protect.ClaudeSettingsPath = managedSettingsPath
 	var err error
 	switch cmd {
 	case "version":
@@ -75,6 +82,14 @@ func main() {
 		}
 	case "hook":
 		os.Exit(cmdHook(rest))
+	case "hook-tool":
+		os.Exit(cmdHookTool(rest))
+	case "__userfs": // internal: runs as a user's own uid to touch that user's files (Linux service)
+		os.Exit(protect.ServeUserFS(os.Stdin, os.Stdout))
+	case "mcp-wrap":
+		os.Exit(cmdMCPWrap(rest))
+	case "protect":
+		err = cmdProtect(base, rest, os.Stdout)
 	case "install-claude-code":
 		err = cmdInstallClaudeCode(base, rest)
 	case "gateway": // internal: started by the systemd unit or the Windows service
