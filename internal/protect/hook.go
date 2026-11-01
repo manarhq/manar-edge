@@ -156,6 +156,8 @@ type Relay struct {
 	HTTP *http.Client
 	// PollMin and PollMax bound the wait between approval checks.
 	PollMin, PollMax time.Duration
+	// NoAnswer overrides NoAnswerAfter (tests).
+	NoAnswer time.Duration
 }
 
 // NewRelay returns a client for the local service.
@@ -183,6 +185,9 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	case "ALLOW":
 		return Verdict{true, "Manar: allowed"}
 	case "DENY":
+		if dec.Reason == "paused" {
+			return Verdict{false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"}
+		}
 		return Verdict{false, "Manar denied: " + dec.Reason}
 	case "APPROVAL_REQUIRED":
 		if dec.ApprovalID == "" {
@@ -193,12 +198,23 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	return Verdict{false, fmt.Sprintf("Manar: unknown decision %q", dec.Decision)}
 }
 
+// NoAnswerAfter is how long a person has to answer (founder decision, 1 Nov 2026): the prompt
+// shows and the phone is pushed at the same moment, and after this the call is denied.
+const NoAnswerAfter = 2 * time.Minute
+
 func (r *Relay) wait(ctx context.Context, id string) Verdict {
 	wait := r.PollMin
+	limit := r.NoAnswer
+	if limit == 0 {
+		limit = NoAnswerAfter
+	}
+	giveUp := time.After(limit)
 	for {
 		select {
 		case <-ctx.Done():
 			return Verdict{false, "Manar: approval " + id + " not decided in time"}
+		case <-giveUp:
+			return Verdict{false, "Manar denied: no answer"}
 		case <-time.After(wait):
 		}
 		var ap struct {
@@ -211,6 +227,10 @@ func (r *Relay) wait(ctx context.Context, id string) Verdict {
 		case "APPROVED":
 			return Verdict{true, "Manar: approved (" + id + ")"}
 		case "PENDING":
+		case "EXPIRED":
+			return Verdict{false, "Manar denied: no answer"}
+		case "PAUSED":
+			return Verdict{false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"}
 		default:
 			return Verdict{false, "Manar: approval " + id + " is " + ap.Status}
 		}

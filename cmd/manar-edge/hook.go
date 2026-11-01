@@ -23,6 +23,10 @@ const (
 	maxActionID = 128
 	// hookBudget bounds one hook decision end to end (authorize plus the approval wait).
 	hookBudget = 10 * time.Minute
+	// noAnswerAfter is how long a person has to answer a prompt (founder decision, 1 Nov 2026).
+	// The prompt shows and the phone is pushed at the same moment; after this the call is denied
+	// and the agent is told "no answer".
+	noAnswerAfter = 2 * time.Minute
 	// hookTimeoutSeconds is the Claude Code hook timeout: the budget plus 90 s spare, so the hook
 	// always answers before Claude Code gives up on it.
 	hookTimeoutSeconds = 690
@@ -78,6 +82,7 @@ type hookClient struct {
 	pollMin  time.Duration
 	pollMax  time.Duration
 	deadline time.Duration // whole decision
+	noAnswer time.Duration // 0 means noAnswerAfter
 }
 
 type authorizeResponse struct {
@@ -118,6 +123,9 @@ func (h *hookClient) decide(ctx context.Context, raw []byte) (allow bool, reason
 	case "ALLOW":
 		return true, "Manar: allowed"
 	case "DENY":
+		if dec.Reason == "paused" {
+			return false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"
+		}
 		return false, "Manar denied: " + dec.Reason
 	case "APPROVAL_REQUIRED":
 		if dec.ApprovalID == "" || !idPattern.MatchString(dec.ApprovalID) {
@@ -130,10 +138,22 @@ func (h *hookClient) decide(ctx context.Context, raw []byte) (allow bool, reason
 
 func (h *hookClient) waitApproval(ctx context.Context, id string) (bool, string) {
 	wait := h.pollMin
+	limit := h.noAnswer
+	if limit == 0 {
+		limit = noAnswerAfter
+	}
+	giveUp := time.After(limit)
 	for {
 		select {
 		case <-ctx.Done():
 			return false, "Manar: approval " + id + " not decided in time"
+		case <-giveUp:
+			// Tell Manar too, so the console cannot approve after the agent was told "denied".
+			// Best effort: the 30-minute server expiry is the backstop.
+			ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = h.do(ectx, http.MethodPost, "/agent/v1/approvals/"+id+"/expire", []byte("{}"), &struct{}{})
+			cancel()
+			return false, "Manar denied: no answer"
 		case <-time.After(wait):
 		}
 		var ap struct {
@@ -149,6 +169,10 @@ func (h *hookClient) waitApproval(ctx context.Context, id string) (bool, string)
 		case "APPROVED":
 			return true, "Manar: approved (" + id + ")"
 		case "PENDING":
+		case "PAUSED":
+			return false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"
+		case "EXPIRED":
+			return false, "Manar denied: no answer"
 		default:
 			return false, "Manar: approval " + id + " is " + ap.Status
 		}

@@ -175,6 +175,8 @@ type Client struct {
 	Info *Info
 	http *http.Client
 	base string
+	// stateDir is where the device keeps its files (pause flag, WARDEN settings).
+	stateDir string
 }
 
 // New loads the host files from stateDir and builds the mTLS client. It fails when the device
@@ -208,13 +210,16 @@ func New(stateDir string) (*Client, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("host-ca.pem has no certificate")
 	}
-	return &Client{Info: &info, base: base.String(), http: &http.Client{
+	return &Client{Info: &info, base: base.String(), stateDir: stateDir, http: &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert}, RootCAs: roots, MinVersion: tls.VersionTLS13,
 		}},
 	}}, nil
 }
+
+// StateDir is the state directory this client was loaded from.
+func (c *Client) StateDir() string { return c.stateDir }
 
 // Do sends in as JSON (nil for none) and decodes the JSON reply into out (nil to ignore it).
 // path is under /host/v1, e.g. "/config".
@@ -266,6 +271,8 @@ type Config struct {
 	// Tools carries the owner's per-tool choices (coverage track): Unprotect lists tool ids
 	// whose protection the owner turned off; the device restores their backups.
 	Tools ToolInstructions `json:"tools"`
+	// Paused is the workspace's "Pause all AI": deny every protected tool with reason "paused".
+	Paused bool `json:"paused"`
 }
 
 // ToolInstructions is the "tools" part of GET /host/v1/config.

@@ -47,6 +47,9 @@ type Prompt struct {
 	Resource string `json:"resource"`           // masked path, or the secret's name
 	// ConsoleOnly: a high-risk action. The prompt says to open the console and has no approve button.
 	ConsoleOnly bool `json:"consoleOnly,omitempty"`
+	// ExplainEN and ExplainAR: what could go wrong, in plain words (from the API's templates).
+	ExplainEN string `json:"explainEn,omitempty"`
+	ExplainAR string `json:"explainAr,omitempty"`
 }
 
 // msg is one line on the wire, in either direction.

@@ -33,6 +33,13 @@ func listen(base string) (net.Listener, PeerCheck, error) {
 		return nil, nil, err
 	}
 	want, err := ownImage()
+	if err == nil && !InProtectedDir(want, os.Getenv("ProgramFiles")) {
+		// A copy anyone can overwrite (a user's Downloads, a temp folder) must not be the helper.
+		err = errors.New("warden: manar-edge is not running from Program Files; use the installed copy")
+	} else if err == nil {
+		// Inside Program Files is not enough: the file and its folders must not be user-writable.
+		err = checkProtected(want, os.Getenv("ProgramFiles"))
+	}
 	if err != nil {
 		l.Close()
 		return nil, nil, err

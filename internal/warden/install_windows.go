@@ -15,7 +15,7 @@ const runKey = `Software\Microsoft\Windows\CurrentVersion\Run`
 // Install makes the helper start when this user logs on (HKCU Run) and records the user's SID,
 // the only one the service's pipe will accept besides SYSTEM. It must run in the session of the
 // person the device belongs to (the elevated PowerShell of the one-liner). Windows prompting
-// stays off until an administrator runs `manar-edge warden windows-ui on`.
+// is on by default; `manar-edge warden windows-ui off` opts a device out.
 func Install(base, exe string) error {
 	tok := windows.GetCurrentProcessToken()
 	u, err := tok.GetTokenUser()

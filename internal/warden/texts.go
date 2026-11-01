@@ -3,6 +3,7 @@ package warden
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // Lang is the prompt language: "en" or "ar".
@@ -53,6 +54,28 @@ func ToolName(toolID string) string {
 	return clip(strings.TrimPrefix(toolID, "host."), 40)
 }
 
+// Display turns text that an AI tool or the network controls into something safe to put in a
+// notification: it can end a CDATA section ("]]>"), open markup, run in a shell ($( ) and
+// backticks), hide itself with control or bidi characters, or be very long. Those are removed (this
+// is a simplified view for reading, not the exact value; the console shows the exact value) and
+// the result is cut to max characters.
+func Display(s string, max int) string {
+	for strings.Contains(s, "]]>") {
+		s = strings.ReplaceAll(s, "]]>", "")
+	}
+	var b strings.Builder
+	for _, r := range s {
+		switch {
+		case r == '$' || r == '`' || r == '<' || r == '>':
+		case unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || unicode.Is(unicode.Zl, r) || unicode.Is(unicode.Zp, r):
+			b.WriteByte(' ') // newlines, tabs, bidi marks and overrides, zero-width characters
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return clip(strings.TrimSpace(b.String()), max)
+}
+
 func clip(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
@@ -64,8 +87,8 @@ func clip(s string, n int) string {
 // Render builds the prompt text. The resource is clipped; Arabic puts the tool name and the
 // resource in their own isolates so a path keeps its direction inside right-to-left text.
 func Render(p Prompt, lang Lang) Text {
-	res := clip(p.Resource, 120)
-	name := ToolName(p.ToolID)
+	res := Display(p.Resource, 120)
+	name := Display(ToolName(p.ToolID), 40)
 	t := Text{}
 	if lang == AR {
 		t = Text{
@@ -81,6 +104,13 @@ func Render(p Prompt, lang Lang) Text {
 			Console: "Open the console to decide",
 		}
 		t.Body = fmt.Sprintf("%s wants to %s %s", name, englishVerb(p), res)
+	}
+	// The explanation comes from the API's deterministic templates, never from a model. A prompt
+	// without one (an older API) shows just the line above.
+	if ex := Display(p.ExplainEN, 400); lang == EN && ex != "" {
+		t.Body += "\n" + ex
+	} else if ex := Display(p.ExplainAR, 400); lang == AR && ex != "" {
+		t.Body += "\n" + ex
 	}
 	t.ConsoleO = p.ConsoleOnly
 	return t

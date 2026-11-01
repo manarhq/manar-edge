@@ -11,6 +11,7 @@ import (
 	"unsafe"
 
 	toast "git.sr.ht/~jackmordaunt/go-toast/v2"
+	"git.sr.ht/~jackmordaunt/go-toast/v2/wintoast"
 )
 
 // The toast uses the Windows Runtime directly (git.sr.ht/~jackmordaunt/go-toast/v2, pinned in
@@ -51,20 +52,9 @@ func NewPrompter() (Prompter, error) {
 }
 
 func (p *toastPrompter) Show(ctx context.Context, pr Prompt, t Text) (Decision, error) {
-	n := toast.Notification{
-		AppID: toastAppID, Title: t.Title, Body: t.Body,
-		Audio:    toast.Silent, // off by default (decision #59)
-		Duration: toast.Long,
-	}
-	if pr.ConsoleOnly {
-		n.Body += "\n" + t.Console
-	} else {
-		for _, a := range []struct {
-			label string
-			d     Decision
-		}{{t.Once, ApproveOnce}, {t.Deny, Deny}} {
-			n.Actions = append(n.Actions, toast.Action{Type: toast.Foreground, Content: a.label, Arguments: ToastArgs(pr.ID, a.d)})
-		}
+	xml, err := BuildToastXML(toastAppID, pr, t)
+	if err != nil {
+		return "", err
 	}
 	ch := make(chan Decision, 1)
 	p.mu.Lock()
@@ -75,7 +65,9 @@ func (p *toastPrompter) Show(ctx context.Context, pr Prompt, t Text) (Decision, 
 		delete(p.waiters, pr.ID)
 		p.mu.Unlock()
 	}()
-	if err := n.Push(); err != nil {
+	// No PowerShell fallback: if the Windows Runtime cannot show it, nothing is shown, the approval
+	// stays pending and is decided in the console or on the phone.
+	if err := wintoast.Push(toastAppID, xml); err != nil {
 		return "", err
 	}
 	if pr.ConsoleOnly {

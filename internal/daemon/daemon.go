@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 // Module is one feature of the device service. Start blocks until ctx is done; an error other
@@ -140,7 +141,8 @@ func (heartbeat) Name() string { return "heartbeat" }
 
 func (heartbeat) Start(ctx context.Context, c *hostclient.Client) error {
 	last := ""
-	t := time.NewTicker(60 * time.Second)
+	// 15 s: "Pause all AI" reaches the device about this fast (the API denies at once anyway).
+	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
 		cfg, err := c.Config(ctx)
@@ -150,6 +152,11 @@ func (heartbeat) Start(ctx context.Context, c *hostclient.Client) error {
 		case err == nil && cfg.Status != last:
 			last = cfg.Status
 			log.Printf("manar-edge: this device is %s", cfg.Status)
+		}
+		if err == nil && c.StateDir() != "" {
+			if perr := pause.Set(c.StateDir(), cfg.Paused); perr != nil {
+				log.Printf("manar-edge: pause flag: %v", perr)
+			}
 		}
 		select {
 		case <-ctx.Done():

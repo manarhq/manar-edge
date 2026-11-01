@@ -2,6 +2,7 @@ package warden
 
 import (
 	"context"
+	"html"
 	"sync"
 	"time"
 )
@@ -63,7 +64,8 @@ func (p *notifyPrompter) Show(ctx context.Context, pr Prompt, t Text) (Decision,
 		body += "\n" + t.Console
 	}
 	p.once.Do(func() { p.waiters = map[uint32]chan notifyEvent{}; go p.dispatch() })
-	id, err := p.n.Notify(t.Title, body, actions, true)
+	// The server renders a little markup (<b>, <a href>); Display already removed < and >, and & is escaped.
+	id, err := p.n.Notify(Display(t.Title, 80), html.EscapeString(Display2(body, 700)), actions, true)
 	if err != nil {
 		return "", err
 	}
