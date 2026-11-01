@@ -266,6 +266,27 @@ type Config struct {
 	// Tools carries the owner's per-tool choices (coverage track): Unprotect lists tool ids
 	// whose protection the owner turned off; the device restores their backups.
 	Tools ToolInstructions `json:"tools"`
+	// Jail is the egress filter for protected AI tools (jail track).
+	Jail JailConfig `json:"jail"`
+}
+
+// JailConfig is the "jail" part of GET /host/v1/config.
+type JailConfig struct {
+	Enabled bool `json:"enabled"`
+	// Windows is the separate switch for Windows (off until proven on a real desktop).
+	Windows bool `json:"windows"`
+	// Tools are the tool ids to filter on this device.
+	Tools []string `json:"tools"`
+	// Rules are the remembered per-site decisions.
+	Rules []JailRule `json:"rules"`
+}
+
+// JailRule is one remembered decision: a site an owner allowed or blocked for one tool.
+type JailRule struct {
+	ToolID    string     `json:"toolId"`
+	Site      string     `json:"site"`
+	Mode      string     `json:"mode"` // ALLOW or DENY
+	ExpiresAt *time.Time `json:"expiresAt"`
 }
 
 // ToolInstructions is the "tools" part of GET /host/v1/config.

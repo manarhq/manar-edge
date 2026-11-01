@@ -29,6 +29,7 @@ const usage = `usage:
   manar-edge hook-tool <tool> <event>   (internal: the hook installed in Cursor, Gemini CLI and the others)
   manar-edge mcp-wrap <tool> <server> -- <command> [args...]   (internal: asks Manar before each MCP tool call)
   manar-edge warden [windows-ui on|off]   (per-user prompt helper, started at logon)
+  manar-edge jail-restore   (internal: give the protected tools their network back)
   manar-edge version
 
 Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`
@@ -64,6 +65,8 @@ func main() {
 		err = cmdUninstall(base, os.Stdout)
 	case "service":
 		err = cmdService(base, rest)
+	case "jail-restore":
+		err = jailRestore(os.Stdout)
 	case "warden":
 		err = cmdWarden(base, rest)
 	case "up":

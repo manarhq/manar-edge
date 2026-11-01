@@ -18,6 +18,7 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/jail"
 	"gitlab.vax.sh/manar/manar-edge/internal/warden"
 )
 
@@ -205,7 +206,9 @@ func cmdService(base string, args []string) error {
 		if err := requireAdmin(); err != nil {
 			return err
 		}
-		return deviceServiceRemove()
+		err := deviceServiceRemove()
+		// Removing the service must leave networking as it was, even if the service never ran.
+		return errors.Join(err, jailRestore(os.Stdout))
 	}
 	return errors.New("usage: manar-edge service run|install|remove")
 }
@@ -243,8 +246,20 @@ Type=simple
 ExecStart=%s --state-dir %s service run
 Restart=always
 RestartSec=5
+# Whenever the service stops or dies, give the protected tools their network back (the filter is
+# put up again within seconds when the service restarts).
+ExecStopPost=-%s --state-dir %s jail-restore
 
 [Install]
 WantedBy=multi-user.target
-`, filepath.ToSlash(exe), base)
+`, filepath.ToSlash(exe), base, filepath.ToSlash(exe), base)
+}
+
+// jailRestore removes the egress filter's rules and cgroups (nothing happens if there are none).
+func jailRestore(out io.Writer) error {
+	errs := jail.PlatformCleanup()
+	for _, e := range errs {
+		fmt.Fprintf(out, "warning: removing the egress filter: %v\n", e)
+	}
+	return errors.Join(errs...)
 }

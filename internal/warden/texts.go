@@ -90,6 +90,8 @@ func englishVerb(p Prompt) string {
 	switch {
 	case p.ActionID == "secret.use":
 		return "use the secret"
+	case p.ActionID == "site.connect":
+		return "connect to"
 	case strings.HasPrefix(p.ActionID, "file.read"):
 		return "read"
 	case strings.HasPrefix(p.ActionID, "file.write"), strings.HasPrefix(p.ActionID, "file.delete"):
@@ -104,6 +106,8 @@ func arabicVerb(p Prompt) string {
 	switch {
 	case p.ActionID == "secret.use":
 		return "استخدام السر"
+	case p.ActionID == "site.connect":
+		return "الاتصال بـ"
 	case strings.HasPrefix(p.ActionID, "file.read"):
 		return "قراءة"
 	case strings.HasPrefix(p.ActionID, "file.write"), strings.HasPrefix(p.ActionID, "file.delete"):
