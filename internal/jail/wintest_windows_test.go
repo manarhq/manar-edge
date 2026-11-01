@@ -140,9 +140,27 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 
 	pol := NewPolicy()
 	ask := &fakeAsker{res: Result{Reason: "denied"}}
+	// This machine's own address stands in for the DNS server, so the test does not depend on the
+	// lab's domain controller being up.
+	dnsIP := netip.MustParseAddr(ip)
+	dns, err := net.Listen("tcp4", ip+":53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dns.Close()
+	go func() {
+		for {
+			c, err := dns.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
 	pf := &winPlatform{
-		users:   func() []discovery.User { return []discovery.User{{Name: "sam", Home: home, UID: -1, GID: -1}} },
-		running: func() []string { return nil },
+		users:     func() []discovery.User { return []discovery.User{{Name: "sam", Home: home, UID: -1, GID: -1}} },
+		running:   func() []string { return nil },
+		resolvers: func() []netip.Addr { return []netip.Addr{dnsIP} },
 	}
 	r := &runner{pf: pf, policy: pol, asker: ask, running: map[string]*toolProxy{},
 		resolve: func(context.Context, string) ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr(ip)}, nil }}
@@ -163,8 +181,8 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 	}
 	// 2. the filters exist under the Manar sublayer
 	// loopback and block on each of two layers, plus one permit per DNS server on its layer
-	want := 4 + len(windowsResolvers())
-	t.Logf("DNS servers: %v", windowsResolvers())
+	want := 4 + 1
+	t.Logf("real DNS servers of this machine: %v", windowsResolvers())
 	n, err := wfpFilterCount()
 	if err != nil || n != want {
 		t.Fatalf("filters: %d (want %d) %v", n, want, err)
@@ -188,12 +206,8 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 		t.Fatalf("new host: %q (asked %d)", got, ask.calls.Load())
 	}
 	// 6. DNS is permitted for the tool (TCP 53 to the domain controller)
-	for _, ns := range windowsResolvers() {
-		if ns.Is4() {
-			if got := run(t, claudeExe, "JAILWIN_HELPER=dial", "JAILWIN_ADDR="+ns.String()+":53"); got != "CONNECTED" {
-				t.Errorf("the configured DNS server %s must stay reachable on port 53: %q", ns, got)
-			}
-		}
+	if got := run(t, claudeExe, "JAILWIN_HELPER=dial", "JAILWIN_ADDR="+ip+":53"); got != "CONNECTED" {
+		t.Errorf("the configured DNS server must stay reachable on port 53: %q", got)
 	}
 	// port 53 of any other address is closed (no tunnel through DNS)
 	if got := run(t, claudeExe, "JAILWIN_HELPER=dial", "JAILWIN_ADDR=1.1.1.1:53"); !strings.HasPrefix(got, "BLOCKED") {
@@ -247,7 +261,7 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 	if got := direct(claudeExe); !strings.HasPrefix(got, "BLOCKED") {
 		t.Fatalf("a dead service must leave the tool blocked (fail closed): %q", got)
 	}
-	pfFresh := &winPlatform{users: pf.users, running: pf.running}
+	pfFresh := &winPlatform{users: pf.users, running: pf.running, resolvers: pf.resolvers}
 	if errs := pfFresh.teardown(); len(errs) > 0 {
 		t.Fatal(errs)
 	}
