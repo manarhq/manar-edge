@@ -79,11 +79,16 @@ func MCPServers(found []Found, goos string, read UserReader) []MCPServer {
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Tool != out[j].Tool {
-			return out[i].Tool < out[j].Tool
+	// Same-name servers (e.g. one per Claude Code project) are all kept; the order is total, so the
+	// report bytes do not change between scans and cause needless uploads.
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		for _, c := range [][2]string{{a.Tool, b.Tool}, {a.Name, b.Name}, {a.Transport, b.Transport}, {a.Command, b.Command}, {a.URL, b.URL}, {a.Package, b.Package}, {a.Version, b.Version}} {
+			if c[0] != c[1] {
+				return c[0] < c[1]
+			}
 		}
-		return out[i].Name < out[j].Name
+		return a.ArgCount < b.ArgCount
 	})
 	return out
 }
@@ -243,6 +248,19 @@ func build(tool, name, cmd string, args []string, rawURL, typ string, envKeys []
 	if len(s.EnvKeys) > 40 {
 		s.EnvKeys = s.EnvKeys[:40]
 	}
+	// The transport is the entry's own `type` when it says http or sse; otherwise a command means
+	// stdio (what is really started) and the url is ignored. A remote entry that also has a
+	// command keeps the command's facts, so nothing hides behind the url.
+	remote := typ == "http" || typ == "sse" || typ == "streamable-http" || typ == "streamableHttp"
+	if cmd != "" && !remote {
+		rawURL = ""
+	}
+	if cmd != "" {
+		s.Command = clip(commandBase(cmd), 100)
+		s.ArgCount = len(args)
+		s.Package, s.Version = packageOf(cmd, args)
+		s.OutsideHome = outsideHome(args)
+	}
 	if rawURL != "" {
 		s.URL = hostOnlyURL(rawURL)
 		s.Transport = "http"
@@ -252,10 +270,6 @@ func build(tool, name, cmd string, args []string, rawURL, typ string, envKeys []
 		return s
 	}
 	s.Transport = "stdio"
-	s.Command = clip(commandBase(cmd), 100)
-	s.ArgCount = len(args)
-	s.Package, s.Version = packageOf(cmd, args)
-	s.OutsideHome = outsideHome(args)
 	return s
 }
 

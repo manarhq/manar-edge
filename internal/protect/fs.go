@@ -59,7 +59,7 @@ func (d directFS) Read(path string) ([]byte, bool, os.FileMode, error) {
 	if err := d.checkPath(path); err != nil {
 		return nil, false, 0, err
 	}
-	f, err := os.OpenFile(path, os.O_RDONLY|oNoFollow, 0)
+	f, err := openRead(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, false, 0, nil
 	}
