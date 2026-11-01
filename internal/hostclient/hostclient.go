@@ -284,13 +284,34 @@ type Tool struct {
 	Changes     []string `json:"changes,omitempty"`
 }
 
-// Inventory reports the AI tools found on this device. It is the whole list: a tool left out is
-// treated as gone.
-func (c *Client) Inventory(ctx context.Context, tools []Tool) error {
+// MCPServer is one MCP server a tool is configured to use. It is an allow-list: the command's
+// base name, the package and pinned version, the transport, and a remote server's scheme, host and
+// port. Arguments are never sent (only how many), and neither are environment values (names only),
+// URL credentials, paths or query strings. OutsideHome is a yes/no worked out on the device from
+// the arguments.
+type MCPServer struct {
+	Tool        string   `json:"tool"` // host.cursor
+	Name        string   `json:"name"`
+	Transport   string   `json:"transport"` // stdio, http or sse
+	Command     string   `json:"command,omitempty"`
+	ArgCount    int      `json:"argCount,omitempty"`
+	URL         string   `json:"url,omitempty"`
+	Package     string   `json:"package,omitempty"`
+	Version     string   `json:"version,omitempty"`
+	EnvKeys     []string `json:"envKeys,omitempty"`
+	OutsideHome bool     `json:"outsideHome,omitempty"`
+}
+
+// Inventory reports the AI tools and their MCP servers found on this device. It is the whole list:
+// a tool or server left out is treated as gone. An older Manar ignores mcpServers.
+func (c *Client) Inventory(ctx context.Context, tools []Tool, mcp []MCPServer) error {
 	if tools == nil {
 		tools = []Tool{}
 	}
-	return c.Do(ctx, http.MethodPost, "/inventory", map[string]any{"tools": tools}, nil)
+	if mcp == nil {
+		mcp = []MCPServer{}
+	}
+	return c.Do(ctx, http.MethodPost, "/inventory", map[string]any{"tools": tools, "mcpServers": mcp}, nil)
 }
 
 // Authorize asks for a decision on an action of another AI tool (POST /host/v1/authorize).

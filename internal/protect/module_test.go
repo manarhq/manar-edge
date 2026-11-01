@@ -56,3 +56,17 @@ func TestReconcileFollowsApprovalAndTheOwnersSwitch(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSessionID(t *testing.T) {
+	for in, want := range map[string]string{
+		`{"session_id":"abc-123"}`:        "abc-123",
+		`{"conversation_id":"c.1"}`:       "c.1",
+		`{"session_id":"bad id; rm -rf"}`: "",
+		`{"tool_name":"x"}`:               "",
+		`nope`:                            "",
+	} {
+		if got := SessionID([]byte(in)); got != want {
+			t.Errorf("%s: got %q want %q", in, got, want)
+		}
+	}
+}

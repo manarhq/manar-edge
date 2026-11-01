@@ -47,6 +47,7 @@ func theStore() *Store {
 
 func init() {
 	discovery.SetReconciler(reconcile)
+	discovery.SetUserReader(readUserFile)
 	daemon.Register(&relayModule{})
 }
 
@@ -249,6 +250,11 @@ func relayHandler(b backend) http.Handler {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		caller, _ := r.Context().Value(callerKey{}).(string)
+		// The tool's session id rides on the caller string ("uid:1000|s:<id>") so the backend
+		// interface stays as it is; Manar splits it off and records it with the action.
+		if sid := raw["session"]; sessionOK.MatchString(sid) {
+			caller += "|s:" + sid
+		}
 		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller)
 		if err != nil {
 			http.Error(w, "upstream", 502)
@@ -313,4 +319,14 @@ func Changes(f discovery.Found) []string {
 		out = append(out, st.Describe(f.Key, u.Name)...)
 	}
 	return out
+}
+
+// readUserFile is how discovery reads a person's MCP settings: as that person, never following a
+// link, and only below their home folder. A file that cannot be read safely is as good as absent.
+func readUserFile(u discovery.User, path string) ([]byte, bool) {
+	b, exists, _, err := newUserFS(Owner{UID: u.UID, GID: u.GID, Home: u.Home}).Read(path)
+	if err != nil || !exists {
+		return nil, false
+	}
+	return b, true
 }
