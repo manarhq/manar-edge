@@ -230,3 +230,39 @@ func TestWindowsPromptIsOnUnlessTurnedOff(t *testing.T) {
 		t.Fatalf("opt out not kept: %v", err)
 	}
 }
+
+func TestNothingIsShownWhilePaused(t *testing.T) {
+	b, l := serve(t, uidCheck(1000))
+	client := connect(t, l, 1000)
+	defer client.Close()
+	waitHelper(t, b, true)
+	hc := newCodec(client)
+	prompts := make(chan string, 4)
+	go func() {
+		for {
+			m, err := hc.recv()
+			if err != nil {
+				return
+			}
+			if m.Type == "prompt" {
+				prompts <- m.Prompt.ID
+			}
+		}
+	}()
+	api := &fakeAPI{pending: pendingReply{OwnerMayApprove: true, Items: []pendingItem{{ID: "ap1", ToolID: "host.cursor", ActionID: "read", Resource: "x", DecidableHere: true}}}}
+	paused := true
+	w := &watcher{broker: b, api: api, seen: map[string]context.CancelFunc{}, paused: func() bool { return paused }}
+	w.tick(context.Background())
+	select {
+	case id := <-prompts:
+		t.Fatalf("prompt %s shown while paused", id)
+	case <-time.After(200 * time.Millisecond):
+	}
+	paused = false
+	w.tick(context.Background())
+	select {
+	case <-prompts:
+	case <-time.After(3 * time.Second):
+		t.Fatal("no prompt after resume")
+	}
+}

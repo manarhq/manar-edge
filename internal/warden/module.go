@@ -11,6 +11,7 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 func init() { daemon.Register(&module{base: ""}) }
@@ -71,7 +72,7 @@ func (m *module) Start(ctx context.Context, c *hostclient.Client) error {
 	defer vaultAPI.Store(nil)
 	go func() { _ = b.Serve(l) }()
 
-	w := &watcher{broker: b, api: c, seen: map[string]context.CancelFunc{}}
+	w := &watcher{broker: b, api: c, seen: map[string]context.CancelFunc{}, paused: func() bool { return pause.Paused(base) }}
 	return w.run(ctx)
 }
 
@@ -84,6 +85,9 @@ type watcher struct {
 	broker *Broker
 	api    decider
 	poll   time.Duration
+	// paused: while "Pause all AI" is on, nothing is shown (and what is on screen is withdrawn);
+	// the API refuses to approve during a pause and expires what was pending.
+	paused func() bool
 
 	mu   sync.Mutex
 	seen map[string]context.CancelFunc // prompted approvals; the cancel withdraws the prompt
@@ -107,6 +111,15 @@ func (w *watcher) run(ctx context.Context) error {
 }
 
 func (w *watcher) tick(ctx context.Context) {
+	if w.paused != nil && w.paused() {
+		w.mu.Lock()
+		for id, cancel := range w.seen {
+			cancel()
+			delete(w.seen, id)
+		}
+		w.mu.Unlock()
+		return
+	}
 	if !w.broker.HasHelper() {
 		return
 	}

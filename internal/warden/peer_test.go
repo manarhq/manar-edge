@@ -75,3 +75,22 @@ func TestInProtectedDir(t *testing.T) {
 		t.Error("empty root must refuse")
 	}
 }
+
+func TestWindowsACLPolicy(t *testing.T) {
+	const users, everyone, admins, system = "S-1-5-32-545", "S-1-1-0", "S-1-5-32-544", "S-1-5-18"
+	if !OwnerTrusted(admins) || !OwnerTrusted(system) || OwnerTrusted("S-1-5-21-1-2-3-1001") || OwnerTrusted("S-1-3-0") {
+		t.Error("owner policy wrong")
+	}
+	read := uint32(0x1200a9) // read and execute
+	if AllowACEWritable(users, read) {
+		t.Error("read and execute for Users is fine")
+	}
+	for _, mask := range []uint32{0x2, 0x4, 0x40, 0x10000, 0x40000, 0x80000, 0x40000000, 0x10000000, 0x1f01ff} {
+		if !AllowACEWritable(users, mask) || !AllowACEWritable(everyone, mask) {
+			t.Errorf("mask %#x for an ordinary group must count as writable", mask)
+		}
+		if AllowACEWritable(admins, mask) || AllowACEWritable(system, mask) {
+			t.Errorf("mask %#x for admins or SYSTEM is allowed", mask)
+		}
+	}
+}
