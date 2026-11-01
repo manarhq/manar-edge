@@ -139,7 +139,16 @@ not read the TLS traffic. A running Claude Code started before the setting was w
 environment: restart it. Children Claude Code starts inherit the proxy variables and use the proxy if they
 honour them; they are not blocked.
 
-Switch: the API sends `jail.windows`; `MANAR_JAIL_WINDOWS` (see the API's `docs/jail.md`).
+Switch: the API sends `jail.windows` (`MANAR_JAIL_WINDOWS`, on by default; see the API's `docs/jail.md`).
+
+Tested on the Manar lab Windows VM (Windows Server 2022, SYSTEM) with `go test -tags jailwin` against real WFP
+filters: direct connects from the tool's exe blocked (this machine's address and the internet), an allowed host
+reachable through the proxy, a new host asked about, the configured DNS server reachable on port 53 and other
+addresses' port 53 blocked, other programs unaffected, a repeated poll a no-op, a removed filter set put back,
+turning the tool off removes the filters and restores `settings.json` byte for byte, a dead service leaves the
+tool blocked, a fresh process restores everything, an impostor on the port gets nothing blocked, and
+`netsh wfp show filters` shows no Manar filter afterwards. Not tested there: a real Claude Code (not installed
+on the VM) reading the `env` block, which rests on its documentation.
 
 ## Test
 
