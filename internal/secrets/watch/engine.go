@@ -59,6 +59,8 @@ type Engine struct {
 	// Mode is the device setting (see Mode). Nil or ModeAlert means every open is allowed and
 	// reported.
 	Mode func() Mode
+	// FileUID returns the uid that owns a file; nil means the platform default.
+	FileUID func(path string) (int, bool)
 	// Gate, if set, remembers the person's answers and asks the questions (WARDEN ask once).
 	Gate *Gate
 	// Self reports whether a pid is Manar's own (never delayed, never reported).
@@ -183,11 +185,22 @@ func (e *Engine) decide(ev PermEvent) (allow bool) {
 	}
 	deny := a.Deny() && mode.Blocks(class)
 	if deny && e.Gate != nil {
-		k := GateKey{Tool: a.ToolID, Class: class, Exe: a.ToolProc.Exe}
-		if e.Gate.Allows(k) {
-			deny = false // the person said yes to this program
-		} else {
-			e.Gate.Ask(k, a.ToolProc)
+		// A grant is the opener's own user's answer about that user's own file. Another user's
+		// file, or a user we cannot tell, never uses a grant (an unknown opener user allows: any
+		// doubt allows).
+		op := a.Chain[0]
+		fileUID := e.FileUID
+		if fileUID == nil {
+			fileUID = defaultFileUID
+		}
+		fu, fok := fileUID(ev.Path)
+		switch {
+		case !op.UIDKnown || !fok:
+			deny = false
+		case op.UID == fu:
+			if e.Gate.Decide(a.ToolProc.PID, GateKey{UID: op.UID, Tool: a.ToolID, Class: class, Exe: a.ToolProc.Exe}) {
+				deny = false // the person said yes to this program
+			}
 		}
 	}
 	e.trace("pid=%d process=%q path=%s tool=%s toolCanBlock=%v interactive=%v mode=%s: deny=%v",

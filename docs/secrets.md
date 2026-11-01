@@ -20,7 +20,18 @@ The first refused open starts one question (`kind: file`, `ref: <class>`) throug
 tool gets "permission denied" at once and its next try passes after the person answered. Allow once
 is a 60 second window; 8 hours and Always are kept in `<state>/secrets/file-grants.json` (0600). No
 answer in 2 minutes is a denial, logged as `secret.vault.denied`; the same question is not asked
-again for 5 minutes. The grant belongs to (tool, file class, the tool's executable path).
+again for 5 minutes.
+
+A grant belongs to (user, tool, file class, executable path, SHA-256 of the executable). The hash comes
+from the opening process's own `/proc/<pid>/exe` link and is cached by device, inode, size and mtime;
+it is computed in the background, so the first open of a program is always refused. A program that
+cannot be hashed or pinned is refused and never gets a standing grant. A file owned by a different
+user than the opener never uses a grant and nobody is asked about it.
+
+Files are watched through their parent directory, so a token file replaced by write-and-rename stays
+protected at once. Ceilings: a directory that did not exist at start (first `gh auth login`) is
+picked up within 30 seconds; new `.env` files within the hour. Opens of other files directly in
+`$HOME` pass through the watcher and are answered at once.
 
 ## If you cannot read your own key
 

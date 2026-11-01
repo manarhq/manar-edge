@@ -32,7 +32,7 @@ func TestFanotifyDeniesAIToolAllowsOthers(t *testing.T) {
 	if err != nil {
 		t.Skipf("fanotify unavailable: %v", err)
 	}
-	if n := markAll(src, Targets(home), nil, nil); n == 0 {
+	if n := markAll(src, Targets(home), nil, nil, false); n == 0 {
 		t.Fatal("no marks")
 	}
 	procs := newProcSource()
@@ -107,8 +107,8 @@ func TestFanotifyKeysAskOnceEnvAlertOnly(t *testing.T) {
 	}
 	notif, _ := newFanSource(false)
 	targets := Targets(home)
-	markAll(perm, targets, []string{envf}, ModeKeys.Held)
-	markAll(notif, targets, nil, func(c string) bool { return !ModeKeys.Held(c) })
+	markAll(perm, targets, []string{envf}, ModeKeys.Held, false)
+	markAll(notif, targets, nil, func(c string) bool { return !ModeKeys.Held(c) }, false)
 	procs := newProcSource()
 	out := make(chan Event, 32)
 	gate := &Gate{Approver: allowAlways{}, Out: out}
@@ -166,7 +166,7 @@ func TestFanotifyHolderKilledReleasesOpens(t *testing.T) {
 		if err != nil {
 			os.Exit(3)
 		}
-		markAll(src, Targets(dir), nil, nil)
+		markAll(src, Targets(dir), nil, nil, false)
 		fmt.Println("ready")
 		for { // take events, never answer them
 			if _, err := src.Next(); err != nil && !errors.Is(err, ErrIdle) {
@@ -207,5 +207,48 @@ func TestFanotifyHolderKilledReleasesOpens(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("open still hangs after the holder was killed: the user would be locked out")
+	}
+}
+
+// A token file replaced the way npm, pip and editors do it (write a temp file, rename it over) must
+// stay protected at once, not after the next rescan.
+func TestFanotifyAtomicReplaceKeepsProtection(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	home := t.TempDir()
+	npmrc := filepath.Join(home, ".npmrc")
+	_ = os.WriteFile(npmrc, []byte("//registry:_authToken=x\n"), 0o600)
+	perm, err := newFanSource(true)
+	if err != nil {
+		t.Skipf("fanotify unavailable: %v", err)
+	}
+	if markAll(perm, Targets(home), nil, ModeKeys.Held, false) == 0 {
+		t.Fatal("no marks")
+	}
+	procs := newProcSource()
+	out := make(chan Event, 32)
+	e := &Engine{Src: perm, Procs: procs, Mode: func() Mode { return ModeKeys }, Gate: &Gate{Out: out}, Self: selfFunc(procs), Out: out,
+		Homes: func() []string { return []string{home} }, Trace: t.Logf}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { _ = e.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+	time.Sleep(200 * time.Millisecond)
+	fake := fakeAITool(t, home)
+
+	if exec.Command(fake, npmrc).Run() == nil {
+		t.Fatal("before the replace: the unapproved program read the token file")
+	}
+	tmp := npmrc + ".tmp"
+	_ = os.WriteFile(tmp, []byte("//registry:_authToken=y\n"), 0o600)
+	if err := os.Rename(tmp, npmrc); err != nil {
+		t.Fatal(err)
+	}
+	if exec.Command(fake, npmrc).Run() == nil {
+		t.Fatal("after an atomic replace the unapproved program read the token file")
+	}
+	if err := exec.Command("/bin/cat", npmrc).Run(); err != nil {
+		t.Fatalf("the person's own cat must work: %v", err)
 	}
 }

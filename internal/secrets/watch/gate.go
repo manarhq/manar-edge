@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"time"
 
@@ -23,8 +24,10 @@ import (
 // an aws call may open its key several times. 8 hours and Always are kept on disk (0600) so a
 // restart does not ask again. A grant belongs to (tool, file class, tool executable path).
 //
-// ponytail: the grant is not tied to the binary hash (the catalogue itself matches on paths); add
-// the hash to Key if a path-swap threat matters.
+// A grant is tied to the user and to the executable's hash. The hash is taken from the opening
+// process's own /proc/<pid>/exe link (not the path), cached by file identity (device, inode, size,
+// mtime). Hashing a big binary can take longer than the permission path may wait, so the first
+// open of a program is always refused and hashed in the background; the question follows.
 type Gate struct {
 	Approver vault.Approver
 	Out      chan<- Event
@@ -33,11 +36,20 @@ type Gate struct {
 	// Wait bounds one question. No answer in this time is a denial, logged.
 	Wait time.Duration
 
+	// Open returns the executable of a running process through its /proc link. Tests replace it.
+	Open func(pid int) (*os.File, error)
+
 	mu       sync.Mutex
 	grants   map[string]gateGrant
 	inflight map[string]bool
 	denied   map[string]time.Time
-	shas     map[string]string
+	shas     map[fileID]string
+}
+
+type fileID struct {
+	dev, ino uint64
+	size     int64
+	mtime    int64
 }
 
 type gateGrant struct {
@@ -45,10 +57,17 @@ type gateGrant struct {
 	Always bool      `json:"always,omitempty"`
 }
 
-// GateKey names what a grant covers.
-type GateKey struct{ Tool, Class, Exe string }
+// GateKey names what a grant covers: the user the program runs as, the tool, the file class, the
+// tool's executable path and the SHA-256 of that executable as it was when the open happened.
+type GateKey struct {
+	UID              int
+	Tool, Class, Exe string
+	SHA              string
+}
 
-func (k GateKey) s() string { return k.Tool + "\x00" + k.Class + "\x00" + k.Exe }
+func (k GateKey) s() string {
+	return strconv.Itoa(k.UID) + "\x00" + k.Tool + "\x00" + k.Class + "\x00" + k.Exe + "\x00" + k.SHA
+}
 
 const (
 	onceWindow     = 60 * time.Second
@@ -67,7 +86,7 @@ func (g *Gate) load() {
 	if g.grants != nil {
 		return
 	}
-	g.grants, g.inflight, g.denied, g.shas = map[string]gateGrant{}, map[string]bool{}, map[string]time.Time{}, map[string]string{}
+	g.grants, g.inflight, g.denied, g.shas = map[string]gateGrant{}, map[string]bool{}, map[string]time.Time{}, map[fileID]string{}
 	if g.Path == "" {
 		return
 	}
@@ -76,8 +95,65 @@ func (g *Gate) load() {
 	}
 }
 
-// Allows is the check on the permission path: memory only, no I/O.
-func (g *Gate) Allows(k GateKey) bool {
+func (g *Gate) open(pid int) (*os.File, error) {
+	if g.Open != nil {
+		return g.Open(pid)
+	}
+	return os.Open("/proc/" + strconv.Itoa(pid) + "/exe")
+}
+
+// Decide is the check on the permission path: a /proc open and a stat, memory lookups, no hashing,
+// no network. It returns true when the person allowed this program (same user, same executable
+// bytes). Otherwise it makes sure one question is on its way and returns false.
+func (g *Gate) Decide(pid int, k GateKey) bool {
+	f, err := g.open(pid)
+	if err != nil {
+		return false // cannot pin the program: refuse, no standing grant can apply
+	}
+	id, ok := identify(f)
+	g.mu.Lock()
+	g.load()
+	sha, cached := g.shas[id]
+	g.mu.Unlock()
+	if !ok {
+		f.Close()
+		return false
+	}
+	if !cached {
+		go g.hashThenAsk(f, id, k) // the file stays open so a process that exits is still hashed
+		return false
+	}
+	f.Close()
+	k.SHA = sha
+	if g.allows(k) {
+		return true
+	}
+	g.ask(k)
+	return false
+}
+
+func (g *Gate) hashThenAsk(f *os.File, id fileID, k GateKey) {
+	defer f.Close()
+	defer func() { _ = recover() }()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		g.deny(k, "") // not hashed: no question, no grant
+		return
+	}
+	sha := hex.EncodeToString(h.Sum(nil))
+	g.mu.Lock()
+	if len(g.shas) > 256 {
+		clear(g.shas)
+	}
+	g.shas[id] = sha
+	g.mu.Unlock()
+	k.SHA = sha
+	if !g.allows(k) { // a stored grant only needed the hash; the next open passes
+		g.ask(k)
+	}
+}
+
+func (g *Gate) allows(k GateKey) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.load()
@@ -85,8 +161,8 @@ func (g *Gate) Allows(k GateKey) bool {
 	return ok && (gr.Always || g.now().Before(gr.Until))
 }
 
-// Ask starts the question for k unless one is open or the person just said no. It returns at once.
-func (g *Gate) Ask(k GateKey, toolProc Proc) {
+// ask starts the question for k unless one is open or the person just said no. It returns at once.
+func (g *Gate) ask(k GateKey) {
 	if g.Approver == nil {
 		return
 	}
@@ -98,10 +174,10 @@ func (g *Gate) Ask(k GateKey, toolProc Proc) {
 	}
 	g.inflight[k.s()] = true
 	g.mu.Unlock()
-	go g.ask(k, toolProc)
+	go g.run(k)
 }
 
-func (g *Gate) ask(k GateKey, p Proc) {
+func (g *Gate) run(k GateKey) {
 	defer func() { _ = recover() }()
 	wait := g.Wait
 	if wait <= 0 {
@@ -109,7 +185,8 @@ func (g *Gate) ask(k GateKey, p Proc) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
-	d, err := g.Approver.Ask(ctx, vault.Request{Kind: "file", Ref: k.Class, Program: k.Exe, SHA: g.sha(k.Exe)})
+	// Owner is the user the program runs as: that user's prompt, nobody else's.
+	d, err := g.Approver.Ask(ctx, vault.Request{Kind: "file", Ref: k.Class, Owner: strconv.Itoa(k.UID), Program: k.Exe, SHA: k.SHA})
 	g.mu.Lock()
 	delete(g.inflight, k.s())
 	switch {
@@ -120,16 +197,24 @@ func (g *Gate) ask(k GateKey, p Proc) {
 	case err == nil && d == vault.AllowAlways:
 		g.grants[k.s()] = gateGrant{Always: true}
 	default:
-		g.denied[k.s()] = g.now()
 		d = vault.Deny
 	}
 	g.save()
 	g.mu.Unlock()
 	if d == vault.Deny { // an unanswered question is a denial and is logged as one
-		select {
-		case g.Out <- Event{Type: "secret.vault.denied", ToolID: k.Tool, Process: filepath.Base(p.Exe), PathClass: k.Class, Blocked: true, At: g.now().UTC()}:
-		default:
-		}
+		g.deny(k, "")
+	}
+}
+
+// deny remembers a refusal (no new question for a while) and logs it.
+func (g *Gate) deny(k GateKey, _ string) {
+	g.mu.Lock()
+	g.load()
+	g.denied[k.s()] = g.now()
+	g.mu.Unlock()
+	select {
+	case g.Out <- Event{Type: "secret.vault.denied", ToolID: k.Tool, Process: filepath.Base(k.Exe), PathClass: k.Class, Blocked: true, At: g.now().UTC()}:
+	default:
 	}
 }
 
@@ -152,27 +237,4 @@ func (g *Gate) save() { // caller holds mu
 		return
 	}
 	_ = os.Rename(tmp, g.Path)
-}
-
-// sha is the SHA-256 of the program the question names (cached by path). An unreadable file gives
-// a fixed placeholder; the prompt shows the path as well.
-func (g *Gate) sha(exe string) string {
-	g.mu.Lock()
-	s, ok := g.shas[exe]
-	g.mu.Unlock()
-	if ok {
-		return s
-	}
-	s = "0000000000000000000000000000000000000000000000000000000000000000"
-	if f, err := os.Open(exe); err == nil {
-		h := sha256.New()
-		if _, err := io.Copy(h, f); err == nil {
-			s = hex.EncodeToString(h.Sum(nil))
-		}
-		f.Close()
-	}
-	g.mu.Lock()
-	g.shas[exe] = s
-	g.mu.Unlock()
-	return s
 }

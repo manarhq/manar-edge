@@ -8,12 +8,14 @@ import (
 
 // Proc is what the watcher knows about one process. Fields the OS could not give stay zero.
 type Proc struct {
-	PID     int
-	PPID    int
-	Exe     string   // full path of the executable
-	Comm    string   // short name
-	Cmdline []string // arguments, argv[0] first
-	TTY     bool     // has a controlling terminal
+	PID      int
+	PPID     int
+	Exe      string   // full path of the executable
+	Comm     string   // short name
+	Cmdline  []string // arguments, argv[0] first
+	TTY      bool     // has a controlling terminal
+	UID      int      // owner of the process (real uid)
+	UIDKnown bool
 }
 
 // ProcSource reads process info. Get must return an error for a process that is gone.

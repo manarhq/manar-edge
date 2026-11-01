@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // procfs reads /proc.
@@ -25,6 +26,11 @@ func (p procfs) Get(pid int) (Proc, error) {
 		return Proc{}, err
 	}
 	pr.PID = pid
+	if st, err := os.Stat(dir); err == nil {
+		if sys, ok := st.Sys().(*syscall.Stat_t); ok {
+			pr.UID, pr.UIDKnown = int(sys.Uid), true
+		}
+	}
 	pr.Exe, _ = os.Readlink(dir + "/exe")
 	pr.Exe = strings.TrimSuffix(pr.Exe, " (deleted)")
 	if b, err := os.ReadFile(dir + "/cmdline"); err == nil {
@@ -73,4 +79,14 @@ func selfFunc(procs ProcSource) func(int) bool {
 		pr, err := procs.Get(pid)
 		return err == nil && pr.Exe == exe
 	}
+}
+
+// defaultFileUID is the uid that owns a file ("" path or an error: unknown).
+func defaultFileUID(path string) (int, bool) {
+	st, err := os.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	sys, ok := st.Sys().(*syscall.Stat_t)
+	return int(sys.Uid), ok
 }

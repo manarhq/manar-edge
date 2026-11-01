@@ -63,7 +63,7 @@ func engineFor(src Source, procs fakeProcs, block bool) (*Engine, chan Event) {
 	if block {
 		mode = ModeKeys
 	}
-	return &Engine{Src: src, Procs: procs, Mode: func() Mode { return mode }, Self: func(pid int) bool { return pid == 4242 },
+	return &Engine{Src: src, Procs: uidProcs{procs}, FileUID: func(string) (int, bool) { return 1000, true }, Mode: func() Mode { return mode }, Self: func(pid int) bool { return pid == 4242 },
 		Out: out, Homes: func() []string { return []string{"/home/alice"} }, StallAfter: 80 * time.Millisecond}, out
 }
 
@@ -188,4 +188,13 @@ func TestPanicInDecisionAllows(t *testing.T) {
 	if ok, answered := src.answered(1); !answered || !ok {
 		t.Fatal("a crash while deciding must still answer, with allow")
 	}
+}
+
+// uidProcs gives every fake process the uid 1000.
+type uidProcs struct{ fakeProcs }
+
+func (u uidProcs) Get(pid int) (Proc, error) {
+	p, err := u.fakeProcs.Get(pid)
+	p.UID, p.UIDKnown = 1000, true
+	return p, err
 }

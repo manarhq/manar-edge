@@ -39,23 +39,26 @@ func runPlatform(ctx context.Context, out chan<- Event, mode Mode, gate *Gate) (
 			return false
 		}
 	}
-	mark := func() int {
+	var envFound []string
+	mark := func(rediscover bool) int {
 		var targets []Target
-		var env []string
 		for _, h := range host.Homes() {
 			targets = append(targets, Targets(h)...)
-			env = append(env, DiscoverEnv(h, 5, 500)...)
+			if rediscover { // the walk is the costly part: hourly
+				envFound = append(envFound, DiscoverEnv(h, 5, 500)...)
+			}
 		}
+		env := envFound
 		n := 0
 		if perm != nil {
-			n += markAll(perm, targets, env, mode.Held)
+			n += markAll(perm, targets, env, mode.Held, mode.Blocks(ClassEnv))
 		}
 		if notif != nil {
-			n += markAll(notif, targets, env, func(c string) bool { return !mode.Held(c) })
+			n += markAll(notif, targets, env, func(c string) bool { return !mode.Held(c) }, false)
 		}
 		return n
 	}
-	if mark() == 0 {
+	if mark(true) == 0 {
 		log.Printf("manar-edge: secrets watcher: nothing to watch yet")
 	}
 	procs := newProcSource()
@@ -65,14 +68,22 @@ func runPlatform(ctx context.Context, out chan<- Event, mode Mode, gate *Gate) (
 	}
 	notice(out, TypeAvailable)
 	go func() {
-		t := time.NewTicker(time.Hour)
+		// Key and token files are re-marked every 30 s, which only matters for a directory that
+		// did not exist yet (first `gh auth login`, first ~/.aws). A file that is replaced inside
+		// a marked directory is covered at once. New .env files wait for the hourly walk.
+		t := time.NewTicker(30 * time.Second)
 		defer t.Stop()
+		n := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-t.C:
-				mark()
+				n++
+				if n%120 == 0 {
+					envFound = nil
+				}
+				mark(n%120 == 0)
 			}
 		}
 	}()

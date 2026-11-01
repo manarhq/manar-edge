@@ -178,9 +178,20 @@ func (f *fanSource) Close() error {
 }
 
 // markAll marks every existing target whose class want accepts and returns how many marks worked.
-// A directory target covers the files directly inside it; a file target is an inode mark.
-func markAll(f *fanSource, targets []Target, envFiles []string, want func(class string) bool) int {
+// A directory target covers the files directly inside it; a file target is covered through its
+// parent directory.
+func markAll(f *fanSource, targets []Target, envFiles []string, want func(class string) bool, envParents bool) int {
 	ok := 0
+	marked := map[string]bool{}
+	mark := func(p string, dir bool) {
+		if marked[p] {
+			return
+		}
+		marked[p] = true
+		if f.Mark(p, dir) == nil {
+			ok++
+		}
+	}
 	for _, t := range targets {
 		if want != nil && !want(t.Class) {
 			continue
@@ -190,9 +201,10 @@ func markAll(f *fanSource, targets []Target, envFiles []string, want func(class 
 			continue
 		}
 		if !st.IsDir() {
-			if f.Mark(t.Path, false) == nil {
-				ok++
-			}
+			// Mark the parent directory, not the file's inode: an editor or package manager that
+			// replaces the file (write a temp file, rename it over) would otherwise drop the mark.
+			// Events for the other files in that directory are answered at once (ClassOf is "").
+			mark(filepath.Dir(t.Path), true)
 			continue
 		}
 		dirs := []string{t.Path}
@@ -205,15 +217,15 @@ func markAll(f *fanSource, targets []Target, envFiles []string, want func(class 
 			})
 		}
 		for _, d := range dirs {
-			if f.Mark(d, true) == nil {
-				ok++
-			}
+			mark(d, true)
 		}
 	}
 	if want == nil || want(ClassEnv) {
 		for _, p := range envFiles {
-			if f.Mark(p, false) == nil {
-				ok++
+			if envParents { // blocked .env files get the same replace-safe parent mark
+				mark(filepath.Dir(p), true)
+			} else {
+				mark(p, false)
 			}
 		}
 	}

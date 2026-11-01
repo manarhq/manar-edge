@@ -75,17 +75,37 @@ func eventually(t *testing.T, f func() bool) {
 	t.Fatal("timeout")
 }
 
+var testOut = make(chan Event, 64)
+
+// gateWith builds a Gate whose "executable of pid" is a temp file with the given bytes.
+func gateWith(t *testing.T, ap vault.Approver, path string, exe *string) *Gate {
+	t.Helper()
+	if *exe == "" {
+		*exe = filepath.Join(t.TempDir(), "cursor-agent")
+		_ = os.WriteFile(*exe, []byte("binary v1"), 0o755)
+	}
+	return &Gate{Approver: ap, Out: testOut, Path: path,
+		Open: func(int) (*os.File, error) { return os.Open(*exe) }}
+}
+
+func decideEventually(t *testing.T, g *Gate, k GateKey) {
+	t.Helper()
+	eventually(t, func() bool { return g.Decide(1, k) })
+}
+
+var key1 = GateKey{UID: 1000, Tool: "host.cursor", Class: ClassSSH, Exe: "/x/cursor-agent"}
+
 // Default founder policy end to end: a key is denied, the question is asked once, "always" lets the
 // program's next open through and survives a restart; .env stays alert-only.
 func TestKeysDeniedThenAskedOnceThenAllowed(t *testing.T) {
 	const key, env = "/home/alice/.ssh/id_ed25519", "/home/alice/app/.env"
 	ap := &fakeApprover{d: vault.AllowAlways}
 	path := filepath.Join(t.TempDir(), "g.json")
-	out := make(chan Event, 16)
-	src := newFake(PermEvent{PID: 12, Path: key, Handle: 1}, PermEvent{PID: 12, Path: key, Handle: 2}, PermEvent{PID: 12, Path: env, Handle: 3})
+	var exe string
+	g := gateWith(t, ap, path, &exe)
+	src := newFake(PermEvent{PID: 12, Path: key, Handle: 1}, PermEvent{PID: 12, Path: env, Handle: 3})
 	e, _ := engineFor(src, treeCursorAndTerminal, true)
-	e.Gate = &Gate{Approver: ap, Out: out, Path: path}
-	e.Mode = func() Mode { return ModeKeys }
+	e.Gate = g
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(100 * time.Millisecond); cancel() }()
 	_ = e.Run(ctx)
@@ -95,45 +115,94 @@ func TestKeysDeniedThenAskedOnceThenAllowed(t *testing.T) {
 	if ok, _ := src.answered(3); !ok {
 		t.Fatal(".env is alert-only in the default mode")
 	}
-	eventually(t, func() bool { return ap.n() >= 1 })
-	if ap.n() != 1 || ap.calls[0].Kind != "file" || ap.calls[0].Ref != ClassSSH {
-		t.Fatalf("one question for ssh keys: %+v", ap.calls)
+	eventually(t, func() bool { return ap.n() == 1 })
+	if c := ap.calls[0]; c.Kind != "file" || c.Ref != ClassSSH || c.Owner != "1000" || len(c.SHA) != 64 {
+		t.Fatalf("one question for ssh keys, naming the user and the hash: %+v", c)
 	}
-	// A new engine (a restart) reads the grant from disk and lets the program through.
-	g2 := &Gate{Approver: ap, Out: out, Path: path}
-	src2 := newFake(PermEvent{PID: 12, Path: key, Handle: 9})
-	e2, _ := engineFor(src2, treeCursorAndTerminal, true)
-	e2.Gate = g2
-	ctx2, cancel2 := context.WithCancel(context.Background())
-	go func() { time.Sleep(60 * time.Millisecond); cancel2() }()
-	_ = e2.Run(ctx2)
-	if ok, _ := src2.answered(9); !ok {
-		t.Fatal("always-allowed program must pass after a restart")
-	}
+	k := GateKey{UID: 1000, Tool: "host.cursor", Class: ClassSSH, Exe: treeCursorAndTerminal[10].Exe}
+	decideEventually(t, g, k)
+	// A restart reads the grant from disk (hashing the program again) and does not ask again.
+	g2 := gateWith(t, ap, path, &exe)
+	decideEventually(t, g2, k)
 	if ap.n() != 1 {
 		t.Fatal("must not ask again")
 	}
 }
 
+func TestGrantDoesNotCrossUsersOrBinaries(t *testing.T) {
+	ap := &fakeApprover{d: vault.AllowAlways}
+	var exe string
+	g := gateWith(t, ap, "", &exe)
+	decideEventually(t, g, key1)
+	other := key1
+	other.UID = 1001
+	if g.Decide(1, other) {
+		t.Fatal("another user's process must not use this user's grant")
+	}
+	// The program changes (same path, new bytes): the grant no longer applies.
+	time.Sleep(10 * time.Millisecond)
+	_ = os.WriteFile(exe, []byte("binary v2, longer"), 0o755)
+	if g.Decide(1, key1) {
+		t.Fatal("a changed executable must not inherit the grant")
+	}
+}
+
+func TestOtherUsersFileIsNeverGranted(t *testing.T) {
+	ap := &fakeApprover{d: vault.AllowAlways}
+	var exe string
+	g := gateWith(t, ap, "", &exe)
+	src := newFake(PermEvent{PID: 12, Path: "/home/alice/.ssh/id_ed25519", Handle: 1})
+	e, _ := engineFor(src, treeCursorAndTerminal, true)
+	e.Gate = g
+	e.FileUID = func(string) (int, bool) { return 1001, true } // file owned by someone else
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { time.Sleep(80 * time.Millisecond); cancel() }()
+	_ = e.Run(ctx)
+	if ok, _ := src.answered(1); ok {
+		t.Fatal("opener uid differs from the file owner: deny")
+	}
+	time.Sleep(30 * time.Millisecond)
+	if ap.n() != 0 {
+		t.Fatal("nobody is asked about another user's file")
+	}
+}
+
+func TestUnhashableProgramIsDeniedNotGranted(t *testing.T) {
+	ap := &fakeApprover{d: vault.AllowAlways}
+	g := &Gate{Approver: ap, Out: make(chan Event, 4), Open: func(int) (*os.File, error) { return nil, os.ErrNotExist }}
+	for i := 0; i < 3; i++ {
+		if g.Decide(1, key1) {
+			t.Fatal("a program that cannot be pinned is never allowed")
+		}
+	}
+	if ap.n() != 0 {
+		t.Fatal("no standing grant can come from an unpinned program")
+	}
+}
+
 func TestNoAnswerIsDenyAndLoggedAndNotAskedAgainAtOnce(t *testing.T) {
 	ap := &fakeApprover{block: make(chan struct{})} // nobody answers
-	out := make(chan Event, 16)
-	g := &Gate{Approver: ap, Out: out, Wait: 40 * time.Millisecond}
-	k := GateKey{Tool: "host.cursor", Class: ClassAWS, Exe: "/x/cursor-agent"}
-	g.Ask(k, Proc{Exe: k.Exe})
-	g.Ask(k, Proc{Exe: k.Exe}) // same question is already open
+	var exe string
+	g := gateWith(t, ap, "", &exe)
+	g.Wait = 40 * time.Millisecond
+	g.Decide(1, key1)
+	g.Decide(1, key1) // the same question is already open
+	for len(testOut) > 0 {
+		<-testOut
+	}
+	var ev Event
 	select {
-	case ev := <-out:
-		if ev.Type != "secret.vault.denied" || !ev.Blocked || ev.PathClass != ClassAWS {
-			t.Fatalf("%+v", ev)
-		}
+	case ev = <-testOut:
 	case <-time.After(time.Second):
 		t.Fatal("no denial logged")
 	}
-	if g.Allows(k) || ap.n() != 1 {
-		t.Fatal("no answer must not grant, and one question only")
+	if ev.Type != "secret.vault.denied" || !ev.Blocked || ev.PathClass != ClassSSH {
+		t.Fatalf("%+v", ev)
 	}
-	g.Ask(k, Proc{Exe: k.Exe}) // inside the cooldown
+	if ap.n() != 1 {
+		t.Fatal("one question only")
+	}
+	g.Decide(1, key1) // inside the cooldown
 	time.Sleep(30 * time.Millisecond)
 	if ap.n() != 1 {
 		t.Fatal("asked again inside the cooldown")
@@ -143,24 +212,22 @@ func TestNoAnswerIsDenyAndLoggedAndNotAskedAgainAtOnce(t *testing.T) {
 func TestOnceExpires(t *testing.T) {
 	now := time.Now()
 	ap := &fakeApprover{d: vault.AllowOnce}
-	g := &Gate{Approver: ap, Out: make(chan Event, 4), Now: func() time.Time { return now }}
-	k := GateKey{Tool: "host.codex-cli", Class: ClassNPM, Exe: "/x/codex"}
-	g.Ask(k, Proc{Exe: k.Exe})
-	eventually(t, func() bool { return g.Allows(k) })
+	var exe string
+	g := gateWith(t, ap, "", &exe)
+	g.Now = func() time.Time { return now }
+	decideEventually(t, g, key1)
 	now = now.Add(2 * time.Minute)
-	if g.Allows(k) {
+	if g.Decide(1, key1) {
 		t.Fatal("allow once is a short window")
 	}
 }
 
 func TestGrantFileIsOwnerOnly(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "d", "g.json")
-	ap := &fakeApprover{d: vault.AllowAlways}
-	g := &Gate{Approver: ap, Out: make(chan Event, 4), Path: p}
-	k := GateKey{Tool: "t", Class: ClassSSH, Exe: "/x"}
-	g.Ask(k, Proc{Exe: "/x"})
-	eventually(t, func() bool { _, err := os.Stat(p); return err == nil })
-	if st, _ := os.Stat(p); st.Mode().Perm() != 0o600 {
-		t.Fatalf("mode %v", st.Mode())
+	var exe string
+	g := gateWith(t, &fakeApprover{d: vault.AllowAlways}, p, &exe)
+	decideEventually(t, g, key1)
+	if st, err := os.Stat(p); err != nil || st.Mode().Perm() != 0o600 {
+		t.Fatalf("%v %v", st, err)
 	}
 }
