@@ -57,6 +57,10 @@ A new site opens a WARDEN approval (`kind` = tool id, action `site.connect`, res
   filter is put back within seconds when the service restarts.
 - A device that is not approved yet, a tool the owner turned Protect off for, `MANAR_JAIL_ENABLED=false` on
   the API, or a machine without cgroup v2 / `nft` / root: nothing is filtered and nothing is changed.
+- After installing the rules the service connects from itself (never in a tool cgroup) to one of the
+  machine's own addresses. If that is redirected or refused, the rules hit more than the tools: they are
+  removed again and the filter stays off. Every config poll also puts the table back if a firewall reload
+  flushed it.
 - `manar-edge service remove` and `manar-edge uninstall` both run the same restore. It works from the state on
   the machine, not from memory, so it also cleans up after a crashed service.
 
