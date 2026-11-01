@@ -14,10 +14,10 @@ func Dir(base string) string { return filepath.Join(base, "warden") }
 
 // Settings are device-local switches, set by an administrator with `manar-edge warden ...`.
 type Settings struct {
-	// WindowsUI turns the Windows tray helper and toast on. Default off: the toast could not be
-	// proven on a real desktop before launch (spec slip rule), so Windows shows nothing and
-	// approvals are answered in the console until an administrator turns this on.
-	WindowsUI bool `json:"windows_ui"`
+	// WindowsUIOff turns the Windows prompt off. The prompt is ON by default (founder decision,
+	// 1 Nov 2026); an administrator opts a device out with `manar-edge warden windows-ui off`, and
+	// approvals are then answered in the console or on the phone.
+	WindowsUIOff bool `json:"windows_ui_off"`
 }
 
 func LoadSettings(base string) Settings {

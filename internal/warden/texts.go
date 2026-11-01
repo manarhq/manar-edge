@@ -82,6 +82,13 @@ func Render(p Prompt, lang Lang) Text {
 		}
 		t.Body = fmt.Sprintf("%s wants to %s %s", name, englishVerb(p), res)
 	}
+	// The explanation comes from the API's deterministic templates, never from a model. A prompt
+	// without one (an older API) shows just the line above.
+	if ex := p.ExplainEN; lang == EN && ex != "" {
+		t.Body += "\n" + ex
+	} else if ex := p.ExplainAR; lang == AR && ex != "" {
+		t.Body += "\n" + ex
+	}
 	t.ConsoleO = p.ConsoleOnly
 	return t
 }

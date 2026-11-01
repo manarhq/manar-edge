@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"path/filepath"
+	"strings"
 )
 
 // CheckUID is the policy behind the Linux socket check: root and the listed users only.
@@ -55,4 +56,16 @@ func verifyHelperExe(ops procOps, pid int, want string) error {
 		}
 	}
 	return nil
+}
+
+// InProtectedDir reports whether exe lies inside root, the directory ordinary users cannot write
+// (Program Files on Windows). Both are compared case-insensitively on cleaned paths, and a path that
+// merely starts with the same letters ("C:\Program Files Evil") is not inside it.
+func InProtectedDir(exe, root string) bool {
+	if exe == "" || root == "" {
+		return false
+	}
+	e, r := strings.ToLower(filepath.Clean(exe)), strings.ToLower(filepath.Clean(root))
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(e, strings.TrimSuffix(r, sep)+sep)
 }

@@ -2,6 +2,8 @@ package warden
 
 import (
 	"errors"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -47,5 +49,29 @@ func TestOnlyTheInstalledRootOwnedBinaryMayBeTheHelper(t *testing.T) {
 	failing := procOps{exeOf: func(int) (string, error) { return "", errors.New("gone") }, stat: ops(want, safe).stat}
 	if err := verifyHelperExe(failing, 42, want); err == nil {
 		t.Fatal("an unreadable peer was accepted")
+	}
+}
+
+func TestInProtectedDir(t *testing.T) {
+	sep := string(filepath.Separator)
+	root := sep + "Program Files"
+	cases := []struct {
+		exe  string
+		want bool
+	}{
+		{root + sep + "manar-edge" + sep + "manar-edge.exe", true},
+		{strings.ToUpper(root) + sep + "manar-edge" + sep + "x.exe", true},
+		{root + " Evil" + sep + "x.exe", false},
+		{sep + "Users" + sep + "bob" + sep + "Downloads" + sep + "manar-edge.exe", false},
+		{root + sep + ".." + sep + "tmp" + sep + "x", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := InProtectedDir(c.exe, root); got != c.want {
+			t.Errorf("%q: got %v want %v", c.exe, got, c.want)
+		}
+	}
+	if InProtectedDir(root+sep+"a", "") {
+		t.Error("empty root must refuse")
 	}
 }

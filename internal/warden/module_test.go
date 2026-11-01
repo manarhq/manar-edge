@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -166,5 +167,66 @@ func TestAskSecretWaitsForTheConsoleDecision(t *testing.T) {
 		if f.calls[0] != "POST /approvals/vault" {
 			t.Errorf("%s: first call %q", name, f.calls[0])
 		}
+	}
+}
+
+func TestPromptCarriesThePlainWordsExplanationAndWithdrawsAfterTheDeadline(t *testing.T) {
+	b, l := serve(t, uidCheck(1000))
+	client := connect(t, l, 1000)
+	defer client.Close()
+	waitHelper(t, b, true)
+	hc := newCodec(client)
+	got := make(chan Prompt, 1)
+	cancelled := make(chan string, 1)
+	go func() {
+		for {
+			m, err := hc.recv()
+			if err != nil {
+				return
+			}
+			switch m.Type {
+			case "prompt":
+				got <- *m.Prompt // never answered: nobody is there
+			case "cancel":
+				cancelled <- m.ID
+			}
+		}
+	}()
+	it := pendingItem{ID: "ap1", ToolID: "host.cursor", ActionID: "bash", Resource: "ls", DecidableHere: true,
+		ExpiresAt: time.Now().Add(150 * time.Millisecond)}
+	it.Explanation.EN, it.Explanation.AR = "It wants to run a command.", "يريد تشغيل أمر."
+	api := &fakeAPI{pending: pendingReply{OwnerMayApprove: true, Items: []pendingItem{it}}}
+	w := &watcher{broker: b, api: api, seen: map[string]context.CancelFunc{}}
+	w.tick(context.Background())
+	p := <-got
+	if p.ExplainEN == "" || p.ExplainAR == "" {
+		t.Fatalf("explanation missing: %+v", p)
+	}
+	if en := Render(p, EN).Body; !strings.Contains(en, "run a command") {
+		t.Errorf("EN body: %q", en)
+	}
+	if ar := Render(p, AR); !strings.Contains(ar.Body, "يريد تشغيل أمر") || !ar.RTL {
+		t.Errorf("AR body: %q", ar.Body)
+	}
+	select {
+	case id := <-cancelled:
+		if id != "ap1" {
+			t.Fatalf("cancelled %q", id)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the prompt was not withdrawn at the deadline")
+	}
+	if len(api.posts()) != 0 {
+		t.Fatalf("a timed-out prompt must decide nothing on the device: %v", api.posts())
+	}
+}
+
+func TestWindowsPromptIsOnUnlessTurnedOff(t *testing.T) {
+	base := t.TempDir()
+	if LoadSettings(base).WindowsUIOff {
+		t.Fatal("the Windows prompt must be on by default")
+	}
+	if err := SaveSettings(base, Settings{WindowsUIOff: true}); err != nil || !LoadSettings(base).WindowsUIOff {
+		t.Fatalf("opt out not kept: %v", err)
 	}
 }

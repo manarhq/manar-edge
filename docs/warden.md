@@ -16,8 +16,9 @@ or Arabic (from the user's locale). Product name WARDEN, subtitle "Manar app on 
   - Windows: named pipe `\\.\pipe\manar-warden` whose DACL allows only SYSTEM and the installing
     user's SID (`<state>\warden\user-sid`). Toast through the Windows Runtime
     (`git.sr.ht/~jackmordaunt/go-toast/v2`, no PowerShell for the toast). Autostart: HKCU Run.
-    **Off by default**: `manar-edge warden windows-ui on` (administrator) turns it on. It builds and
-    its mapping is unit tested, but it has not been run on a real desktop.
+    **On by default** since 1 Nov 2026 (founder decision); `manar-edge warden windows-ui off`
+    (administrator) opts a device out. It builds and its mapping is unit tested; run the manual
+    check in `docs/windows-warden-check.md` of the workspace on a real desktop before relying on it.
 - **Closing or ignoring a prompt approves nothing.** The approval stays pending and expires.
 - **Secrets vault API**: `warden.AskSecret(ctx, program, secretName) (Decision, error)` opens a
   console-only approval (`POST /host/v1/approvals/vault`) and waits for a signed-in person to decide
@@ -28,6 +29,14 @@ or Arabic (from the user's locale). Product name WARDEN, subtitle "Manar app on 
   API refuses `approve_8h` from a device and the service drops it if a helper sends it. This differs
   from the mockup's toast, which shows three buttons; two is the safe version.
 - Sound is off.
+- **Plain words.** The prompt shows what could go wrong, in English or Arabic, from the API's
+  deterministic templates (`explanation` on the pending list). No model writes it.
+- **No answer in 2 minutes**: the prompt is withdrawn, the API marks the approval EXPIRED (audit
+  `approval.expired`, reason `no_answer`) and the hook tells the agent "Manar denied: no answer". The
+  phone is pushed by the API when the approval opens, the same moment the prompt appears.
+- **Pause all AI**: while the workspace is paused the gateway answers every authorize with
+  DENY `paused` and refuses model and MCP calls (`internal/pause`, copied from `/host/v1/config`
+  every 15 s; the API denies at once regardless).
 
 ## Who may be the helper
 
@@ -38,7 +47,8 @@ or Arabic (from the user's locale). Product name WARDEN, subtitle "Manar app on 
   opens the socket is refused.
 - Windows: the pipe's DACL gives the user read and write but not the right to create pipe instances
   (`0x12019b`, no `FILE_CREATE_PIPE_INSTANCE`), so no fake server next to the real one. The service
-  checks the client's image path; the helper checks the server's.
+  checks the client's image path, which must be inside Program Files (a copy a user can overwrite is
+  refused); the helper checks the server's.
 - D-Bus: action signals are believed only from the current owner of
   `org.freedesktop.Notifications`, and only for the notification id we created.
 
