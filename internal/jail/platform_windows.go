@@ -1,6 +1,7 @@
 package jail
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -11,6 +12,9 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
+
+	"golang.org/x/sys/windows"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
 	"gitlab.vax.sh/manar/manar-edge/internal/protect"
@@ -41,7 +45,17 @@ func (r *runner) startProxy(tool string) (*toolProxy, error) {
 	}
 	// A fixed loopback port, because the tool's own settings name it. If something else holds it
 	// the proxy cannot start, and with no proxy nothing is blocked.
-	ln, err := net.Listen("tcp4", fmt.Sprintf("127.0.0.1:%d", port))
+	// SO_EXCLUSIVEADDRUSE: no other program can bind the same port, not even with SO_REUSEADDR.
+	lc := net.ListenConfig{Control: func(_, _ string, c syscall.RawConn) error {
+		var serr error
+		if err := c.Control(func(fd uintptr) {
+			serr = windows.SetsockoptInt(windows.Handle(fd), windows.SOL_SOCKET, soExclusiveAddrUse, 1)
+		}); err != nil {
+			return err
+		}
+		return serr
+	}}
+	ln, err := lc.Listen(context.Background(), "tcp4", fmt.Sprintf("127.0.0.1:%d", port))
 	if err != nil {
 		return nil, fmt.Errorf("port %d is taken by another program: %w", port, err)
 	}
@@ -185,3 +199,6 @@ func globFiles(pattern string) []string {
 	m, _ := filepath.Glob(pattern)
 	return m
 }
+
+// soExclusiveAddrUse is SO_EXCLUSIVEADDRUSE, (int)~SO_REUSEADDR in winsock2.h.
+const soExclusiveAddrUse = ^4

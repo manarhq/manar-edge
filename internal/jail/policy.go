@@ -201,29 +201,46 @@ func (p *Policy) IsUserRule(tool, host string) bool {
 // CDNs, where an address says nothing about the site.
 var sshHosts = []string{"github.com", "ssh.github.com", "gitlab.com", "altssh.gitlab.com"}
 
-// AllowedAddr reports whether ip is an address of github.com or gitlab.com. The proxy uses it only
-// for a protocol that shows no name (ssh); a TLS connection without a name, an ECH hello or an odd
-// HTTP request is asked about instead.
+// AllowedAddr reports whether ip is an address of github.com or gitlab.com and none of the code
+// hosts it belongs to has a DENY rule for this tool. The proxy uses it only for a protocol that
+// shows no name (ssh); a TLS connection without a name, an ECH hello or an odd HTTP request is
+// asked about instead.
 func (p *Policy) AllowedAddr(tool string, ip netip.Addr) bool {
 	p.mu.Lock()
 	stale := p.addrs == nil || p.now().Sub(p.addrLast) > p.addrTTL
 	p.mu.Unlock()
 	if stale {
-		set := addrSet{}
+		sets := map[string]addrSet{}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, n := range sshHosts {
+			set := addrSet{}
 			if as, err := p.lookup(ctx, n); err == nil {
 				for _, a := range as {
 					set[a.Unmap()] = true
 				}
 			}
+			sets[n] = set
 		}
 		p.mu.Lock()
-		p.addrs, p.addrLast = map[string]addrSet{"": set}, p.now()
+		p.addrs, p.addrLast = sets, p.now()
 		p.mu.Unlock()
 	}
 	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.addrs[""][ip.Unmap()]
+	var names []string
+	for n, set := range p.addrs {
+		if set[ip.Unmap()] {
+			names = append(names, n)
+		}
+	}
+	p.mu.Unlock()
+	if len(names) == 0 {
+		return false
+	}
+	for _, n := range names { // a person's DENY on github.com holds for ssh to github.com too
+		if v, _ := p.Decide(tool, n); v == Deny {
+			return false
+		}
+	}
+	return true
 }

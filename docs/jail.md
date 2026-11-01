@@ -7,7 +7,7 @@ On by default. Policy: **ask on new sites**. Spec: public launch design 4.4, bri
 | OS | Filtered | Not filtered |
 |---|---|---|
 | Linux | Claude Code, Codex CLI, Gemini CLI, Copilot CLI, and every process they start | Cursor, Windsurf, VS Code + Copilot, Claude desktop, ChatGPT desktop (their own backends need many hosts), and everything else you run |
-| Windows | Claude Code's native install (`claude.exe`) only, see Windows below | everything else |
+| Windows | **Claude Code's own connections only** (native install `claude.exe`); commands it runs (Bash/PowerShell tool, curl, Invoke-WebRequest, git) are **not** filtered; see Windows below | everything else |
 
 Only processes of those tools are touched. A process is the tool's when its name is the tool's
 (`claude`, `codex`, `gemini`, `copilot`) or it is `node`/`bun`/`deno` running the tool's script or
@@ -96,11 +96,16 @@ A new site opens a WARDEN approval (`kind` = tool id, action `site.connect`, res
   or by talking to a proxy or tunnel that listens on loopback (loopback is open to the tools, because DOOR
   and local MCP servers live there). JAIL limits a protected tool's own network use and what it starts
   directly; it is not a sandbox. Tools are filtered by process name, so a renamed binary is not.
+- **Allowed sites can carry data out**: GitHub (a gist, a push to any repository), npm publish, a PyPI upload and
+  the other built-in names are reachable without asking, and what goes there is not inspected.
+- **DNS is the system's**: the proxy resolves a name with the machine's resolver, so poisoned DNS (for example a
+  hostile NetworkManager or DHCP setting) can point an allowed name at another address. A pinned DNS-over-HTTPS
+  resolver for the built-in names is not built.
 - Names of a long Unicode look-alike or a very long subdomain are shown cut from the left.
 
 ## Windows
 
-Scope: **Claude Code's native install (`claude.exe`) only.** Windows has no transparent redirect without a
+Scope: **Claude Code's own connections (native install `claude.exe`) only; the commands it runs are not filtered on Windows.** Windows has no transparent redirect without a
 driver, so the tool is pointed at a local proxy through its own settings and Windows blocks everything else
 for its exe. That needs a tool whose own proxy setting is documented and whose exe is its own program:
 
@@ -136,8 +141,12 @@ Residual exposure: the port is fixed because the settings file names it. While t
 filters are not (or after a reboot before the service starts) another program could bind `127.0.0.1:8491`
 and receive Claude Code's CONNECT requests. It would see host names and ports and could refuse them; it could
 not read the TLS traffic. A running Claude Code started before the setting was written keeps its old
-environment: restart it. Children Claude Code starts inherit the proxy variables and use the proxy if they
-honour them; they are not blocked.
+environment: restart it. Children Claude Code starts (the Bash or PowerShell tool, curl, Invoke-WebRequest,
+git) inherit the proxy variables and use the proxy only if they honour them; **they are not blocked**, so on
+Windows a command can reach any site. The proxy listener uses `SO_EXCLUSIVEADDRUSE`, so no other program can
+bind the port while the service runs. The settings are written to the user's `settings.json`, so a repository's
+own `.claude/settings.json` can override the `env` block for that project (managed settings would prevent that
+and are not used yet).
 
 Switch: the API sends `jail.windows` (`MANAR_JAIL_WINDOWS`, on by default; see the API's `docs/jail.md`).
 

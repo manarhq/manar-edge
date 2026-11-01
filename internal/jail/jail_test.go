@@ -52,6 +52,12 @@ func TestPolicyPrecedence(t *testing.T) {
 	if !p.AllowedAddr(claude, netip.MustParseAddr("140.82.121.3")) || p.AllowedAddr(claude, netip.MustParseAddr("203.0.113.5")) {
 		t.Error("code host addresses")
 	}
+	// ssh by address honours a DENY on the host it belongs to
+	p.SetRules([]Rule{{Tool: claude, Site: "github.com", Mode: "DENY"}})
+	if p.AllowedAddr(claude, netip.MustParseAddr("140.82.121.3")) {
+		t.Error("ssh to an address of a denied host was allowed")
+	}
+	p.SetRules(nil)
 	p.SetRules([]Rule{
 		{Tool: claude, Site: "*.corp.example", Mode: "ALLOW"},
 		{Tool: claude, Site: "bad.corp.example", Mode: "DENY"},
