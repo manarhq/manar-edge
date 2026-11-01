@@ -177,12 +177,22 @@ func (f *fanSource) Close() error {
 	return unix.Close(f.fd)
 }
 
-// markAll marks every existing target and returns how many marks worked.
-func markAll(f *fanSource, targets []Target, envFiles []string) int {
+// markAll marks every existing target whose class want accepts and returns how many marks worked.
+// A directory target covers the files directly inside it; a file target is an inode mark.
+func markAll(f *fanSource, targets []Target, envFiles []string, want func(class string) bool) int {
 	ok := 0
 	for _, t := range targets {
+		if want != nil && !want(t.Class) {
+			continue
+		}
 		st, err := os.Stat(t.Path)
-		if err != nil || !st.IsDir() {
+		if err != nil {
+			continue
+		}
+		if !st.IsDir() {
+			if f.Mark(t.Path, false) == nil {
+				ok++
+			}
 			continue
 		}
 		dirs := []string{t.Path}
@@ -200,9 +210,11 @@ func markAll(f *fanSource, targets []Target, envFiles []string) int {
 			}
 		}
 	}
-	for _, p := range envFiles {
-		if f.Mark(p, false) == nil {
-			ok++
+	if want == nil || want(ClassEnv) {
+		for _, p := range envFiles {
+			if f.Mark(p, false) == nil {
+				ok++
+			}
 		}
 	}
 	return ok

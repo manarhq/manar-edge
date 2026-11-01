@@ -4,11 +4,16 @@ package watch
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
 )
 
 // Run as root: go test -tags fanotify_integration -run Fanotify ./internal/secrets/watch
@@ -27,12 +32,12 @@ func TestFanotifyDeniesAIToolAllowsOthers(t *testing.T) {
 	if err != nil {
 		t.Skipf("fanotify unavailable: %v", err)
 	}
-	if n := markAll(src, Targets(home), nil); n == 0 {
+	if n := markAll(src, Targets(home), nil, nil); n == 0 {
 		t.Fatal("no marks")
 	}
 	procs := newProcSource()
 	out := make(chan Event, 8)
-	e := &Engine{Src: src, Procs: procs, Block: func() bool { return true }, Self: selfFunc(procs), Out: out,
+	e := &Engine{Src: src, Procs: procs, Mode: func() Mode { return ModeKeys }, Self: selfFunc(procs), Out: out,
 		Homes: func() []string { return []string{home} }, Trace: t.Logf}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -62,4 +67,145 @@ func TestFanotifyDeniesAIToolAllowsOthers(t *testing.T) {
 	t.Logf("fake AI tool exe: %s", fake)
 	cancel()
 	<-runDone // no trace line after the test ends
+}
+
+// fakeAITool copies cat to a path the catalogue knows as the Cursor agent's.
+func fakeAITool(t *testing.T, home string) string {
+	t.Helper()
+	dir := filepath.Join(home, ".local", "share", "cursor-agent")
+	_ = os.MkdirAll(dir, 0o755)
+	fake := filepath.Join(dir, "cat")
+	b, _ := os.ReadFile("/bin/cat")
+	if err := os.WriteFile(fake, b, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return fake
+}
+
+type allowAlways struct{}
+
+func (allowAlways) Ask(context.Context, vault.Request) (vault.Decision, error) {
+	return vault.AllowAlways, nil
+}
+
+// The founder default on a real kernel: the AI tool is denied an ssh key, the question is asked,
+// after "always" the same program reads it; the person's own cat works throughout; .env is only
+// reported.
+func TestFanotifyKeysAskOnceEnvAlertOnly(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	home := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	key := filepath.Join(home, ".ssh", "id_ed25519")
+	_ = os.WriteFile(key, []byte("KEY\n"), 0o600)
+	envf := filepath.Join(home, ".env")
+	_ = os.WriteFile(envf, []byte("A=1\n"), 0o600)
+	perm, err := newFanSource(true)
+	if err != nil {
+		t.Skipf("fanotify unavailable: %v", err)
+	}
+	notif, _ := newFanSource(false)
+	targets := Targets(home)
+	markAll(perm, targets, []string{envf}, ModeKeys.Held)
+	markAll(notif, targets, nil, func(c string) bool { return !ModeKeys.Held(c) })
+	procs := newProcSource()
+	out := make(chan Event, 32)
+	gate := &Gate{Approver: allowAlways{}, Out: out}
+	mk := func(s Source) *Engine {
+		return &Engine{Src: s, Procs: procs, Mode: func() Mode { return ModeKeys }, Gate: gate, Self: selfFunc(procs), Out: out,
+			Homes: func() []string { return []string{home} }, Trace: t.Logf}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{}, 2)
+	go func() { _ = mk(perm).Run(ctx); done <- struct{}{} }()
+	go func() { _ = mk(notif).Run(ctx); done <- struct{}{} }()
+	time.Sleep(200 * time.Millisecond)
+	fake := fakeAITool(t, home)
+
+	if err := exec.Command("/bin/cat", key).Run(); err != nil {
+		t.Fatalf("the person's own cat must work: %v", err)
+	}
+	if err := exec.Command(fake, key).Run(); err == nil {
+		t.Fatal("first open by the AI tool must be denied")
+	}
+	ok := false
+	for i := 0; i < 50 && !ok; i++ { // the question is answered in the background
+		time.Sleep(50 * time.Millisecond)
+		ok = exec.Command(fake, key).Run() == nil
+	}
+	if !ok {
+		t.Fatal("after always-allow the AI tool must read the key")
+	}
+	if err := exec.Command(fake, envf).Run(); err != nil {
+		t.Fatalf(".env is alert-only: %v", err)
+	}
+	sawEnv := false
+	for len(out) > 0 {
+		if ev := <-out; ev.PathClass == ClassEnv && ev.ToolID == "host.cursor" && !ev.Blocked {
+			sawEnv = true
+		}
+	}
+	if !sawEnv {
+		t.Fatal(".env read by the AI tool must be reported, not blocked")
+	}
+	if err := exec.Command("/bin/cat", key).Run(); err != nil {
+		t.Fatalf("the person's own cat must still work: %v", err)
+	}
+	cancel()
+	<-done
+	<-done
+}
+
+// Recovery: if the daemon dies (kill -9) or is stopped, opens that were waiting for it go through.
+// Run as: FANHOLD=<dir> re-executes this test binary as a holder that never answers.
+func TestFanotifyHolderKilledReleasesOpens(t *testing.T) {
+	if dir := os.Getenv("FANHOLD"); dir != "" {
+		src, err := newFanSource(true)
+		if err != nil {
+			os.Exit(3)
+		}
+		markAll(src, Targets(dir), nil, nil)
+		fmt.Println("ready")
+		for { // take events, never answer them
+			if _, err := src.Next(); err != nil && !errors.Is(err, ErrIdle) {
+				os.Exit(0)
+			}
+		}
+	}
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	home := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(home, ".ssh"), 0o700)
+	key := filepath.Join(home, ".ssh", "id_ed25519")
+	_ = os.WriteFile(key, []byte("KEY\n"), 0o600)
+	h := exec.Command(os.Args[0], "-test.run", "TestFanotifyHolderKilledReleasesOpens")
+	h.Env = append(os.Environ(), "FANHOLD="+home)
+	stdout, _ := h.StdoutPipe()
+	if err := h.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer h.Process.Kill()
+	buf := make([]byte, 6)
+	if _, err := io.ReadFull(stdout, buf); err != nil || string(buf) != "ready\n" {
+		t.Skipf("holder did not start (fanotify unavailable?): %v", err)
+	}
+	res := make(chan error, 1)
+	go func() { res <- exec.Command("/bin/cat", key).Run() }()
+	select {
+	case <-res:
+		t.Fatal("the open should wait for the holder")
+	case <-time.After(500 * time.Millisecond):
+	}
+	_ = h.Process.Kill()
+	select {
+	case err := <-res:
+		if err != nil {
+			t.Fatalf("open after the holder died: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("open still hangs after the holder was killed: the user would be locked out")
+	}
 }

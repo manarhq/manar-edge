@@ -4,19 +4,16 @@ import (
 	"context"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"time"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
+	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
 )
-
-// featureBlock is the device setting (from GET /host/v1/config features) that lets the Linux
-// watcher deny AI tool opens. It is off unless Manar turns it on for the device.
-const featureBlock = "secrets.block"
 
 func init() { daemon.Register(&Module{}) }
 
@@ -30,10 +27,14 @@ func (*Module) Name() string { return "secrets-watch" }
 func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 	out := make(chan Event, 256)
 	go report(ctx, c, out)
+	gate := &Gate{Approver: vault.NewApprover(c), Out: out, Path: grantsFile()}
 	degraded := false
 	for ctx.Err() == nil {
 		cfg, err := c.Config(ctx)
-		block := err == nil && slices.Contains(cfg.Features, featureBlock) && !degraded
+		mode := ModeAlert
+		if err == nil && !degraded {
+			mode = ModeFromFeatures(cfg.Features)
+		}
 		rctx, cancel := context.WithCancel(ctx)
 		go func() { // restart on a setting change
 			t := time.NewTicker(5 * time.Minute)
@@ -43,13 +44,13 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 				case <-rctx.Done():
 					return
 				case <-t.C:
-					if cfg, err := c.Config(rctx); err == nil && slices.Contains(cfg.Features, featureBlock) != block && !degraded {
+					if cfg, err := c.Config(rctx); err == nil && ModeFromFeatures(cfg.Features) != mode && !degraded {
 						cancel()
 					}
 				}
 			}
 		}()
-		stalled := runPlatform(rctx, out, block)
+		stalled := runPlatform(rctx, out, mode, gate)
 		cancel()
 		if stalled {
 			degraded = true // after a stall the watcher only observes until the service restarts
@@ -59,8 +60,14 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 	return nil
 }
 
-// Cleanup removes what the watcher put on the machine (Windows audit rules and policy).
-func (*Module) Cleanup(ctx context.Context) error { return cleanupPlatform(ctx) }
+// Cleanup removes what the watcher put on the machine (Windows audit rules and policy, the
+// remembered answers). The fanotify marks go with the process.
+func (*Module) Cleanup(ctx context.Context) error {
+	_ = os.Remove(grantsFile())
+	return cleanupPlatform(ctx)
+}
+
+func grantsFile() string { return filepath.Join(host.StateDir(), "secrets", "file-grants.json") }
 
 func stateFile() string { return filepath.Join(host.StateDir(), "secrets", "audit.json") }
 

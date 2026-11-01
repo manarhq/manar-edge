@@ -56,9 +56,11 @@ const (
 type Engine struct {
 	Src   Source
 	Procs ProcSource
-	// Block reports whether denials are switched on (the device setting). Off means every open
-	// is allowed and reported.
-	Block func() bool
+	// Mode is the device setting (see Mode). Nil or ModeAlert means every open is allowed and
+	// reported.
+	Mode func() Mode
+	// Gate, if set, remembers the person's answers and asks the questions (WARDEN ask once).
+	Gate *Gate
 	// Self reports whether a pid is Manar's own (never delayed, never reported).
 	Self func(pid int) bool
 	Out  chan<- Event
@@ -175,9 +177,21 @@ func (e *Engine) decide(ev PermEvent) (allow bool) {
 		e.trace("pid=%d process=%q path=%s: no AI tool in the chain (%d processes read): allow", ev.PID, a.Process, ev.Path, len(a.Chain))
 		return true
 	}
-	deny := a.Deny() && e.Block != nil && e.Block()
-	e.trace("pid=%d process=%q path=%s tool=%s toolCanBlock=%v interactive=%v blockingOn=%v: deny=%v",
-		ev.PID, a.Process, ev.Path, a.ToolID, a.Block, a.Interactive, e.Block != nil && e.Block(), deny)
+	mode := ModeAlert
+	if e.Mode != nil {
+		mode = e.Mode()
+	}
+	deny := a.Deny() && mode.Blocks(class)
+	if deny && e.Gate != nil {
+		k := GateKey{Tool: a.ToolID, Class: class, Exe: a.ToolProc.Exe}
+		if e.Gate.Allows(k) {
+			deny = false // the person said yes to this program
+		} else {
+			e.Gate.Ask(k, a.ToolProc)
+		}
+	}
+	e.trace("pid=%d process=%q path=%s tool=%s toolCanBlock=%v interactive=%v mode=%s: deny=%v",
+		ev.PID, a.Process, ev.Path, a.ToolID, a.Block, a.Interactive, mode, deny)
 	e.report(Event{
 		Type: TypeTouched, ToolID: a.ToolID, Process: a.Process, PathClass: class,
 		MaskedPath: host.MaskPath(e.homes(), ev.Path), Blocked: deny, At: e.now().UTC(),

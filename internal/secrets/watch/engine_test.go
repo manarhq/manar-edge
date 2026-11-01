@@ -59,7 +59,11 @@ func (f *fakeSource) answered(h uint64) (bool, bool) {
 
 func engineFor(src Source, procs fakeProcs, block bool) (*Engine, chan Event) {
 	out := make(chan Event, 16)
-	return &Engine{Src: src, Procs: procs, Block: func() bool { return block }, Self: func(pid int) bool { return pid == 4242 },
+	mode := ModeAlert
+	if block {
+		mode = ModeKeys
+	}
+	return &Engine{Src: src, Procs: procs, Mode: func() Mode { return mode }, Self: func(pid int) bool { return pid == 4242 },
 		Out: out, Homes: func() []string { return []string{"/home/alice"} }, StallAfter: 80 * time.Millisecond}, out
 }
 

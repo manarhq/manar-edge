@@ -74,6 +74,7 @@ type Attribution struct {
 	Interactive bool   // a shell the user types in sits between the opener and the tool
 	Block       bool   // policy allows denying (before the setting is applied)
 	Chain       []Proc // opener first
+	ToolProc    Proc   // the process of the chain that matched the catalogue
 }
 
 const maxChain = 40
@@ -98,7 +99,7 @@ func Attribute(src ProcSource, pid int) Attribution {
 	a.Process = procName(a.Chain[0])
 	for i, pr := range a.Chain {
 		if t := match(pr); t != nil {
-			a.ToolID, a.Block = t.ID, t.Block
+			a.ToolID, a.Block, a.ToolProc = t.ID, t.Block, pr
 			for _, below := range a.Chain[:i] {
 				if interactiveShell(below) {
 					a.Interactive = true

@@ -38,7 +38,7 @@ func secretFiles() []string {
 // runPlatform sets the audit rules, then reads event 4663 every few seconds. Alert only.
 //
 // ponytail: wevtutil polling every 3 s; switch to EvtSubscribe if event latency matters.
-func runPlatform(ctx context.Context, out chan<- Event, _ bool) bool {
+func runPlatform(ctx context.Context, out chan<- Event, _ Mode, _ *Gate) bool {
 	run := execRunner(ctx)
 	if _, err := EnableAudit(run, systemPolicy{}, stateFile(), secretFiles()); err != nil {
 		log.Printf("manar-edge: secrets watcher unavailable: %v", err)
