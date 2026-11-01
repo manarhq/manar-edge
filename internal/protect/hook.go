@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/undo"
 )
 
 // Hooks run as the user and cannot read the host key, so they ask the device service over a local
@@ -315,5 +317,32 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 	budget := time.Duration(Budget(key)) * time.Second
 	relay := NewRelay()
 	relay.Session = SessionID(raw)
-	return Render(key, relay.Decide(context.Background(), key, actionID, resource, budget))
+	v := relay.Decide(context.Background(), key, actionID, resource, budget)
+	if v.Allow {
+		SnapshotBeforeEdit(key, raw)
+	}
+	return Render(key, v)
+}
+
+// SnapshotBeforeEdit saves a copy of the file an editing tool is about to change when it lies
+// outside the tool's project folder, and tells the device service (best effort: an edit is never
+// blocked because a snapshot could not be taken). It runs as the user the hook runs as.
+func SnapshotBeforeEdit(tool string, raw []byte) {
+	defer func() { _ = recover() }()
+	path, cwd, ok := undo.EditTarget(raw)
+	if !ok || !undo.Outside(path, cwd) {
+		return
+	}
+	s, err := undo.OpenDefault()
+	if err != nil {
+		return
+	}
+	rec, err := s.Snapshot(tool, path, time.Now())
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var ignore map[string]any
+	_ = NewRelay().call(ctx, http.MethodPost, "/v1/changes", rec, &ignore)
 }

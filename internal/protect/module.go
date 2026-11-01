@@ -19,6 +19,7 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
 	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 	"gitlab.vax.sh/manar/manar-edge/internal/ports"
+	"gitlab.vax.sh/manar/manar-edge/internal/undo"
 )
 
 // GatewayURL is the local LLM gateway base URL; set by the command package.
@@ -271,6 +272,21 @@ func relayHandler(b backend) http.Handler {
 			return
 		}
 		json.NewEncoder(w).Encode(res)
+	})
+	// Undo AI file changes: the hook (running as the user) tells the service what it saved. The
+	// service takes the user from the kernel, never from the body.
+	mux.HandleFunc("POST /v1/changes", func(w http.ResponseWriter, r *http.Request) {
+		var rec undo.Record
+		if json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&rec) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		caller, _ := r.Context().Value(callerKey{}).(string)
+		if undo.Default.Report(caller, rec) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("GET /v1/approvals/{id}", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
