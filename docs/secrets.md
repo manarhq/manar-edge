@@ -48,8 +48,39 @@ picked up within 30 seconds; new `.env` files within the hour. Opens of other fi
 Tested on a real kernel: `sudo go test -tags fanotify_integration -run Fanotify ./internal/secrets/watch`
 (including "holder killed, a waiting open goes through").
 
-## ssh vault
+## ssh vault (opt-in per key, feature `secrets.vault.ssh`, offered by default)
 
-`secrets.vault.ssh` stays off on Linux. Moving a key out of `~/.ssh` into an agent needs a per-user
-agent that Manar keeps loaded across logins, with confirm-on-use; that is not built, and a lost agent
-would lock the person out of their own key. Linux keys are protected by the block above instead.
+Nothing moves on its own. The person clicks "Move to vault" next to a detected key in the console
+(Secrets page), or runs `manar-edge vault add ~/.ssh/<key>` as themselves. A key with a passphrase is
+never moved (it is already protected).
+
+What happens, in this order, and any failure before the last step leaves the key file where it is:
+1. The service reads the key as the owner (`O_NOFOLLOW`, no links), writes it to the vault, and reads
+   it back byte for byte. Vault files are AES-256-GCM encrypted with `<state>/vault.key` (0600, root),
+   so the vault folder alone, or a copy of it, holds nothing readable. The encrypted original is the
+   backup used by restore.
+2. The key is loaded into Manar's per-user agent, listening on `/run/manar-edge/ssh-<uid>.sock`
+   (0600, owner only, peer checked with SO_PEERCRED).
+3. A marked block is added to the user's `~/.profile`, `~/.bash_profile`, `~/.bashrc`, `~/.zshenv`
+   (those that exist; the original of each is kept in the vault) and to fish's `conf.d`. It sets
+   `SSH_AUTH_SOCK` to the Manar socket only while that socket exists, and remembers the previous
+   agent in `MANAR_UPSTREAM_SSH_AUTH_SOCK`; Manar's agent passes the user's other keys, `ssh-add` and
+   signing for them through to that agent, so no other key is lost.
+4. Only then the key file is removed. Open a new terminal (or log in again) to pick up the snippet.
+
+Who may sign: a sign request from the person's own program (no AI tool above it, or an interactive
+terminal between it and the tool: you typing `ssh` or `git push`) is answered at once. A request from
+an AI tool's non-interactive chain is a question to the person (WARDEN): once, 8 hours or always for
+that exact binary (SHA-256) and user. No answer in 2 minutes is a denial. Honest ceiling: this is a
+policy for honest tools; a program running as you that is not in the catalogue can still ask the
+agent to sign (it cannot read the key).
+
+Put it back (needs no API and no internet):
+- `manar-edge vault restore <key>` or `manar-edge vault restore --all` (as yourself through the
+  service, or with sudo straight from the vault folder when the service is down). The file returns
+  byte for byte with its original mode, the profile files return to their original bytes, the socket
+  goes away when the last key is back.
+- `sudo manar-edge uninstall` restores every key first and stops if one cannot be restored.
+- If the agent dies, the service starts it again within 20 seconds; until then, restore as above.
+- If the service is stopped, the socket is gone, the snippet leaves your old agent in place, and
+  `sudo manar-edge vault restore --all` puts the keys back.

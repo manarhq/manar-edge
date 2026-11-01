@@ -38,6 +38,10 @@ type Env struct {
 	Identify func(helperPID int) (Program, error)
 	// RestoreAll quiesces the module and puts every secret back (admin only).
 	RestoreAll func() error
+	// AddSSH moves one of the caller's own ssh keys into the vault; RestoreSSH puts the caller's own
+	// key (or, with an empty name, all of them) back. owner comes from the operating system.
+	AddSSH     func(owner, name string) error
+	RestoreSSH func(owner, name string) error
 }
 
 func handleConn(ctx context.Context, rw io.ReadWriter, peer Peer, b *Broker, env Env) {
@@ -54,6 +58,22 @@ func handleConn(ctx context.Context, rw io.ReadWriter, peer Peer, b *Broker, env
 			return
 		}
 		if err := env.RestoreAll(); err != nil {
+			reply(ipcReply{Error: err.Error()})
+			return
+		}
+		reply(ipcReply{OK: true, Data: json.RawMessage(`{}`)})
+		return
+	}
+	if req.Op == "ssh-add" || req.Op == "ssh-restore" {
+		fn := env.AddSSH
+		if req.Op == "ssh-restore" {
+			fn = env.RestoreSSH
+		}
+		if fn == nil || peer.Owner == "" || !(keyNameRe.MatchString(req.Ref) || (req.Op == "ssh-restore" && req.Ref == "")) {
+			reply(ipcReply{Error: "bad request"})
+			return
+		}
+		if err := fn(peer.Owner, req.Ref); err != nil {
 			reply(ipcReply{Error: err.Error()})
 			return
 		}
@@ -122,5 +142,17 @@ func RestoreAllViaService() (answered bool, err error) {
 	}
 	defer c.Close()
 	_, err = ask(c, ipcRequest{Op: "restore-all"})
+	return true, err
+}
+
+// SSHViaService asks the running service to move (op "ssh-add") or put back (op "ssh-restore") the
+// caller's own ssh key. It reports whether a service answered; none answering is not an error here.
+func SSHViaService(op, name string) (answered bool, err error) {
+	c, derr := dialDaemon(3 * time.Second)
+	if derr != nil {
+		return false, nil
+	}
+	defer c.Close()
+	_, err = ask(c, ipcRequest{Op: op, Ref: name})
 	return true, err
 }

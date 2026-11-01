@@ -17,8 +17,8 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
 )
 
-// featureSSH turns the ssh half of the vault on for a device. It is off unless Manar sets it:
-// moving a private key out of its file needs the OS agent to be proven on that computer first.
+// featureSSH means "the option to move an ssh key is offered on this device". Manar moves a key only
+// when the person clicks Move to vault (console) or runs `manar-edge vault add`; nothing is automatic.
 const featureSSH = "secrets.vault.ssh"
 
 func init() { daemon.Register(&Module{}) }
@@ -28,6 +28,7 @@ func New() *Vault {
 	exe, _ := os.Executable()
 	v := &Vault{Store: FileStore{Dir: filepath.Join(host.StateDir(), "vault")}, Exe: exe, Homes: host.Homes}
 	v.Agent = platformAgent()
+	v.Keys = platformKeys()
 	return v
 }
 
@@ -53,14 +54,38 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 	b := &Broker{V: v, A: NewApprover(c), OnDenied: func(r Request) {
 		sendEvent(ctx, c, "secret.vault.denied", filepath.Base(r.Program), r)
 	}}
+	srv := newAgentRunner(ctx, v, b)
+	defer srv.Close()
 	env := Env{Identify: Identify, RestoreAll: func() error {
 		quiesced.Store(true) // no new secrets move in while they are being put back
+		defer srv.Ensure()
 		return v.RestoreAll()
-	}}
+	},
+		AddSSH: func(owner, name string) error {
+			if quiesced.Load() {
+				return errors.New("Manar is being removed")
+			}
+			_, err := v.StoreSSHFor(owner, name)
+			srv.Ensure()
+			if err == nil {
+				go reportStored(ctx, c, "ssh", name)
+			}
+			return err
+		},
+		RestoreSSH: func(owner, name string) error {
+			defer srv.Ensure()
+			err := v.RestoreSSHFor(owner, name)
+			if err == nil {
+				go reportRestored(ctx, c, "ssh", name)
+			}
+			return err
+		}}
 	errc := make(chan error, 1)
 	go func() { errc <- Serve(ctx, b, env) }()
+	srv.Ensure() // keys vaulted before a restart are served again at once
 	t := time.NewTicker(20 * time.Second)
 	defer t.Stop()
+	last := time.Time{}
 	for {
 		select {
 		case <-ctx.Done():
@@ -69,6 +94,11 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 			return err
 		case <-t.C:
 			runInstructions(ctx, c, v)
+			srv.Ensure() // an agent that died is listening again within one interval
+			if !quiesced.Load() && time.Since(last) > 5*time.Minute {
+				last = time.Now()
+				offerKeys(ctx, c, v)
+			}
 		}
 	}
 }
@@ -129,6 +159,25 @@ func runInstructions(ctx context.Context, c *hostclient.Client, v *Vault) {
 		_ = c.Do(ctx, http.MethodPost, "/secrets/vault/report",
 			map[string]string{"kind": i.Kind, "ref": i.Ref, "state": state, "detail": detail}, nil)
 	}
+}
+
+// offerKeys tells the console which ssh keys could be moved. Names only; moving stays a click.
+func offerKeys(ctx context.Context, c *hostclient.Client, v *Vault) {
+	if cfg, err := c.Config(ctx); err != nil || !slices.Contains(cfg.Features, featureSSH) || v.Keys == nil {
+		return
+	}
+	for _, n := range v.DetectSSH() {
+		_ = c.Do(ctx, http.MethodPost, "/secrets/vault/report",
+			map[string]string{"kind": "ssh", "ref": n, "state": "AVAILABLE"}, nil)
+	}
+}
+
+func reportStored(ctx context.Context, c *hostclient.Client, kind, ref string) {
+	_ = c.Do(ctx, http.MethodPost, "/secrets/vault/report", map[string]string{"kind": kind, "ref": ref, "state": "STORED"}, nil)
+}
+
+func reportRestored(ctx context.Context, c *hostclient.Client, kind, ref string) {
+	_ = c.Do(ctx, http.MethodPost, "/secrets/vault/report", map[string]string{"kind": kind, "ref": ref, "state": "RESTORED"}, nil)
 }
 
 func sendEvent(ctx context.Context, c *hostclient.Client, typ, process string, r Request) {

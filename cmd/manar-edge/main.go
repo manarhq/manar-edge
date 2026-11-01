@@ -23,6 +23,8 @@ const usage = `usage:
   manar-edge service run|install|remove
   manar-edge secret aws <profile>   (credential_process helper for vaulted AWS keys)
   manar-edge secret restore --all   (administrator: put every vaulted secret back in its file)
+  manar-edge vault add <key>        (move one of your ssh keys into the Manar vault; undo with vault restore)
+  manar-edge vault restore <key>|--all   (put ssh keys back exactly as they were; works offline)
   manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
   manar-edge down <agent> [--purge]
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
@@ -80,6 +82,8 @@ func main() {
 		default:
 			err = errors.New("usage: manar-edge secret aws <profile> | secret restore --all")
 		}
+	case "vault":
+		err = cmdVault(rest)
 	case "up":
 		err = cmdUp(base, rest)
 	case "down":

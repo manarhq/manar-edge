@@ -87,32 +87,45 @@ func (b *Broker) saveGrants(m map[string]grant) error {
 
 var errNotAllowed = errors.New("Manar: access to this secret was not allowed")
 
-// Credential returns the secret for a request, or an error.
+// Credential returns the AWS secret for a request, or an error.
 func (b *Broker) Credential(ctx context.Context, r Request) ([]byte, error) {
 	if r.Kind != "aws" || r.Owner == "" {
 		return nil, errors.New("unsupported secret request")
 	}
+	if err := b.Authorize(ctx, r); err != nil {
+		return nil, err
+	}
+	return b.V.AWSCredentialProcess(r.Owner, r.Ref)
+}
+
+// Authorize is the whole release decision for a vaulted secret (aws profile or ssh key): a standing
+// grant for this exact binary, or the person's answer. It returns nil only for an allow. Concurrent
+// asks for the same program and secret share one question.
+func (b *Broker) Authorize(ctx context.Context, r Request) error {
+	if r.Owner == "" {
+		return errors.New("unsupported secret request")
+	}
 	if _, err := b.V.Entry(r.Owner, r.Kind, r.Ref); err != nil {
-		return nil, errors.New("no such secret in the vault for you")
+		return errors.New("no such secret in the vault for you")
 	}
 	key := grantKey(r)
 	b.mu.Lock()
 	g, ok := b.grants()[key]
 	if r.Program != "" && r.SHA != "" && ok && (g.Always || b.now().Before(g.Until)) {
 		b.mu.Unlock()
-		return b.V.AWSCredentialProcess(r.Owner, r.Ref)
+		return nil
 	}
 	if f, running := b.inflight[key]; running { // the same program is already being asked
 		b.mu.Unlock()
 		select {
 		case <-f.done:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
 		if f.d == Deny || f.d == "" {
-			return nil, errNotAllowed
+			return errNotAllowed
 		}
-		return b.V.AWSCredentialProcess(r.Owner, r.Ref)
+		return nil
 	}
 	f := &flight{done: make(chan struct{})}
 	if b.inflight == nil {
@@ -148,7 +161,7 @@ func (b *Broker) Credential(ctx context.Context, r Request) ([]byte, error) {
 		if b.OnDenied != nil {
 			b.OnDenied(r)
 		}
-		return nil, errNotAllowed
+		return errNotAllowed
 	}
-	return b.V.AWSCredentialProcess(r.Owner, r.Ref)
+	return nil
 }
