@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 type fakeAPI struct {
@@ -318,5 +319,20 @@ func TestSettingsWithoutDoorSectionKeepTheLastOnes(t *testing.T) {
 	e.refresh(context.Background(), &fakeHost{cfg: &hostclient.Config{}})
 	if e.loaded.Load() {
 		t.Fatal("an API with no door section opened a gateway that never had settings")
+	}
+}
+
+func TestWorkspacePause(t *testing.T) {
+	d, front, seen := newTestDoor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
+	d.stateDir = t.TempDir()
+	if err := pause.Set(d.stateDir, true); err != nil {
+		t.Fatal(err)
+	}
+	if res := post(t, front.URL, "/v1/messages", "claude-cli/2", `{}`); res.StatusCode != 403 || len(*seen) != 0 {
+		t.Fatalf("not paused: %d %v", res.StatusCode, *seen)
+	}
+	_ = pause.Set(d.stateDir, false)
+	if res := post(t, front.URL, "/v1/messages", "claude-cli/2", `{}`); res.StatusCode != 200 {
+		t.Fatalf("unpaused call refused: %d", res.StatusCode)
 	}
 }

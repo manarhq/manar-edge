@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 )
 
@@ -203,6 +204,11 @@ func (d *Door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	user, ok := d.caller(r)
 	if !ok {
 		writeErr(w, http.StatusForbidden, "manar_unknown_caller", "Manar could not tell which local user sent this request.")
+		return
+	}
+	// "Pause all AI" (the workspace kill switch) stops every model call through DOOR too.
+	if d.stateDir != "" && pause.Paused(d.stateDir) {
+		writeErr(w, http.StatusForbidden, "manar_paused", "Manar paused all AI in this workspace. Ask your workspace admin.")
 		return
 	}
 	tool := toolOf(r.UserAgent())
