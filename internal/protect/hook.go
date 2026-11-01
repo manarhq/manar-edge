@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
@@ -158,6 +159,26 @@ type Relay struct {
 	PollMin, PollMax time.Duration
 	// NoAnswer overrides NoAnswerAfter (tests).
 	NoAnswer time.Duration
+	// Session is the tool's own session id from the hook input, when it gave one. Manar uses it to
+	// group a person's actions into sessions; it is never used to decide anything.
+	Session string
+}
+
+var sessionOK = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+
+// SessionID is the id a tool puts in its hook input (Claude Code, Gemini, Codex, Copilot:
+// session_id; Cursor: conversation_id). Anything that is not a plain id is dropped.
+func SessionID(raw []byte) string {
+	var in map[string]any
+	if json.Unmarshal(raw, &in) != nil {
+		return ""
+	}
+	for _, k := range []string{"session_id", "sessionId", "conversation_id", "conversationId"} {
+		if s, _ := in[k].(string); sessionOK.MatchString(s) {
+			return s
+		}
+	}
+	return ""
 }
 
 // NewRelay returns a client for the local service.
@@ -178,6 +199,9 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	defer cancel()
 	var dec authorizeReply
 	body := map[string]string{"toolId": "host." + key, "actionId": actionID, "resource": resource}
+	if r.Session != "" {
+		body["session"] = r.Session
+	}
 	if err := r.call(ctx, http.MethodPost, "/v1/authorize", body, &dec); err != nil {
 		return Verdict{false, "Manar: authorization failed: " + err.Error() + "." + restoreHint}
 	}
@@ -289,5 +313,7 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 		return Render(key, Verdict{false, "Manar: " + err.Error()})
 	}
 	budget := time.Duration(Budget(key)) * time.Second
-	return Render(key, NewRelay().Decide(context.Background(), key, actionID, resource, budget))
+	relay := NewRelay()
+	relay.Session = SessionID(raw)
+	return Render(key, relay.Decide(context.Background(), key, actionID, resource, budget))
 }

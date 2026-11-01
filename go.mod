@@ -4,6 +4,7 @@ go 1.26.8
 
 require (
 	git.sr.ht/~jackmordaunt/go-toast/v2 v2.0.3
+	github.com/BurntSushi/toml v1.5.0
 	github.com/Microsoft/go-winio v0.6.4
 	github.com/godbus/dbus/v5 v5.2.4
 	github.com/google/nftables v0.3.0

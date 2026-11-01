@@ -48,11 +48,30 @@ func currentReconciler() Reconciler {
 	return reconciler
 }
 
+var userReader UserReader
+
+// SetUserReader is called by internal/protect: it reads a user's file as that user. Until then
+// no user file is read at all (fail closed), so no MCP servers are reported.
+func SetUserReader(r UserReader) {
+	mu.Lock()
+	userReader = r
+	mu.Unlock()
+}
+
+func currentUserReader() UserReader {
+	mu.Lock()
+	defer mu.Unlock()
+	if userReader == nil {
+		return func(User, string) ([]byte, bool) { return nil, false }
+	}
+	return userReader
+}
+
 func init() { daemon.Register(&Module{}) }
 
 type api interface {
 	Config(ctx context.Context) (*hostclient.Config, error)
-	Inventory(ctx context.Context, tools []hostclient.Tool) error
+	Inventory(ctx context.Context, tools []hostclient.Tool, mcp []hostclient.MCPServer) error
 }
 
 // Module scans the device, lets protection catch up, and reports. A scan runs every Poll (so a
@@ -115,9 +134,13 @@ func (m *Module) run(ctx context.Context, c api) error {
 			states = r(ctx, found, cfg)
 		}
 		tools := Report(found, states)
-		b, _ := json.Marshal(tools)
+		mcp := MCPServers(found, goos, currentUserReader())
+		b, _ := json.Marshal(struct {
+			T []hostclient.Tool
+			M []MCPServer
+		}{tools, mcp})
 		if ctx.Err() == nil && (!bytes.Equal(b, last) || time.Since(lastAt) >= every) {
-			if err := c.Inventory(ctx, tools); err != nil {
+			if err := c.Inventory(ctx, tools, mcp); err != nil {
 				log.Printf("manar-edge: discovery: inventory: %v", err)
 			} else {
 				last, lastAt = b, time.Now()
