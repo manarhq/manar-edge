@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"maps"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +20,9 @@ import (
 
 // cgRoot is where the unified cgroup hierarchy is mounted (a variable for the container test).
 var cgRoot = "/sys/fs/cgroup"
+
+// rulesetFor builds the nftables text (a variable so a test can feed a wrong one).
+var rulesetFor = Ruleset
 
 // scanEvery is how often new processes of the tools are looked for.
 var scanEvery = 250 * time.Millisecond
@@ -78,8 +82,15 @@ func (e *enforcer) Apply(ports map[string]int) error {
 			return fmt.Errorf("cgroup for %s: %w", t, err)
 		}
 	}
-	if err := nft(Ruleset(ports)); err != nil {
+	if err := nft(rulesetFor(ports)); err != nil {
 		return err
+	}
+	// The rules must touch only the tools. If this kernel or nft reads the cgroup match differently
+	// than we expect and it hits everything, the user's whole network would break: check that this
+	// process (never in a tool cgroup) still connects straight, and take the rules out if not.
+	if err := selfTest(); err != nil {
+		_ = Teardown()
+		return fmt.Errorf("the rules were removed again: %w", err)
 	}
 	e.ports = ports
 	if e.scan == nil {
@@ -367,4 +378,42 @@ func restore(pid int, from string) {
 		}
 	}
 	_ = os.WriteFile(filepath.Join(cgRoot, "cgroup.procs"), data, 0o644)
+}
+
+// selfTest connects from this process to a listener on one of this machine's own non-loopback
+// addresses. Loopback is never redirected, so it would prove nothing; a non-loopback destination is
+// redirected or rejected if (and only if) the cgroup match wrongly covers this process. Machines
+// with no such address pass: there is nothing to break either.
+func selfTest() error {
+	addrs, _ := net.InterfaceAddrs()
+	for _, a := range addrs {
+		n, ok := a.(*net.IPNet)
+		if !ok || n.IP.IsLoopback() || n.IP.To4() == nil || n.IP.IsLinkLocalUnicast() {
+			continue
+		}
+		ln, err := net.Listen("tcp4", net.JoinHostPort(n.IP.String(), "0"))
+		if err != nil {
+			continue
+		}
+		defer ln.Close()
+		acc := make(chan struct{}, 1)
+		go func() {
+			if c, err := ln.Accept(); err == nil {
+				c.Close()
+				acc <- struct{}{}
+			}
+		}()
+		c, err := net.DialTimeout("tcp4", ln.Addr().String(), 2*time.Second)
+		if err != nil {
+			return fmt.Errorf("self-test: a program outside the tools could not connect: %w", err)
+		}
+		c.Close()
+		select {
+		case <-acc:
+			return nil
+		case <-time.After(2 * time.Second):
+			return errors.New("self-test: a program outside the tools was redirected")
+		}
+	}
+	return nil
 }

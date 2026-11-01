@@ -291,3 +291,29 @@ func TestWatchExec(t *testing.T) {
 		}
 	}
 }
+
+// If the cgroup match ever hit everything, the user's network would break. Apply must notice with
+// its self-test and take its own rules out again.
+func TestSelfTestRemovesRulesThatHitEveryone(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	if err := Supported(); err != nil {
+		t.Skip(err)
+	}
+	localIP(t)
+	rulesetFor = func(ports map[string]int) string {
+		return "table inet " + nftTable + "\ndelete table inet " + nftTable + "\ntable inet " + nftTable + " {\n" +
+			"\tchain x {\n\t\ttype nat hook output priority -100; policy accept;\n\t\tmeta l4proto tcp redirect to :1\n\t}\n}\n"
+	}
+	defer func() { rulesetFor = Ruleset }()
+	e := newEnforcer()
+	err := e.Apply(map[string]int{claude: 1})
+	defer e.Teardown()
+	if err == nil || !strings.Contains(err.Error(), "self-test") {
+		t.Fatalf("a ruleset that hits everyone was kept: %v", err)
+	}
+	if err := exec.Command("nft", "list", "table", "inet", nftTable).Run(); err == nil {
+		t.Fatal("the bad table is still installed")
+	}
+}

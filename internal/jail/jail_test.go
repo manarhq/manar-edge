@@ -297,7 +297,7 @@ func httpGet(t *testing.T, addr, host string) string {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(3 * time.Second))
+	c.SetDeadline(time.Now().Add(400 * time.Millisecond)) // the echo upstream never closes
 	io.WriteString(c, "GET / HTTP/1.1\r\nHost: "+host+"\r\n\r\n")
 	b, _ := io.ReadAll(c)
 	return string(b)
