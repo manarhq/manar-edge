@@ -61,6 +61,12 @@ func Run(ctx context.Context, c *hostclient.Client) error {
 	mu.Lock()
 	ms := append([]Module{heartbeat{}}, modules...)
 	mu.Unlock()
+	if c != nil && c.Info != nil {
+		SetIdentity(c.Info.HostID, c.Info.TenantSlug)
+	}
+	done := make(chan struct{})
+	defer close(done)
+	go statusWriter(done)
 	var wg sync.WaitGroup
 	for _, m := range ms {
 		wg.Add(1)
@@ -75,10 +81,13 @@ func Run(ctx context.Context, c *hostclient.Client) error {
 
 func supervise(ctx context.Context, m Module, c *hostclient.Client) {
 	for ctx.Err() == nil {
+		SetComponent("module:"+m.Name(), Component{State: "ok"})
 		err := safeStart(ctx, m, c)
 		if ctx.Err() != nil {
 			return
 		}
+		SetComponent("module:"+m.Name(), Component{State: "problem", Detail: "stopped and restarting",
+			Fix: "look at the service log for the reason: journalctl -u manar-edge -n 50 (Windows: Event Viewer, Application)"})
 		log.Printf("manar-edge: module %s stopped: %v; restarting", m.Name(), err)
 		select {
 		case <-ctx.Done():
@@ -144,6 +153,13 @@ func (heartbeat) Start(ctx context.Context, c *hostclient.Client) error {
 	defer t.Stop()
 	for {
 		cfg, err := c.Config(ctx)
+		if ctx.Err() == nil {
+			if err == nil {
+				recordSync(cfg.HostID, cfg.Status, cfg.StartMode, cfg.Features, nil)
+			} else {
+				recordSync("", "", "", nil, err)
+			}
+		}
 		switch {
 		case err != nil && ctx.Err() == nil:
 			log.Printf("manar-edge: config: %v", err)

@@ -115,6 +115,11 @@ func (m *Module) run(ctx context.Context, c api) error {
 			states = r(ctx, found, cfg)
 		}
 		tools := Report(found, states)
+		ts := make([]daemon.ToolStatus, len(tools))
+		for i, t := range tools {
+			ts[i] = daemon.ToolStatus{Name: t.Name, Protected: t.Protected, Mode: t.ProtectMode}
+		}
+		daemon.SetTools(ts)
 		b, _ := json.Marshal(tools)
 		if ctx.Err() == nil && (!bytes.Equal(b, last) || time.Since(lastAt) >= every) {
 			if err := c.Inventory(ctx, tools); err != nil {

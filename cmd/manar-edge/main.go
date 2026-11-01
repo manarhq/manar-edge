@@ -23,7 +23,8 @@ const usage = `usage:
   manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
   manar-edge down <agent> [--purge]
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
-  manar-edge status [<agent>]
+  manar-edge status [--json]   (is this computer protected? one line to fix each problem; no root needed)
+  manar-edge status <agent>   (jail status of an enrolled gateway agent)
   manar-edge hook claude-code <agent>
   manar-edge install-claude-code <agent> [--force-coexist]
   manar-edge protect list|restore [<tool>]   (what Manar changed in other AI tools; undo it)
@@ -81,10 +82,9 @@ func main() {
 	case "run":
 		err = cmdRun(base, rest)
 	case "status":
-		if len(rest) > 1 {
-			err = errors.New("usage: manar-edge status [<agent>]")
-		} else {
-			err = cmdStatus(base, rest)
+		var problems int
+		if problems, err = routeStatus(base, rest, os.Stdout); err == nil && problems > 0 {
+			os.Exit(1)
 		}
 	case "hook":
 		os.Exit(cmdHook(rest))
