@@ -1,4 +1,4 @@
-// Package door is DOOR, the local LLM gateway of a personal device (127.0.0.1:8480). Tools whose
+// Package door is DOOR, the local LLM gateway of a personal device (127.0.0.1:848). Tools whose
 // base URL Manar points here (Codex CLI today) send their model calls through it. DOOR forwards each
 // call to the provider with the user's own credentials, and on the way it (1) masks or blocks
 // secrets in the prompt, (2) reads token usage from the response for the spend tracker and (3)
@@ -21,24 +21,26 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 )
 
 // Listen is where DOOR listens. Protect routes tool base URLs here.
-const Listen = "127.0.0.1:8480"
+const Listen = ports.DoorListen
 
 const (
-	maxRequestBody = 32 << 20
+	maxRequestBody = 16 << 20
 	proofHeader    = "X-Manar-Door-Proof"
 	challengeHdr   = "X-Manar-Door-Challenge"
 )
 
 // proofKey is a random per-process secret. Only this process can answer a health challenge, so a
-// local program that grabbed port 8480 while the service was restarting cannot pass as DOOR.
+// local program that grabbed the port while the service was restarting cannot pass as DOOR.
 var proofKey = func() []byte {
 	k := make([]byte, 32)
 	if _, err := rand.Read(k); err != nil {
@@ -91,6 +93,8 @@ type Door struct {
 	loaded                    atomic.Bool // settings fetched (or restored from the cache) at least once
 	stateDir                  string
 	rp                        *httputil.ReverseProxy
+	sem                       chan struct{}
+	caller                    func(*http.Request) (string, bool)
 }
 
 func New() *Door {
@@ -102,7 +106,9 @@ func New() *Door {
 			Proxy: nil, ForceAttemptHTTP2: true, TLSHandshakeTimeout: 10 * time.Second,
 			ResponseHeaderTimeout: 10 * time.Minute, IdleConnTimeout: 90 * time.Second,
 		},
-		rec: newRecorder(),
+		rec:    newRecorder(),
+		sem:    make(chan struct{}, 16),
+		caller: callerOf,
 	}
 	// Until settings load DOOR forwards nothing, and the secrets guard is at its strictest.
 	d.settings.Store(&Settings{Secrets: "block"})
@@ -121,8 +127,8 @@ func New() *Door {
 
 type ctxKey struct{}
 type callInfo struct {
-	tool string
-	up   upstream
+	tool, user string
+	up         upstream
 }
 
 func (d *Door) route(path string) (upstream, bool) {
@@ -170,7 +176,7 @@ func (d *Door) watchResponse(res *http.Response) error {
 		return nil
 	}
 	sse := strings.HasPrefix(res.Header.Get("Content-Type"), "text/event-stream")
-	res.Body = newUsageTee(res.Body, sse, func(u usage) { d.rec.usage(ci.tool, ci.up.provider, u) })
+	res.Body = newUsageTee(res.Body, sse, func(u usage) { d.rec.usage(ci.tool, ci.up.provider, ci.user, u) })
 	return nil
 }
 
@@ -192,15 +198,32 @@ func (d *Door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "manar_unknown_route", "DOOR serves model API calls only.")
 		return
 	}
+	// The caller must be a local user DOOR can name: an unknown peer is refused. (Who it says it
+	// is, by User-Agent, is only a label.)
+	user, ok := d.caller(r)
+	if !ok {
+		writeErr(w, http.StatusForbidden, "manar_unknown_caller", "Manar could not tell which local user sent this request.")
+		return
+	}
 	tool := toolOf(r.UserAgent())
 	set := d.settings.Load()
-	for _, p := range set.Paused {
-		if p == tool {
-			writeErr(w, http.StatusTooManyRequests, "manar_paused", "Manar paused this tool: the monthly AI spend cap is reached. Ask your workspace admin.")
-			return
-		}
+	// A pause is by provider, not by tool: a caller can name itself anything, so while a cap has
+	// paused a provider, nothing goes to it through DOOR.
+	if slices.Contains(set.Paused, up.provider) {
+		writeErr(w, http.StatusTooManyRequests, "manar_paused", "Manar paused calls to "+up.provider+": the monthly AI spend cap is reached. Ask your workspace admin.")
+		return
 	}
 	if r.Body != nil && r.Body != http.NoBody {
+		// A permit bounds how many request bodies sit in memory at once.
+		select {
+		case d.sem <- struct{}{}:
+			defer func() { <-d.sem }()
+		case <-time.After(30 * time.Second):
+			writeErr(w, http.StatusServiceUnavailable, "manar_door_busy", "Manar DOOR is busy. Try again.")
+			return
+		case <-r.Context().Done():
+			return
+		}
 		body, err := d.guardBody(w, r, tool, set.Secrets == "block")
 		if err != nil {
 			return // guardBody has answered
@@ -208,24 +231,57 @@ func (d *Door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.Body, r.ContentLength = io.NopCloser(bytes.NewReader(body)), int64(len(body))
 		r.Header.Set("Content-Length", itoa(len(body)))
 	}
-	d.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, callInfo{tool, up})))
+	d.rp.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, callInfo{tool, user, up})))
+}
+
+// readCapped reads at most maxRequestBody bytes; one byte more is a refusal, never a truncation.
+func readCapped(r io.Reader) ([]byte, error) {
+	b, err := io.ReadAll(io.LimitReader(r, maxRequestBody+1))
+	if err == nil && len(b) > maxRequestBody {
+		err = errTooBig
+	}
+	return b, err
+}
+
+var errTooBig = errors.New("too large")
+
+// bodyEncoding returns the one content coding of a request, lower-case, or false for a list of
+// codings (or several headers), which DOOR does not unpack.
+func bodyEncoding(h http.Header) (string, bool) {
+	vs := h.Values("Content-Encoding")
+	if len(vs) == 0 {
+		return "", true
+	}
+	if len(vs) > 1 || strings.Contains(vs[0], ",") {
+		return "", false
+	}
+	e := strings.ToLower(strings.TrimSpace(vs[0]))
+	if e == "identity" {
+		e = ""
+	}
+	return e, true
 }
 
 // guardBody reads the request body (bounded), scans it for secrets and returns the body to send.
-// In block mode a secret refuses the call; otherwise it is masked. A body it cannot read as text
-// (an encoding other than gzip) is passed on unscanned in mask mode and refused in block mode.
+// In block mode a secret refuses the call; otherwise it is masked. Identity and gzip bodies are
+// read; any other coding is refused in both modes, because a body DOOR cannot read cannot be checked.
 func (d *Door) guardBody(w http.ResponseWriter, r *http.Request, tool string, block bool) ([]byte, error) {
-	b, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxRequestBody))
+	b, err := readCapped(r.Body)
 	if err != nil {
 		writeErr(w, http.StatusRequestEntityTooLarge, "request_too_large", "The request is too large for DOOR to check.")
 		return nil, err
 	}
-	switch enc := strings.ToLower(r.Header.Get("Content-Encoding")); enc {
-	case "", "identity":
-	case "gzip":
+	enc, ok := bodyEncoding(r.Header)
+	switch {
+	case ok && enc == "":
+	case ok && enc == "gzip":
 		zr, err := gzip.NewReader(bytes.NewReader(b))
 		if err == nil {
-			b, err = io.ReadAll(io.LimitReader(zr, maxRequestBody))
+			b, err = readCapped(zr) // a body that grows past the cap when unpacked is refused too
+		}
+		if errors.Is(err, errTooBig) {
+			writeErr(w, http.StatusRequestEntityTooLarge, "request_too_large", "The request is too large for DOOR to check.")
+			return nil, err
 		}
 		if err != nil {
 			writeErr(w, http.StatusBadRequest, "invalid_body", "The request body could not be read.")
@@ -233,21 +289,19 @@ func (d *Door) guardBody(w http.ResponseWriter, r *http.Request, tool string, bl
 		}
 		r.Header.Del("Content-Encoding")
 	default:
-		if block {
-			writeErr(w, http.StatusBadRequest, "manar_unscannable", "Manar is set to block secrets and cannot check this request encoding.")
-			return nil, errors.New("unscannable")
-		}
-		d.rec.unscanned()
-		return b, nil
+		d.rec.refused()
+		writeErr(w, http.StatusUnsupportedMediaType, "manar_unscannable", "Manar DOOR can only check plain or gzip request bodies, so it cannot forward this one.")
+		return nil, errors.New("unscannable")
 	}
-	found, out := Scan(b)
+	found, out := ScanBody(b)
 	if len(found) == 0 {
 		return b, nil
 	}
+	action := map[bool]string{true: "blocked", false: "masked"}[block]
 	for _, f := range found {
-		d.rec.guard(tool, f.Kind, map[bool]string{true: "blocked", false: "masked"}[block], f.Sample)
+		d.rec.guard(tool, f.Kind, action, f.Sample)
 	}
-	if block {
+	if block || out == nil {
 		writeErr(w, http.StatusBadRequest, "manar_secret_blocked", "Manar blocked this request: it contains "+found[0].Kind+" (a secret). Remove it and try again.")
 		return nil, errors.New("blocked")
 	}

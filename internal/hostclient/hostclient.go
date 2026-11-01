@@ -274,7 +274,9 @@ type Config struct {
 // DoorSettings is the "door" part of GET /host/v1/config.
 type DoorSettings struct {
 	Secrets string   `json:"secrets"` // "mask" (default) or "block"
-	Paused  []string `json:"paused"`  // tool ids the monthly cap paused
+	Paused  []string `json:"paused"`  // providers (anthropic, openai, gemini) a monthly cap paused
+	// Unavailable is set by the API when it could not work the settings out: keep the last ones.
+	Unavailable bool `json:"unavailable,omitempty"`
 }
 
 // ToolInstructions is the "tools" part of GET /host/v1/config.

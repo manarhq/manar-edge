@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 )
 
 // overlayTargets returns the overlay endpoints a jailed agent may reach: Manar's relay and the
@@ -229,7 +231,7 @@ const pipeSDDL = "D:P(A;;GA;;;SY)(A;;0x12008b;;;BU)"
 // allowedTCP is what a confined Windows program may still reach: the local gateway, Manar's
 // relay and the egress proxy, each on its own TCP port only.
 func allowedTCP(e Edge) map[netip.Addr][]uint16 {
-	out := map[netip.Addr][]uint16{netip.MustParseAddr("127.0.0.1"): {8480}}
+	out := map[netip.Addr][]uint16{netip.MustParseAddr("127.0.0.1"): {ports.JailGatewayPort}}
 	for _, a := range []string{e.ManarAddress, e.ProxyAddress} {
 		if ap, err := netip.ParseAddrPort(a); err == nil {
 			out[ap.Addr()] = append(out[ap.Addr()], ap.Port())

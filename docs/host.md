@@ -87,3 +87,15 @@ dontAsk; [settings reference](https://code.claude.com/docs/en/settings-reference
   that is administrator rights).
 - `run` needs an elevated prompt (the state dir is SYSTEM and Administrators only), so the program
   it starts is elevated too.
+
+## DOOR (device-level LLM gateway)
+
+`manar-edge service run` starts DOOR on `127.0.0.1:848` (ports are named in `internal/ports`; the per-agent
+JAIL gateway keeps `127.0.0.1:8480`). The port is below 1024 on purpose: on Linux only root can bind it, so a
+user program cannot take it while the service restarts and read the API key a tool sends. Tools are routed
+to DOOR (Codex `openai_base_url`) only while that holds (`ip_unprivileged_port_start` above 848) and DOOR
+answers a fresh challenge; otherwise Manar removes the route it wrote. Windows has no equivalent guarantee
+(an HTTP.sys reservation does not stop raw sockets), so Manar writes no route there. DOOR names the calling
+local user from the kernel TCP table (Linux) or the owning process token (Windows) and refuses callers it cannot
+name. Pauses are by provider. The secrets guard catches accidental leaks in JSON strings; it does not decode
+base64 or find a secret split across fields.

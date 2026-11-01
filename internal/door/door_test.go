@@ -1,6 +1,8 @@
 package door
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"io"
@@ -52,6 +54,7 @@ func newTestDoor(t *testing.T, reply func(w http.ResponseWriter, r *http.Request
 	d := New()
 	d.anthropic.url, d.openai.url, d.gemini.url = u, u, u
 	d.loaded.Store(true)
+	d.caller = func(*http.Request) (string, bool) { return "uid:1000", true }
 	d.settings.Store(&hostclient.DoorSettings{Secrets: "mask"})
 	d.transport = http.DefaultTransport
 	d.rp.Transport = http.DefaultTransport
@@ -92,7 +95,7 @@ func TestForwardsMasksAndCountsUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	bt := api.batches[0]
-	if len(bt.Usage) != 1 || bt.Usage[0] != (usageItem{"host.codex-cli", "openai", "gpt-5", 1, 11, 4}) {
+	if len(bt.Usage) != 1 || bt.Usage[0] != (usageItem{"host.codex-cli", "uid:1000", "openai", "gpt-5", 1, 11, 4}) {
 		t.Fatalf("usage %+v", bt.Usage)
 	}
 	if len(bt.Guard) != 1 || bt.Guard[0].Action != "masked" || bt.Guard[0].Sample != "AKIA****" {
@@ -106,12 +109,13 @@ func TestForwardsMasksAndCountsUsage(t *testing.T) {
 
 func TestBlockModeAndPause(t *testing.T) {
 	d, front, seen := newTestDoor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
-	d.settings.Store(&hostclient.DoorSettings{Secrets: "block", Paused: []string{"host.gemini-cli"}})
-	res := post(t, front.URL, "/v1/chat/completions", "codex", `{"m":"password=hunter2hunter2"}`)
+	d.settings.Store(&hostclient.DoorSettings{Secrets: "block", Paused: []string{"gemini"}})
+	res := post(t, front.URL, "/v1/chat/completions", "codex", `{"m":"password=Xk9#mQ2vLp8zR"}`)
 	if res.StatusCode != 400 || len(*seen) != 0 {
 		t.Fatalf("not blocked: %d %v", res.StatusCode, *seen)
 	}
-	res = post(t, front.URL, "/v1beta/models/x:generateContent", "GeminiCLI/1", `{}`)
+	// A pause is by provider: naming itself something else does not get a caller past it.
+	res = post(t, front.URL, "/v1beta/models/x:generateContent", "codex_cli_rs/1", `{}`)
 	if res.StatusCode != 429 || len(*seen) != 0 {
 		t.Fatalf("not paused: %d", res.StatusCode)
 	}
@@ -227,16 +231,92 @@ func TestModelNamesAreCleanedAndRefusedBatchesDropped(t *testing.T) {
 		t.Fatal(got)
 	}
 	r := newRecorder()
-	r.usage("host.codex-cli", "openai", usage{Model: "gpt-5", In: 1})
+	r.usage("host.codex-cli", "openai", "uid:1", usage{Model: "gpt-5", In: 1})
 	api := &fakeAPI{}
 	api.err = &hostclient.StatusError{Code: 400, Message: "bad"}
 	if r.flush(context.Background(), api) == nil || r.pending != nil {
 		t.Fatal("a refused batch must be dropped, not resent forever")
 	}
-	r.usage("host.codex-cli", "openai", usage{Model: "gpt-5", In: 1})
+	r.usage("host.codex-cli", "openai", "uid:1", usage{Model: "gpt-5", In: 1})
 	api.err = &hostclient.StatusError{Code: 429, Message: "slow down"}
 	_ = r.flush(context.Background(), api)
 	if r.pending == nil {
 		t.Fatal("a rate-limited batch must be kept")
+	}
+}
+
+func TestUnknownCallerRefusedAndMemoryBounds(t *testing.T) {
+	d, front, seen := newTestDoor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
+	d.caller = func(*http.Request) (string, bool) { return "", false }
+	if res := post(t, front.URL, "/v1/chat/completions", "codex", `{}`); res.StatusCode != 403 || len(*seen) != 0 {
+		t.Fatalf("unknown caller not refused: %d", res.StatusCode)
+	}
+	d.caller = func(*http.Request) (string, bool) { return "uid:1", true }
+	// A body over the cap is refused, not cut.
+	big := strings.NewReader(`{"a":"` + strings.Repeat("x", maxRequestBody) + `"}`)
+	req, _ := http.NewRequest("POST", front.URL+"/v1/chat/completions", big)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil || res.StatusCode != 413 || len(*seen) != 0 {
+		t.Fatalf("oversized body: %v %v", res, err)
+	}
+}
+
+func gz(t *testing.T, s string) []byte {
+	var b bytes.Buffer
+	w := gzip.NewWriter(&b)
+	_, _ = w.Write([]byte(s))
+	w.Close()
+	return b.Bytes()
+}
+
+func TestEncodingsAreReadOrRefusedInBothModes(t *testing.T) {
+	for _, mode := range []string{"mask", "block"} {
+		d, front, seen := newTestDoor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
+		d.settings.Store(&hostclient.DoorSettings{Secrets: mode})
+		send := func(enc string, body []byte) int {
+			req, _ := http.NewRequest("POST", front.URL+"/v1/chat/completions", bytes.NewReader(body))
+			req.Header.Set("Content-Encoding", enc)
+			res, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return res.StatusCode
+		}
+		for _, enc := range []string{"zstd", "br", "gzip, zstd", "deflate"} {
+			if c := send(enc, []byte("x")); c != 415 {
+				t.Errorf("%s/%s: %d, want 415", mode, enc, c)
+			}
+		}
+		if len(*seen) != 0 {
+			t.Fatalf("%s: an unreadable body reached the provider", mode)
+		}
+		// gzip, any case or spacing, is unpacked and scanned.
+		if c := send(" GZip ", gz(t, `{"m":"AKIAIOSFODNN7EXAMPLE"}`)); (mode == "block" && c != 400) || (mode == "mask" && c != 200) {
+			t.Errorf("%s: gzip with a key: %d", mode, c)
+		}
+		if mode == "mask" && strings.Contains((*seen)[0], "AKIA") {
+			t.Fatal("gzip body not masked")
+		}
+		api := &fakeAPI{}
+		_ = d.rec.flush(context.Background(), api)
+		if api.batches[0].Refused != 4 {
+			t.Fatalf("refused count %d", api.batches[0].Refused)
+		}
+	}
+}
+
+func TestSettingsWithoutDoorSectionKeepTheLastOnes(t *testing.T) {
+	d := New()
+	d.refresh(context.Background(), &fakeHost{cfg: &hostclient.Config{Door: &hostclient.DoorSettings{Secrets: "mask", Paused: []string{"openai"}}}})
+	for _, cfg := range []*hostclient.Config{{}, {Door: &hostclient.DoorSettings{Unavailable: true}}} {
+		d.refresh(context.Background(), &fakeHost{cfg: cfg})
+		if s := d.settings.Load(); s.Secrets != "mask" || len(s.Paused) != 1 || !d.loaded.Load() {
+			t.Fatalf("settings lost: %+v", s)
+		}
+	}
+	e := New()
+	e.refresh(context.Background(), &fakeHost{cfg: &hostclient.Config{}})
+	if e.loaded.Load() {
+		t.Fatal("an API with no door section opened a gateway that never had settings")
 	}
 }

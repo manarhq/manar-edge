@@ -12,7 +12,7 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
 )
 
-type ukey struct{ tool, provider, model string }
+type ukey struct{ tool, provider, model, user string }
 type gkey struct{ tool, kind, action string }
 
 type uval struct{ Requests, In, Out int64 }
@@ -25,11 +25,14 @@ type gval struct {
 type batch struct {
 	BatchID string      `json:"batchId"`
 	Usage   []usageItem `json:"usage"`
+	// Refused counts requests turned away because their body could not be checked.
+	Refused int64       `json:"refused"`
 	Guard   []guardItem `json:"guard"`
 }
 
 type usageItem struct {
 	ToolID       string `json:"toolId"`
+	LocalUser    string `json:"localUser"`
 	Provider     string `json:"provider"`
 	Model        string `json:"model"`
 	Requests     int64  `json:"requests"`
@@ -69,16 +72,16 @@ type recorder struct {
 	usages  map[ukey]*uval
 	guards  map[gkey]*gval
 	pending *batch // sent but not acknowledged: resent unchanged
-	skipped int64
+	skipped int64  // requests refused because their body could not be checked
 }
 
 func newRecorder() *recorder {
 	return &recorder{usages: map[ukey]*uval{}, guards: map[gkey]*gval{}}
 }
 
-func (r *recorder) unscanned() { r.mu.Lock(); r.skipped++; r.mu.Unlock() }
+func (r *recorder) refused() { r.mu.Lock(); r.skipped++; r.mu.Unlock() }
 
-func (r *recorder) usage(tool, provider string, u usage) {
+func (r *recorder) usage(tool, provider, user string, u usage) {
 	model := u.Model
 	if model == "" {
 		model = "unknown"
@@ -86,7 +89,7 @@ func (r *recorder) usage(tool, provider string, u usage) {
 	model = cleanModel(model)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	k := ukey{tool, provider, model}
+	k := ukey{tool, provider, model, user}
 	v := r.usages[k]
 	if v == nil {
 		v = &uval{}
@@ -116,18 +119,19 @@ func (r *recorder) takeBatch() *batch {
 	if r.pending != nil {
 		return r.pending
 	}
-	if len(r.usages) == 0 && len(r.guards) == 0 {
+	if len(r.usages) == 0 && len(r.guards) == 0 && r.skipped == 0 {
 		return nil
 	}
 	id := make([]byte, 16)
 	_, _ = rand.Read(id)
 	b := &batch{BatchID: hex.EncodeToString(id), Usage: []usageItem{}, Guard: []guardItem{}}
 	for k, v := range r.usages {
-		b.Usage = append(b.Usage, usageItem{k.tool, k.provider, k.model, v.Requests, v.In, v.Out})
+		b.Usage = append(b.Usage, usageItem{k.tool, k.user, k.provider, k.model, v.Requests, v.In, v.Out})
 	}
 	for k, v := range r.guards {
 		b.Guard = append(b.Guard, guardItem{k.tool, k.kind, k.action, v.Count, v.Sample})
 	}
+	b.Refused, r.skipped = r.skipped, 0
 	r.usages, r.guards = map[ukey]*uval{}, map[gkey]*gval{}
 	r.pending = b
 	return b

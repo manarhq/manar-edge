@@ -102,10 +102,10 @@ func (d *Door) refresh(ctx context.Context, c interface {
 	if err != nil || cfg == nil {
 		return
 	}
-	s := hostclient.DoorSettings{Secrets: "mask"} // an API that sends no door section: defaults
-	if cfg.Door != nil {
-		s = *cfg.Door
+	if cfg.Door == nil || cfg.Door.Unavailable {
+		return // no door section or "unavailable": the last known settings keep applying
 	}
+	s := *cfg.Door
 	n := cleanSettings(s)
 	if old := d.settings.Load(); !d.loaded.Load() || old.Secrets != n.Secrets || !slices.Equal(old.Paused, n.Paused) {
 		d.saveCache(n)
@@ -118,7 +118,13 @@ func (d *Door) serve(ctx context.Context, ln net.Listener, c interface {
 	Config(context.Context) (*hostclient.Config, error)
 	sender
 }) error {
-	srv := &http.Server{Handler: d, ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{
+		Handler:           d,
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       2 * time.Minute, // the whole request; responses (streams) are not limited
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    64 << 10,
+	}
 	go func() { <-ctx.Done(); _ = srv.Close() }()
 	go func() {
 		poll, flush := time.NewTicker(pollEvery), time.NewTicker(flushEvery)

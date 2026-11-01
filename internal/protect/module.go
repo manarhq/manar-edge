@@ -17,10 +17,11 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
 	"gitlab.vax.sh/manar/manar-edge/internal/door"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 )
 
 // GatewayURL is the local LLM gateway base URL; set by the command package.
-var GatewayURL = "http://127.0.0.1:8480"
+var GatewayURL = ports.DoorURL
 
 // ClaudeSettingsPath is the managed Claude Code settings file; set by the command package.
 // Claude Code is protected by `install-claude-code`; this only reads whether that is in place.
@@ -61,9 +62,9 @@ func logOnce(msg string) {
 	}
 }
 
-// gatewayUp is true only when DOOR itself answers a fresh challenge on GatewayURL: another program
-// that grabbed the port cannot, so a tool is never routed to it.
-func gatewayUp() bool { return door.Healthy(GatewayURL) }
+// gatewayUp is true only when the port cannot be squatted (door.Routable) and DOOR itself answers a
+// fresh challenge on GatewayURL.
+func gatewayUp() bool { return door.Routable() && door.Healthy(GatewayURL) }
 
 // reconcile protects what was found for every account that uses it, undoes it for tools the
 // owner switched off, and returns the resulting state. Nothing is changed until the owner has
