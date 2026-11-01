@@ -53,5 +53,15 @@ func OrigDst(c net.Conn) (netip.AddrPort, error) {
 	}); err != nil {
 		return netip.AddrPort{}, err
 	}
-	return out, gerr
+	if gerr != nil {
+		return netip.AddrPort{}, gerr
+	}
+	// Without a nat entry the kernel answers with the connection's own destination: this one was
+	// opened straight to the proxy port, not redirected to it.
+	if la, ok := tc.LocalAddr().(*net.TCPAddr); ok {
+		if l, ok := netip.AddrFromSlice(la.IP); ok && l.Unmap() == out.Addr().Unmap() && uint16(la.Port) == out.Port() {
+			return netip.AddrPort{}, errors.New("not redirected")
+		}
+	}
+	return out, nil
 }

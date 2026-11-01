@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
@@ -105,6 +106,11 @@ func (p *Proxy) handle(c net.Conn) {
 
 	port := dst.Port()
 	v, why := p.Policy.Decide(p.Tool, host)
+	if v == Ask && kind == "other" && port == 22 {
+		if a, err := netip.ParseAddr(host); err == nil && p.Policy.AllowedAddr(p.Tool, a) {
+			v, why = Allow, "builtin"
+		}
+	}
 	if v == Ask {
 		res := p.ask(host)
 		if res.Allow {
@@ -127,6 +133,12 @@ func (p *Proxy) handle(c net.Conn) {
 	}
 	defer up.Close()
 	p.logf("jail: %s allowed %s:%d (%s)", p.Tool, host, port, why)
+	if kind == "http" {
+		// Plain HTTP shows its site in every request, so every request is checked: a second
+		// request on the same connection cannot name another site.
+		relayHTTP(c, br, up, host)
+		return
+	}
 	if len(replay) > 0 {
 		if _, err := up.Write(replay); err != nil {
 			return
@@ -380,5 +392,40 @@ func pipe(c net.Conn, br *bufio.Reader, up net.Conn) {
 	select {
 	case <-done:
 	case <-t.C:
+	}
+}
+
+// relayHTTP forwards plain HTTP request by request. Anything but an ordinary request for host
+// (another Host, an absolute URL, CONNECT, an upgrade) ends the connection.
+func relayHTTP(c net.Conn, br *bufio.Reader, up net.Conn, host string) {
+	upBr := bufio.NewReader(up)
+	deny := func(why string) {
+		io.WriteString(c, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\nX-Manar-Reason: "+why+"\r\n\r\n")
+	}
+	for {
+		req, err := http.ReadRequest(br)
+		if err != nil {
+			return
+		}
+		h := strings.ToLower(strings.TrimSuffix(req.Host, "."))
+		if hh, _, err := net.SplitHostPort(h); err == nil {
+			h = strings.Trim(hh, "[]")
+		}
+		if req.Method == http.MethodConnect || !strings.HasPrefix(req.RequestURI, "/") || h != host || req.Header.Get("Upgrade") != "" {
+			deny("another_site")
+			return
+		}
+		if err := req.Write(up); err != nil {
+			return
+		}
+		resp, err := http.ReadResponse(upBr, req)
+		if err != nil {
+			return
+		}
+		err = resp.Write(c)
+		resp.Body.Close()
+		if err != nil || req.Close || resp.Close {
+			return
+		}
 	}
 }

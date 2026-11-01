@@ -176,9 +176,6 @@ func (p *Policy) Decide(tool, host string) (Verdict, string) {
 	if _, ok := gateway.HostAllowed(Builtin(tool), host); ok {
 		return Allow, "builtin"
 	}
-	if ip, err := netip.ParseAddr(host); err == nil && p.builtinAddr(tool, ip) {
-		return Allow, "builtin"
-	}
 	return Ask, "new_site"
 }
 
@@ -198,8 +195,16 @@ func (p *Policy) IsUserRule(tool, host string) bool {
 	return false
 }
 
-// builtinAddr reports whether ip is an address of one of the tool's built-in exact names.
-func (p *Policy) builtinAddr(tool string, ip netip.Addr) bool {
+// sshHosts are the code hosts whose addresses are theirs alone (not a CDN shared with other
+// sites), so a connection to one of those addresses that shows no name (git over ssh) can be
+// recognised. Registries are never allowed by address: npm, PyPI and the Go proxy sit behind shared
+// CDNs, where an address says nothing about the site.
+var sshHosts = []string{"github.com", "ssh.github.com", "gitlab.com", "altssh.gitlab.com"}
+
+// AllowedAddr reports whether ip is an address of github.com or gitlab.com. The proxy uses it only
+// for a protocol that shows no name (ssh); a TLS connection without a name, an ECH hello or an odd
+// HTTP request is asked about instead.
+func (p *Policy) AllowedAddr(tool string, ip netip.Addr) bool {
 	p.mu.Lock()
 	stale := p.addrs == nil || p.now().Sub(p.addrLast) > p.addrTTL
 	p.mu.Unlock()
@@ -207,10 +212,7 @@ func (p *Policy) builtinAddr(tool string, ip netip.Addr) bool {
 		set := addrSet{}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		for _, n := range common {
-			if strings.HasPrefix(n, "*.") {
-				continue
-			}
+		for _, n := range sshHosts {
 			if as, err := p.lookup(ctx, n); err == nil {
 				for _, a := range as {
 					set[a.Unmap()] = true

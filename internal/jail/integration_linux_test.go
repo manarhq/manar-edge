@@ -27,6 +27,9 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	if escHelper() {
+		return
+	}
 	switch os.Getenv("JAIL_HELPER") {
 	case "sleep":
 		time.Sleep(2 * time.Minute)
@@ -185,6 +188,22 @@ func TestLinuxFilterEndToEnd(t *testing.T) {
 		t.Fatal("table not restored after a flush")
 	}
 
+	// ...and without waiting for a poll: the nftables notification puts it back within seconds.
+	if out, err := exec.Command("nft", "flush", "ruleset").CombinedOutput(); err != nil {
+		t.Fatalf("%v %s", err, out)
+	}
+	back := false
+	for range 30 {
+		if exec.Command("nft", "list", "table", "inet", nftTable).Run() == nil {
+			back = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !back {
+		t.Fatal("a flushed ruleset was not put back within 3 seconds")
+	}
+
 	addr := ip + ":9000"
 	// The tool: an allowed site goes through the proxy, the destination really is that name's address.
 	if out := getAfter(t, bin("claude"), 1000, addr, "allowed.test:9000", "1s"); out != "hello allowed.test:9000" {
@@ -302,7 +321,7 @@ func TestSelfTestRemovesRulesThatHitEveryone(t *testing.T) {
 		t.Skip(err)
 	}
 	localIP(t)
-	rulesetFor = func(ports map[string]int) string {
+	rulesetFor = func(map[string]int, []netip.Addr) string {
 		return "table inet " + nftTable + "\ndelete table inet " + nftTable + "\ntable inet " + nftTable + " {\n" +
 			"\tchain x {\n\t\ttype nat hook output priority -100; policy accept;\n\t\tmeta l4proto tcp redirect to :1\n\t}\n}\n"
 	}

@@ -9,9 +9,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 	"net"
+	"net/http"
 	"net/netip"
 	"strings"
 	"sync"
@@ -43,12 +45,12 @@ func TestPolicyPrecedence(t *testing.T) {
 			t.Errorf("%s should ask, got %v", h, got)
 		}
 	}
-	// an address of an allowed code host (git over ssh)
-	if got, _ := v(claude, "140.82.121.3"); got != Allow {
-		t.Error("github address should be allowed")
+	// an address is never allowed by the list itself; only AllowedAddr (git over ssh) knows code hosts
+	if got, _ := v(claude, "140.82.121.3"); got != Ask {
+		t.Error("an address must be asked about")
 	}
-	if got, _ := v(claude, "203.0.113.5"); got != Ask {
-		t.Error("unknown address should ask")
+	if !p.AllowedAddr(claude, netip.MustParseAddr("140.82.121.3")) || p.AllowedAddr(claude, netip.MustParseAddr("203.0.113.5")) {
+		t.Error("code host addresses")
 	}
 	p.SetRules([]Rule{
 		{Tool: claude, Site: "*.corp.example", Mode: "ALLOW"},
@@ -291,26 +293,59 @@ func TestPrivateAndLocalAddressesByName(t *testing.T) {
 	}
 }
 
-func httpGet(t *testing.T, addr, host string) string {
+// startHTTP is an upstream that answers every request with "served <Host> <path>".
+func startHTTP(t *testing.T) net.Listener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go http.Serve(ln, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "served %s %s", r.Host, r.URL.Path)
+	}))
+	t.Cleanup(func() { ln.Close() })
+	return ln
+}
+
+// httpRaw sends raw bytes to the proxy and returns everything it answers.
+func httpRaw(t *testing.T, addr, req string) string {
 	c, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	c.SetDeadline(time.Now().Add(400 * time.Millisecond)) // the echo upstream never closes
-	io.WriteString(c, "GET / HTTP/1.1\r\nHost: "+host+"\r\n\r\n")
+	c.SetDeadline(time.Now().Add(2 * time.Second))
+	io.WriteString(c, req)
 	b, _ := io.ReadAll(c)
 	return string(b)
 }
 
-func TestHTTPHostHeader(t *testing.T) {
+func TestHTTPIsCheckedRequestByRequest(t *testing.T) {
 	ask := &fakeAsker{res: Result{Reason: "denied"}}
-	e := startProxy(t, startEcho(t, nil), ask, nil, "203.0.113.9")
-	if got := httpGet(t, e.addr, "registry.npmjs.org:80"); !strings.HasPrefix(got, "GET / HTTP/1.1") {
-		t.Fatalf("allowed request not forwarded intact: %q", got)
+	e := startProxy(t, startHTTP(t), ask, nil, "203.0.113.9")
+	ok := "GET /a HTTP/1.1\r\nHost: registry.npmjs.org:80\r\n\r\n"
+	if got := httpRaw(t, e.addr, ok+"GET /b HTTP/1.1\r\nHost: registry.npmjs.org\r\nConnection: close\r\n\r\n"); !strings.Contains(got, "served registry.npmjs.org:80 /a") || !strings.Contains(got, "served registry.npmjs.org /b") {
+		t.Fatalf("two allowed requests: %q", got)
 	}
-	if got := httpGet(t, e.addr, "other.example"); !strings.HasPrefix(got, "HTTP/1.1 403") || !strings.Contains(got, "X-Manar-Reason: denied") {
+	// the second request on an allowed connection names another site: refused, never forwarded
+	got := httpRaw(t, e.addr, ok+"GET /steal HTTP/1.1\r\nHost: evil.example\r\n\r\n")
+	if strings.Contains(got, "evil.example") && strings.Contains(got, "served evil") || !strings.Contains(got, "403") || ask.calls.Load() != 0 {
+		t.Fatalf("smuggled second request: %q", got)
+	}
+	// an unlisted site is asked about and refused
+	if got := httpRaw(t, e.addr, "GET / HTTP/1.1\r\nHost: other.example\r\n\r\n"); !strings.HasPrefix(got, "HTTP/1.1 403") || !strings.Contains(got, "X-Manar-Reason: denied") {
 		t.Fatalf("denied request: %q", got)
+	}
+	// absolute-form, an upgrade, CONNECT and a lowercase method never ride on an allowed name
+	for _, req := range []string{
+		"GET http://evil.example/x HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n",
+		"GET / HTTP/1.1\r\nHost: registry.npmjs.org\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+		"CONNECT evil.example:443 HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n",
+		"get /x HTTP/1.1\r\nHost: registry.npmjs.org\r\n\r\n",
+	} {
+		if got := httpRaw(t, e.addr, req); strings.Contains(got, "served") {
+			t.Errorf("%q was forwarded: %q", req, got)
+		}
 	}
 }
 

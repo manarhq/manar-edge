@@ -61,10 +61,23 @@ func clip(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
+func clipLeft(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return "…" + string(r[len(r)-n+1:])
+}
+
 // Render builds the prompt text. The resource is clipped; Arabic puts the tool name and the
 // resource in their own isolates so a path keeps its direction inside right-to-left text.
 func Render(p Prompt, lang Lang) Text {
 	res := clip(p.Resource, 120)
+	if p.ActionID == "site.connect" {
+		// A long name is cut from the left, so the part that says whose site it is stays visible:
+		// "…evil.example", never "paypal.com.login.ver…".
+		res = clipLeft(p.Resource, 60)
+	}
 	name := ToolName(p.ToolID)
 	t := Text{}
 	if lang == AR {

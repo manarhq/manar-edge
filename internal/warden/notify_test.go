@@ -2,6 +2,7 @@ package warden
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -99,5 +100,17 @@ func TestWindowsToastArgsRoundTrip(t *testing.T) {
 		if _, _, ok := ParseToastArgs(bad); ok {
 			t.Errorf("ParseToastArgs(%q) accepted", bad)
 		}
+	}
+}
+
+func TestSitePromptsKeepTheEndOfALongName(t *testing.T) {
+	long := "login.verify.account.update.paypal.com.secure-session.attacker-controlled-domain.example"
+	tx := Render(Prompt{ToolID: "host.claude-code", ActionID: "site.connect", Resource: long}, EN)
+	if !strings.HasSuffix(tx.Body, "attacker-controlled-domain.example") || !strings.Contains(tx.Body, "…") || strings.Contains(tx.Body, "login.verify") {
+		t.Fatalf("%q", tx.Body)
+	}
+	short := Render(Prompt{ToolID: "host.claude-code", ActionID: "site.connect", Resource: "example.org"}, EN)
+	if short.Body != "Claude Code wants to connect to example.org" {
+		t.Fatalf("%q", short.Body)
 	}
 }

@@ -3,17 +3,21 @@ package jail
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"maps"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -24,17 +28,23 @@ var cgRoot = "/sys/fs/cgroup"
 // rulesetFor builds the nftables text (a variable so a test can feed a wrong one).
 var rulesetFor = Ruleset
 
+// resolvConf is where the tools' DNS servers are read from (a variable for tests).
+var resolvConf = "/etc/resolv.conf"
+
 // scanEvery is how often new processes of the tools are looked for.
 var scanEvery = 250 * time.Millisecond
 
 // enforcer is the Linux OS layer: a cgroup per tool, an nftables table that matches those cgroups,
 // and a scanner that moves the tools' processes in.
 type enforcer struct {
-	mu     sync.Mutex
-	ports  map[string]int
-	cancel context.CancelFunc
-	done   chan struct{}
-	scan   *scanner
+	mu        sync.Mutex
+	ports     map[string]int
+	resolvers []netip.Addr
+	rules     string // the ruleset text last installed, to put it back
+	cancel    context.CancelFunc
+	done      chan struct{}
+	scan      *scanner
+	wanted    atomic.Value // []string, read by the scanner
 }
 
 func newEnforcer() *enforcer { return &enforcer{} }
@@ -65,7 +75,8 @@ func (e *enforcer) Apply(ports map[string]int) error {
 	defer e.mu.Unlock()
 	// Nothing changed and our table is still there (a firewall reload that flushes the ruleset
 	// would otherwise leave the tools unfiltered without anyone noticing): nothing to do.
-	if e.scan != nil && maps.Equal(e.ports, ports) && tableExists() {
+	resolvers := readResolvers(resolvConf)
+	if e.scan != nil && maps.Equal(e.ports, ports) && slices.Equal(e.resolvers, resolvers) && tableExists() {
 		return nil
 	}
 	for t := range e.ports {
@@ -82,7 +93,8 @@ func (e *enforcer) Apply(ports map[string]int) error {
 			return fmt.Errorf("cgroup for %s: %w", t, err)
 		}
 	}
-	if err := nft(rulesetFor(ports)); err != nil {
+	rules := rulesetFor(ports, resolvers)
+	if err := nft(rules); err != nil {
 		return err
 	}
 	// The rules must touch only the tools. If this kernel or nft reads the cgroup match differently
@@ -92,14 +104,29 @@ func (e *enforcer) Apply(ports map[string]int) error {
 		_ = Teardown()
 		return fmt.Errorf("the rules were removed again: %w", err)
 	}
-	e.ports = ports
+	e.ports, e.resolvers, e.rules = ports, resolvers, rules
+	wanted := make([]string, 0, len(ports))
+	for t := range ports {
+		wanted = append(wanted, t)
+	}
+	e.wanted.Store(wanted)
 	if e.scan == nil {
 		e.scan = newScanner()
 		ctx, cancel := context.WithCancel(context.Background())
 		e.cancel, e.done = cancel, make(chan struct{})
+		done := e.done
 		go func() {
-			defer close(e.done)
+			defer close(done)
+			var wg sync.WaitGroup
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				if err := watchNFT(ctx, e.reapply); err != nil && ctx.Err() == nil {
+					log.Printf("jail: no nftables events (%v): a flushed table is put back at the next poll", err)
+				}
+			}()
 			e.scan.run(ctx, func() []string { return e.tools() })
+			wg.Wait()
 		}()
 	}
 	return nil
@@ -120,14 +147,13 @@ func sweepCgroup(tool string) {
 	_ = os.Remove(dir)
 }
 
+// tools is read by the scanner without taking e.mu, which Apply and Teardown hold while they wait
+// for the scanner to stop.
 func (e *enforcer) tools() []string {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	out := make([]string, 0, len(e.ports))
-	for t := range e.ports {
-		out = append(out, t)
+	if v, ok := e.wanted.Load().([]string); ok {
+		return v
 	}
-	return out
+	return nil
 }
 
 // Teardown puts the machine back as it was: the scanner stops, every process is moved back to the
@@ -151,7 +177,8 @@ func (e *enforcer) teardownLocked() error {
 		e.scan.releaseAll()
 		e.scan = nil
 	}
-	e.ports = nil
+	e.ports, e.rules, e.resolvers = nil, "", nil
+	e.wanted.Store([]string(nil))
 	errs = append(errs, Teardown()...)
 	return errors.Join(errs...)
 }
@@ -160,6 +187,7 @@ func (e *enforcer) teardownLocked() error {
 // in a tool cgroup (a crashed service never moved them back) go to the cgroup root.
 func Teardown() []error {
 	var errs []error
+	errs = append(errs, restoreRecorded()...)
 	if _, err := exec.LookPath("nft"); err == nil {
 		out, err := exec.Command("nft", "list", "table", "inet", nftTable).CombinedOutput()
 		if err == nil || !bytes.Contains(out, []byte("No such file")) {
@@ -221,15 +249,76 @@ type scanner struct {
 	mu    sync.Mutex
 	moved map[int]moved // pid -> where it came from
 	self  int
+	netns string // this service's network namespace
 	tools func() []string
 }
 
 type moved struct {
-	tool string
-	from string // cgroup path relative to the root, "" for the root
+	Tool  string `json:"tool"`
+	From  string `json:"from"`  // cgroup path relative to the root, "" for the root
+	Start uint64 `json:"start"` // the process's start time: a reused pid is not the same process
 }
 
-func newScanner() *scanner { return &scanner{moved: map[int]moved{}, self: os.Getpid()} }
+// movedFile records what was moved where, so a fresh process (uninstall, jail-restore after a
+// crash) can put each process back in the cgroup it came from. /run is cleared at boot, when the
+// cgroups are gone too.
+var movedFile = "/run/manar-edge/jail-moved.json"
+
+func newScanner() *scanner {
+	ns, _ := os.Readlink("/proc/self/ns/net")
+	return &scanner{moved: map[int]moved{}, self: os.Getpid(), netns: ns}
+}
+
+// procStart is the start time (clock ticks since boot) of pid, field 22 of /proc/<pid>/stat.
+func procStart(pid int) (uint64, error) {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return 0, err
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 {
+		return 0, errors.New("bad stat")
+	}
+	f := strings.Fields(string(b[i+1:]))
+	if len(f) < 20 {
+		return 0, errors.New("short stat")
+	}
+	return strconv.ParseUint(f[19], 10, 64)
+}
+
+// persistLocked writes the moved map; the caller holds s.mu.
+func (s *scanner) persistLocked() {
+	m := make(map[string]moved, len(s.moved))
+	for pid, v := range s.moved {
+		m[strconv.Itoa(pid)] = v
+	}
+	b, _ := json.Marshal(m)
+	if err := os.MkdirAll(filepath.Dir(movedFile), 0o755); err == nil {
+		_ = os.WriteFile(movedFile, b, 0o600)
+	}
+}
+
+// restoreRecorded puts every recorded process back where it came from, but only a process whose
+// start time still matches (a pid reused by something else is left alone).
+func restoreRecorded() []error {
+	b, err := os.ReadFile(movedFile)
+	if err != nil {
+		return nil
+	}
+	var m map[string]moved
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	for k, v := range m {
+		if pid, err := strconv.Atoi(k); err == nil {
+			if st, err := procStart(pid); err == nil && st == v.Start {
+				restore(pid, v.From)
+			}
+		}
+	}
+	_ = os.Remove(movedFile)
+	return nil
+}
 
 func (s *scanner) run(ctx context.Context, tools func() []string) {
 	s.tools = tools
@@ -268,10 +357,15 @@ func (s *scanner) once() {
 		s.consider(pid)
 	}
 	s.mu.Lock()
+	pruned := false
 	for pid := range s.moved {
 		if !live[pid] {
 			delete(s.moved, pid)
+			pruned = true
 		}
+	}
+	if pruned {
+		s.persistLocked()
 	}
 	s.mu.Unlock()
 }
@@ -296,6 +390,11 @@ func (s *scanner) consider(pid int) {
 	if sys, ok := st.Sys().(*syscall.Stat_t); !ok || sys.Uid == 0 {
 		return // the service and root's own programs are never filtered
 	}
+	// A process in another network namespace (a container) is not on this machine's network:
+	// the rules would not see its traffic, and it is not ours to move.
+	if ns, err := os.Readlink("/proc/" + name + "/ns/net"); err != nil || ns != s.netns {
+		return
+	}
 	comm, err := os.ReadFile("/proc/" + name + "/comm")
 	if err != nil {
 		return
@@ -316,9 +415,11 @@ func (s *scanner) consider(pid int) {
 		}
 		return
 	}
+	start, _ := procStart(pid)
 	s.mu.Lock()
 	if _, ok := s.moved[pid]; !ok {
-		s.moved[pid] = moved{tool, from}
+		s.moved[pid] = moved{tool, from, start}
+		s.persistLocked()
 	}
 	s.mu.Unlock()
 }
@@ -353,20 +454,26 @@ func (s *scanner) release(tool string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for pid, m := range s.moved {
-		if m.tool == tool {
-			restore(pid, m.from)
+		if m.Tool == tool {
+			if st, err := procStart(pid); err == nil && st == m.Start {
+				restore(pid, m.From)
+			}
 			delete(s.moved, pid)
 		}
 	}
+	s.persistLocked()
 }
 
 func (s *scanner) releaseAll() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for pid, m := range s.moved {
-		restore(pid, m.from)
+		if st, err := procStart(pid); err == nil && st == m.Start {
+			restore(pid, m.From)
+		}
 	}
 	s.moved = map[int]moved{}
+	s.persistLocked()
 }
 
 // restore puts pid back in its old cgroup, or the root if that is gone.

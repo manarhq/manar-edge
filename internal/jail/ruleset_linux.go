@@ -2,6 +2,8 @@ package jail
 
 import (
 	"fmt"
+	"net/netip"
+	"os"
 	"slices"
 	"sort"
 	"strings"
@@ -17,26 +19,72 @@ const (
 // cgName is the cgroup directory name of a tool id: host.claude-code -> claude-code.
 func cgName(tool string) string { return strings.TrimPrefix(tool, "host.") }
 
+// readResolvers returns the nameserver addresses of a resolv.conf (zones stripped).
+func readResolvers(path string) []netip.Addr {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var out []netip.Addr
+	for _, l := range strings.Split(string(b), "\n") {
+		f := strings.Fields(l)
+		if len(f) < 2 || f[0] != "nameserver" {
+			continue
+		}
+		if a, err := netip.ParseAddr(strings.SplitN(f[1], "%", 2)[0]); err == nil && !a.IsUnspecified() {
+			if a = a.Unmap(); !slices.Contains(out, a) {
+				out = append(out, a)
+			}
+		}
+	}
+	slices.SortFunc(out, netip.Addr.Compare)
+	return out
+}
+
+func addrSetText(as []netip.Addr) string {
+	s := make([]string, len(as))
+	for i, a := range as {
+		s[i] = a.String()
+	}
+	return strings.Join(s, ", ")
+}
+
 // Ruleset builds the nftables ruleset. Only sockets created by processes in a tool's cgroup are
 // matched, so every other program on the computer is outside it:
 //
-//   - nat output: TCP from a tool's cgroup, except to loopback and DNS, is redirected to that
-//     tool's proxy port (127.0.0.1 or ::1);
-//   - filter output: a tool's sockets may reach loopback and DNS, nothing else; the rest is
-//     rejected at once (UDP including QUIC, other protocols), so a tool fails fast and falls back
-//     to TCP.
+//   - nat output: TCP from a tool's cgroup, except to loopback and to the DNS servers in
+//     resolv.conf, is redirected to that tool's proxy port (127.0.0.1 or ::1);
+//   - filter output: a tool's sockets may reach loopback (that includes the proxy: after the
+//     redirect the packet's destination is 127.0.0.1 although its output interface is still the
+//     real one, so the address is what is matched) and port 53 of the configured DNS servers only;
+//     the rest is rejected at once (UDP including QUIC, other protocols), so a tool fails fast and
+//     falls back to TCP.
 //
 // The whole table is replaced in one transaction.
-func Ruleset(ports map[string]int) string {
+func Ruleset(ports map[string]int, resolvers []netip.Addr) string {
 	tools := make([]string, 0, len(ports))
 	for t := range ports {
 		tools = append(tools, t)
 	}
 	sort.Strings(tools)
+	var v4, v6 []netip.Addr
+	for _, a := range resolvers {
+		if a.Is4() {
+			v4 = append(v4, a)
+		} else {
+			v6 = append(v6, a)
+		}
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "table inet %[1]s\ndelete table inet %[1]s\ntable inet %[1]s {\n", nftTable)
 	b.WriteString("\tchain to_proxy {\n\t\ttype nat hook output priority -100; policy accept;\n")
-	b.WriteString("\t\tip daddr 127.0.0.0/8 return\n\t\tip6 daddr ::1 return\n\t\ttcp dport 53 return\n")
+	b.WriteString("\t\tip daddr 127.0.0.0/8 return\n\t\tip6 daddr ::1 return\n")
+	if len(v4) > 0 {
+		fmt.Fprintf(&b, "\t\tip daddr { %s } tcp dport 53 return\n", addrSetText(v4))
+	}
+	if len(v6) > 0 {
+		fmt.Fprintf(&b, "\t\tip6 daddr { %s } tcp dport 53 return\n", addrSetText(v6))
+	}
 	for _, t := range tools {
 		fmt.Fprintf(&b, "\t\tsocket cgroupv2 level 2 \"%s/%s\" meta l4proto tcp redirect to :%d\n", cgParent, cgName(t), ports[t])
 	}
@@ -44,7 +92,13 @@ func Ruleset(ports map[string]int) string {
 	for _, t := range tools {
 		fmt.Fprintf(&b, "\t\tsocket cgroupv2 level 2 \"%s/%s\" jump jailed\n", cgParent, cgName(t))
 	}
-	b.WriteString("\t}\n\tchain jailed {\n\t\toifname \"lo\" accept\n\t\tudp dport 53 accept\n\t\ttcp dport 53 accept\n")
+	b.WriteString("\t}\n\tchain jailed {\n\t\tip daddr 127.0.0.0/8 accept\n\t\tip6 daddr ::1 accept\n")
+	if len(v4) > 0 {
+		fmt.Fprintf(&b, "\t\tip daddr { %s } udp dport 53 accept\n\t\tip daddr { %[1]s } tcp dport 53 accept\n", addrSetText(v4))
+	}
+	if len(v6) > 0 {
+		fmt.Fprintf(&b, "\t\tip6 daddr { %s } udp dport 53 accept\n\t\tip6 daddr { %[1]s } tcp dport 53 accept\n", addrSetText(v6))
+	}
 	b.WriteString("\t\tmeta l4proto tcp reject with tcp reset\n\t\treject\n\t}\n}\n")
 	return b.String()
 }
