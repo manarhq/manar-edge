@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 	"io"
 	"log"
 	"net"
@@ -23,8 +24,8 @@ import (
 )
 
 const (
-	gatewayListen = "127.0.0.1:8480"
-	gatewayURL    = "http://" + gatewayListen
+	gatewayListen = ports.JailGatewayListen
+	gatewayURL    = ports.JailGatewayURL
 	maxBody       = 10 << 20
 )
 

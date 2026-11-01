@@ -24,7 +24,7 @@ func setup(t *testing.T) (*Store, discovery.User, Ctx) {
 	if err := os.MkdirAll(u.Home, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	return NewStore(filepath.Join(root, "state")), u, Ctx{Exe: exe, GOOS: "linux", GatewayURL: "http://127.0.0.1:8480", GatewayUp: true}
+	return NewStore(filepath.Join(root, "state")), u, Ctx{Exe: exe, GOOS: "linux", GatewayURL: "http://127.0.0.1:848", GatewayUp: true}
 }
 
 func write(t *testing.T, path, s string) {
@@ -213,7 +213,7 @@ func TestCodexHookNeedsReviewSoOnlyTheGatewayCounts(t *testing.T) {
 		t.Fatalf("mode %q", mode)
 	}
 	toml := filepath.Join(u.Home, ".codex", "config.toml")
-	if !strings.HasPrefix(read(t, toml), "# Added by Manar") || !strings.Contains(read(t, toml), `openai_base_url = "http://127.0.0.1:8480/v1"`) {
+	if !strings.HasPrefix(read(t, toml), "# Added by Manar") || !strings.Contains(read(t, toml), `openai_base_url = "http://127.0.0.1:848/v1"`) {
 		t.Fatal(read(t, toml))
 	}
 	// A gateway that is down is never routed to; a key the user set is never overwritten.
@@ -464,4 +464,46 @@ func TestAsUserFSRunsTheHelperAsTheOwner(t *testing.T) {
 		t.Skip("needs root on Linux to become another user")
 	}
 	t.Skip("run by hand: build the binary, then asUserFS{UID: 65534, Exe: <binary>}.Write to a nobody-owned folder")
+}
+
+func TestCodexRouteIsTakenOutWhenDoorIsNotTrusted(t *testing.T) {
+	s, u, c := setup(t)
+	toml := filepath.Join(u.Home, ".codex", "config.toml")
+	write(t, toml, "model = \"x\"\n")
+	apply(t, s, "codex-cli", u, c)
+	if !strings.Contains(read(t, toml), `openai_base_url = "http://127.0.0.1:848/v1"`) {
+		t.Fatal("route not written while DOOR is healthy")
+	}
+	// DOOR went down: the next cycle plans without the route and the stale line goes.
+	c.GatewayUp = false
+	apply(t, s, "codex-cli", u, c)
+	if got := read(t, toml); strings.Contains(got, "openai_base_url") || !strings.Contains(got, `model = "x"`) {
+		t.Fatalf("route still there or user content lost: %q", got)
+	}
+	// Back up: it returns; and a line written for an older port is replaced.
+	c.GatewayUp = true
+	apply(t, s, "codex-cli", u, c)
+	write(t, toml, "# Added by Manar: sends model calls through the local gateway.\nopenai_base_url = \"http://127.0.0.1:8480/v1\"\n\nmodel = \"x\"\n")
+	apply(t, s, "codex-cli", u, c)
+	got := read(t, toml)
+	if strings.Contains(got, "8480") || !strings.Contains(got, "127.0.0.1:848/v1") || strings.Count(got, "openai_base_url") != 1 {
+		t.Fatalf("stale port kept: %q", got)
+	}
+	// The original still comes back on restore.
+	if err := s.Restore("codex-cli", u.Name); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(read(t, toml), "openai_base_url") {
+		t.Fatal("restore left the route")
+	}
+}
+
+func TestNoCodexRouteOnWindows(t *testing.T) {
+	_, u, c := setup(t)
+	c.GOOS = "windows"
+	for _, it := range Plan("codex-cli", u, c) {
+		if it.Role == RoleGateway {
+			t.Fatal("windows must not route Codex to a loopback port anyone can take")
+		}
+	}
 }

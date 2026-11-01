@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 
+	"gitlab.vax.sh/manar/manar-edge/internal/door"
 	"gitlab.vax.sh/manar/manar-edge/internal/protect"
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
@@ -51,6 +52,7 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 	protect.Configure(base)
+	door.Configure(base)
 	protect.ClaudeSettingsPath = managedSettingsPath
 	var err error
 	switch cmd {
