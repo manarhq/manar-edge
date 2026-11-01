@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 	"gitlab.vax.sh/manar/manar-edge/internal/protect"
 )
 
@@ -26,7 +27,7 @@ const winTool = "host.claude-code"
 // by Challenge before anything is blocked.
 func winPort(tool string) int {
 	if tool == winTool {
-		return 8491
+		return ports.JailWindowsProxyPort
 	}
 	return 0
 }

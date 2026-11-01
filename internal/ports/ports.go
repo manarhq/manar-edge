@@ -12,6 +12,9 @@ const (
 	DoorPort = 848
 	// JailGatewayPort is the per-agent gateway of a jailed agent (Linux netns, Windows service).
 	JailGatewayPort = 8480
+	// JailWindowsProxyPort is JAIL's per-tool proxy for Claude Code on Windows (named in the
+	// tool's settings.json, so it is fixed).
+	JailWindowsProxyPort = 8491
 
 	DoorListen        = "127.0.0.1:" + "848"
 	DoorURL           = "http://" + DoorListen
