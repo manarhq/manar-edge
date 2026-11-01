@@ -8,13 +8,14 @@ import (
 )
 
 type fakeSource struct {
-	mu        sync.Mutex
-	queue     []PermEvent
-	responses map[uint64]bool
-	closed    chan struct{}
-	once      sync.Once
-	hang      bool // Next blocks until closed, like a stuck read
-	wake      chan struct{}
+	mu           sync.Mutex
+	queue        []PermEvent
+	responses    map[uint64]bool
+	closed       chan struct{}
+	once         sync.Once
+	unknownOwner bool
+	hang         bool // Next blocks until closed, like a stuck read
+	wake         chan struct{}
 }
 
 func newFake(evs ...PermEvent) *fakeSource {
@@ -26,6 +27,9 @@ func (f *fakeSource) Next() (PermEvent, error) {
 	if len(f.queue) > 0 {
 		ev := f.queue[0]
 		f.queue = f.queue[1:]
+		if !ev.OwnerKnown && !f.unknownOwner { // default: the file belongs to uid 1000
+			ev.Owner, ev.OwnerKnown = 1000, true
+		}
 		f.mu.Unlock()
 		return ev, nil
 	}
@@ -63,7 +67,7 @@ func engineFor(src Source, procs fakeProcs, block bool) (*Engine, chan Event) {
 	if block {
 		mode = ModeKeys
 	}
-	return &Engine{Src: src, Procs: uidProcs{procs}, FileUID: func(string) (int, bool) { return 1000, true }, Mode: func() Mode { return mode }, Self: func(pid int) bool { return pid == 4242 },
+	return &Engine{Src: src, Procs: uidProcs{procs}, Mode: func() Mode { return mode }, Self: func(pid int) bool { return pid == 4242 },
 		Out: out, Homes: func() []string { return []string{"/home/alice"} }, StallAfter: 80 * time.Millisecond}, out
 }
 

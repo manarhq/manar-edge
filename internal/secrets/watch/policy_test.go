@@ -147,23 +147,35 @@ func TestGrantDoesNotCrossUsersOrBinaries(t *testing.T) {
 	}
 }
 
-func TestOtherUsersFileIsNeverGranted(t *testing.T) {
-	ap := &fakeApprover{d: vault.AllowAlways}
-	var exe string
-	g := gateWith(t, ap, "", &exe)
-	src := newFake(PermEvent{PID: 12, Path: "/home/alice/.ssh/id_ed25519", Handle: 1})
-	e, _ := engineFor(src, treeCursorAndTerminal, true)
-	e.Gate = g
-	e.FileUID = func(string) (int, bool) { return 1001, true } // file owned by someone else
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(80 * time.Millisecond); cancel() }()
-	_ = e.Run(ctx)
-	if ok, _ := src.answered(1); ok {
-		t.Fatal("opener uid differs from the file owner: deny")
-	}
-	time.Sleep(30 * time.Millisecond)
-	if ap.n() != 0 {
-		t.Fatal("nobody is asked about another user's file")
+// The owner comes from the open descriptor. A path swapped to another user's file between the
+// event and the decision cannot matter, and an unknown owner never becomes an allow.
+func TestOwnerFromDescriptorAndUnknownOwnerStaysDenied(t *testing.T) {
+	for name, tc := range map[string]struct {
+		ev      PermEvent
+		unknown bool
+	}{
+		"file owned by another uid": {ev: PermEvent{PID: 12, Path: "/home/alice/.ssh/id_ed25519", Handle: 1, Owner: 1001, OwnerKnown: true}},
+		"owner unknown":             {ev: PermEvent{PID: 12, Path: "/home/alice/.ssh/id_ed25519", Handle: 1}, unknown: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ap := &fakeApprover{d: vault.AllowAlways}
+			var exe string
+			g := gateWith(t, ap, "", &exe)
+			src := newFake(tc.ev)
+			src.unknownOwner = tc.unknown
+			e, _ := engineFor(src, treeCursorAndTerminal, true)
+			e.Gate = g
+			ctx, cancel := context.WithCancel(context.Background())
+			go func() { time.Sleep(80 * time.Millisecond); cancel() }()
+			_ = e.Run(ctx)
+			if ok, _ := src.answered(1); ok {
+				t.Fatal("must stay denied")
+			}
+			time.Sleep(30 * time.Millisecond)
+			if ap.n() != 0 {
+				t.Fatal("nobody is asked")
+			}
+		})
 	}
 }
 

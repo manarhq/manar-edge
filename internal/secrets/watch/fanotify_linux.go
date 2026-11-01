@@ -137,6 +137,10 @@ func (f *fanSource) pop() (PermEvent, bool) {
 		if err != nil {
 			ev.Path = ""
 		}
+		var stt unix.Stat_t
+		if unix.Fstat(int(m.Fd), &stt) == nil { // the owner of the file actually opened
+			ev.Owner, ev.OwnerKnown = int(stt.Uid), true
+		}
 		if m.Mask&unix.FAN_OPEN_PERM == 0 { // alert mode: nothing to answer, close the fd now
 			_ = unix.Close(int(m.Fd))
 			ev.Handle = 0

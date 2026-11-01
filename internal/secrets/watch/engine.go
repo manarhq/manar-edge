@@ -15,6 +15,10 @@ type PermEvent struct {
 	PID    int
 	Path   string
 	Handle uint64 // source-specific, passed back to Respond
+	// Owner is the uid that owns the file that was really opened, taken from the open descriptor
+	// (fstat), not by looking the path up again. OwnerKnown is false when the source could not say.
+	Owner      int
+	OwnerKnown bool
 }
 
 // ErrIdle is returned by Source.Next when nothing arrived within its poll interval.
@@ -59,8 +63,6 @@ type Engine struct {
 	// Mode is the device setting (see Mode). Nil or ModeAlert means every open is allowed and
 	// reported.
 	Mode func() Mode
-	// FileUID returns the uid that owns a file; nil means the platform default.
-	FileUID func(path string) (int, bool)
 	// Gate, if set, remembers the person's answers and asks the questions (WARDEN ask once).
 	Gate *Gate
 	// Self reports whether a pid is Manar's own (never delayed, never reported).
@@ -185,22 +187,13 @@ func (e *Engine) decide(ev PermEvent) (allow bool) {
 	}
 	deny := a.Deny() && mode.Blocks(class)
 	if deny && e.Gate != nil {
-		// A grant is the opener's own user's answer about that user's own file. Another user's
-		// file, or a user we cannot tell, never uses a grant (an unknown opener user allows: any
-		// doubt allows).
+		// Once the verdict is "deny", doubt does not turn it into allow: a grant applies only
+		// when the opener's user and the opened file's owner (from the descriptor) are both known
+		// and the same. Otherwise the open stays refused and nobody is asked.
 		op := a.Chain[0]
-		fileUID := e.FileUID
-		if fileUID == nil {
-			fileUID = defaultFileUID
-		}
-		fu, fok := fileUID(ev.Path)
-		switch {
-		case !op.UIDKnown || !fok:
-			deny = false
-		case op.UID == fu:
-			if e.Gate.Decide(a.ToolProc.PID, GateKey{UID: op.UID, Tool: a.ToolID, Class: class, Exe: a.ToolProc.Exe}) {
-				deny = false // the person said yes to this program
-			}
+		if op.UIDKnown && ev.OwnerKnown && op.UID == ev.Owner &&
+			e.Gate.Decide(a.ToolProc.PID, GateKey{UID: op.UID, Tool: a.ToolID, Class: class, Exe: a.ToolProc.Exe}) {
+			deny = false // the person said yes to this program
 		}
 	}
 	e.trace("pid=%d process=%q path=%s tool=%s toolCanBlock=%v interactive=%v mode=%s: deny=%v",
