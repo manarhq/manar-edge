@@ -1,0 +1,12 @@
+Manar
+Copyright 2026 Fixio
+
+This product includes software developed at Fixio (https://manar.vax.sh).
+
+Third-party software
+--------------------
+This repository depends on open-source packages that are distributed under their own
+licences. They are not part of this repository's licence grant. The full list, with
+versions and licence identifiers, is in the lock file of this repository (`go.sum`) and in
+the dependency manifest next to it. Each package carries its own licence text in its
+distribution.
