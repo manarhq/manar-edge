@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 // Module is one feature of the device service. Start blocks until ctx is done; an error other
@@ -61,6 +62,13 @@ func Run(ctx context.Context, c *hostclient.Client) error {
 	mu.Lock()
 	ms := append([]Module{heartbeat{}}, modules...)
 	mu.Unlock()
+	if c != nil && c.Info != nil {
+		SetIdentity(c.Info.HostID, c.Info.TenantSlug)
+	}
+	// Run returns only after the status writer has stopped, so nothing writes the file after it.
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() { statusWriter(done); close(stopped) }()
+	defer func() { close(done); <-stopped }()
 	var wg sync.WaitGroup
 	for _, m := range ms {
 		wg.Add(1)
@@ -75,10 +83,13 @@ func Run(ctx context.Context, c *hostclient.Client) error {
 
 func supervise(ctx context.Context, m Module, c *hostclient.Client) {
 	for ctx.Err() == nil {
+		SetComponent("module:"+m.Name(), Component{State: "ok"})
 		err := safeStart(ctx, m, c)
 		if ctx.Err() != nil {
 			return
 		}
+		SetComponent("module:"+m.Name(), Component{State: "problem", Detail: "stopped and restarting",
+			Fix: "look at the service log for the reason: journalctl -u manar-edge -n 50 (Windows: Event Viewer, Application)"})
 		log.Printf("manar-edge: module %s stopped: %v; restarting", m.Name(), err)
 		select {
 		case <-ctx.Done():
@@ -140,16 +151,29 @@ func (heartbeat) Name() string { return "heartbeat" }
 
 func (heartbeat) Start(ctx context.Context, c *hostclient.Client) error {
 	last := ""
-	t := time.NewTicker(60 * time.Second)
+	// 15 s: "Pause all AI" reaches the device about this fast (the API denies at once anyway).
+	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
 		cfg, err := c.Config(ctx)
+		if ctx.Err() == nil {
+			if err == nil {
+				recordSync(cfg.HostID, cfg.Status, cfg.StartMode, cfg.Features, nil)
+			} else {
+				recordSync("", "", "", nil, err)
+			}
+		}
 		switch {
 		case err != nil && ctx.Err() == nil:
 			log.Printf("manar-edge: config: %v", err)
 		case err == nil && cfg.Status != last:
 			last = cfg.Status
 			log.Printf("manar-edge: this device is %s", cfg.Status)
+		}
+		if err == nil && c.StateDir() != "" {
+			if perr := pause.Set(c.StateDir(), cfg.Paused); perr != nil {
+				log.Printf("manar-edge: pause flag: %v", perr)
+			}
 		}
 		select {
 		case <-ctx.Done():

@@ -8,9 +8,11 @@ import (
 	"os"
 	"strings"
 
+	"gitlab.vax.sh/manar/manar-edge/internal/door"
 	"gitlab.vax.sh/manar/manar-edge/internal/protect"
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+	"gitlab.vax.sh/manar/manar-edge/internal/undo"
 )
 
 var version = "dev"
@@ -23,16 +25,21 @@ const usage = `usage:
   manar-edge service run|install|remove
   manar-edge secret aws <profile>   (credential_process helper for vaulted AWS keys)
   manar-edge secret restore --all   (administrator: put every vaulted secret back in its file)
+  manar-edge vault add <key>        (move one of your ssh keys into the Manar vault; undo with vault restore)
+  manar-edge vault restore <key>|--all   (put ssh keys back exactly as they were; works offline)
   manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
   manar-edge down <agent> [--purge]
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
-  manar-edge status [<agent>]
+  manar-edge status [--json]   (is this computer protected? one line to fix each problem; no root needed)
+  manar-edge status <agent>   (jail status of an enrolled gateway agent)
   manar-edge hook claude-code <agent>
   manar-edge install-claude-code <agent> [--force-coexist]
   manar-edge protect list|restore [<tool>]   (what Manar changed in other AI tools; undo it)
   manar-edge hook-tool <tool> <event>   (internal: the hook installed in Cursor, Gemini CLI and the others)
   manar-edge mcp-wrap <tool> <server> -- <command> [args...]   (internal: asks Manar before each MCP tool call)
   manar-edge warden [windows-ui on|off]   (per-user prompt helper, started at logon)
+  manar-edge undo list|restore <id>   (put back a file an AI tool changed outside its project folder)
+  manar-edge jail-restore   (internal: give the protected tools their network back)
   manar-edge version
 
 Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`
@@ -51,6 +58,8 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 	protect.Configure(base)
+	door.Configure(base)
+	undo.Configure(base, exeForHelpers())
 	protect.ClaudeSettingsPath = managedSettingsPath
 	var err error
 	switch cmd {
@@ -69,6 +78,8 @@ func main() {
 		err = cmdUninstall(base, os.Stdout)
 	case "service":
 		err = cmdService(base, rest)
+	case "jail-restore":
+		err = jailRestore(os.Stdout)
 	case "warden":
 		err = cmdWarden(base, rest)
 	case "secret":
@@ -80,6 +91,8 @@ func main() {
 		default:
 			err = errors.New("usage: manar-edge secret aws <profile> | secret restore --all")
 		}
+	case "vault":
+		err = cmdVault(rest)
 	case "up":
 		err = cmdUp(base, rest)
 	case "down":
@@ -92,10 +105,9 @@ func main() {
 	case "run":
 		err = cmdRun(base, rest)
 	case "status":
-		if len(rest) > 1 {
-			err = errors.New("usage: manar-edge status [<agent>]")
-		} else {
-			err = cmdStatus(base, rest)
+		var problems int
+		if problems, err = routeStatus(base, rest, os.Stdout); err == nil && problems > 0 {
+			os.Exit(1)
 		}
 	case "hook":
 		os.Exit(cmdHook(rest))
@@ -103,6 +115,10 @@ func main() {
 		os.Exit(cmdHookTool(rest))
 	case "__userfs": // internal: runs as a user's own uid to touch that user's files (Linux service)
 		os.Exit(protect.ServeUserFS(os.Stdin, os.Stdout))
+	case "__undo": // internal: runs as the snapshot owner (Linux service)
+		os.Exit(undo.Helper(rest, os.Stdout))
+	case "undo":
+		err = undo.Command(rest, os.Stdout)
 	case "mcp-wrap":
 		os.Exit(cmdMCPWrap(rest))
 	case "protect":
@@ -205,4 +221,12 @@ func setEnv(env []string, kvs ...string) []string {
 		}
 	}
 	return append(out, kvs...)
+}
+
+// exeForHelpers is the running binary, which the device service starts for per-user helpers.
+func exeForHelpers() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return "manar-edge"
 }

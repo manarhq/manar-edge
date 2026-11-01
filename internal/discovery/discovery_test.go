@@ -74,7 +74,7 @@ func (f *fakeAPI) Config(context.Context) (*hostclient.Config, error) {
 	c := f.cfg
 	return &c, nil
 }
-func (f *fakeAPI) Inventory(_ context.Context, t []hostclient.Tool) error {
+func (f *fakeAPI) Inventory(_ context.Context, t []hostclient.Tool, _ []hostclient.MCPServer) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, t)

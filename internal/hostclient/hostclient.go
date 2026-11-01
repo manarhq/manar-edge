@@ -175,6 +175,8 @@ type Client struct {
 	Info *Info
 	http *http.Client
 	base string
+	// stateDir is where the device keeps its files (pause flag, WARDEN settings).
+	stateDir string
 }
 
 // New loads the host files from stateDir and builds the mTLS client. It fails when the device
@@ -208,13 +210,16 @@ func New(stateDir string) (*Client, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("host-ca.pem has no certificate")
 	}
-	return &Client{Info: &info, base: base.String(), http: &http.Client{
+	return &Client{Info: &info, base: base.String(), stateDir: stateDir, http: &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert}, RootCAs: roots, MinVersion: tls.VersionTLS13,
 		}},
 	}}, nil
 }
+
+// StateDir is the state directory this client was loaded from.
+func (c *Client) StateDir() string { return c.stateDir }
 
 // Do sends in as JSON (nil for none) and decodes the JSON reply into out (nil to ignore it).
 // path is under /host/v1, e.g. "/config".
@@ -266,6 +271,40 @@ type Config struct {
 	// Tools carries the owner's per-tool choices (coverage track): Unprotect lists tool ids
 	// whose protection the owner turned off; the device restores their backups.
 	Tools ToolInstructions `json:"tools"`
+	// Paused is the workspace's "Pause all AI": deny every protected tool with reason "paused".
+	Paused bool `json:"paused"`
+	// Door is the owner's DOOR (local LLM gateway) setup: secrets guard mode and tools paused by
+	// the monthly spend cap. Nil from an API that does not send it.
+	Door *DoorSettings `json:"door,omitempty"`
+	// Jail is the egress filter for protected AI tools (jail track).
+	Jail JailConfig `json:"jail"`
+}
+
+// DoorSettings is the "door" part of GET /host/v1/config.
+type DoorSettings struct {
+	Secrets string   `json:"secrets"` // "mask" (default) or "block"
+	Paused  []string `json:"paused"`  // providers (anthropic, openai, gemini) a monthly cap paused
+	// Unavailable is set by the API when it could not work the settings out: keep the last ones.
+	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// JailConfig is the "jail" part of GET /host/v1/config.
+type JailConfig struct {
+	Enabled bool `json:"enabled"`
+	// Windows is the separate switch for Windows (off until proven on a real desktop).
+	Windows bool `json:"windows"`
+	// Tools are the tool ids to filter on this device.
+	Tools []string `json:"tools"`
+	// Rules are the remembered per-site decisions.
+	Rules []JailRule `json:"rules"`
+}
+
+// JailRule is one remembered decision: a site an owner allowed or blocked for one tool.
+type JailRule struct {
+	ToolID    string     `json:"toolId"`
+	Site      string     `json:"site"`
+	Mode      string     `json:"mode"` // ALLOW or DENY
+	ExpiresAt *time.Time `json:"expiresAt"`
 }
 
 // ToolInstructions is the "tools" part of GET /host/v1/config.
@@ -284,13 +323,34 @@ type Tool struct {
 	Changes     []string `json:"changes,omitempty"`
 }
 
-// Inventory reports the AI tools found on this device. It is the whole list: a tool left out is
-// treated as gone.
-func (c *Client) Inventory(ctx context.Context, tools []Tool) error {
+// MCPServer is one MCP server a tool is configured to use. It is an allow-list: the command's
+// base name, the package and pinned version, the transport, and a remote server's scheme, host and
+// port. Arguments are never sent (only how many), and neither are environment values (names only),
+// URL credentials, paths or query strings. OutsideHome is a yes/no worked out on the device from
+// the arguments.
+type MCPServer struct {
+	Tool        string   `json:"tool"` // host.cursor
+	Name        string   `json:"name"`
+	Transport   string   `json:"transport"` // stdio, http or sse
+	Command     string   `json:"command,omitempty"`
+	ArgCount    int      `json:"argCount,omitempty"`
+	URL         string   `json:"url,omitempty"`
+	Package     string   `json:"package,omitempty"`
+	Version     string   `json:"version,omitempty"`
+	EnvKeys     []string `json:"envKeys,omitempty"`
+	OutsideHome bool     `json:"outsideHome,omitempty"`
+}
+
+// Inventory reports the AI tools and their MCP servers found on this device. It is the whole list:
+// a tool or server left out is treated as gone. An older Manar ignores mcpServers.
+func (c *Client) Inventory(ctx context.Context, tools []Tool, mcp []MCPServer) error {
 	if tools == nil {
 		tools = []Tool{}
 	}
-	return c.Do(ctx, http.MethodPost, "/inventory", map[string]any{"tools": tools}, nil)
+	if mcp == nil {
+		mcp = []MCPServer{}
+	}
+	return c.Do(ctx, http.MethodPost, "/inventory", map[string]any{"tools": tools, "mcpServers": mcp}, nil)
 }
 
 // Authorize asks for a decision on an action of another AI tool (POST /host/v1/authorize).

@@ -87,3 +87,49 @@ dontAsk; [settings reference](https://code.claude.com/docs/en/settings-reference
   that is administrator rights).
 - `run` needs an elevated prompt (the state dir is SYSTEM and Administrators only), so the program
   it starts is elevated too.
+
+## DOOR (device-level LLM gateway)
+
+`manar-edge service run` starts DOOR on `127.0.0.1:848` (ports are named in `internal/ports`; the per-agent
+JAIL gateway keeps `127.0.0.1:8480`). The port is below 1024 on purpose: on Linux only root can bind it, so a
+user program cannot take it while the service restarts and read the API key a tool sends. Tools are routed
+to DOOR (Codex `openai_base_url`) only while that holds (`ip_unprivileged_port_start` above 848) and DOOR
+answers a fresh challenge; otherwise Manar removes the route it wrote. Windows has no equivalent guarantee
+(an HTTP.sys reservation does not stop raw sockets), so Manar writes no route there. DOOR names the calling
+local user from the kernel TCP table (Linux) or the owning process token (Windows) and refuses callers it cannot
+name. Pauses are by provider. The secrets guard catches accidental leaks in JSON strings; it does not decode
+base64 or find a secret split across fields.
+
+## Undo AI file changes
+
+Before an AI tool edits a file outside the folder it was started in, its pre-tool hook (which runs
+as the signed-in user) saves a copy in that user's own folder (`$XDG_STATE_HOME/manar-edge/undo`,
+Windows `%LOCALAPPDATA%\manar-edge\undo`). The hook opens files with `O_NOFOLLOW` after an `lstat`
+(no links, no folders, no devices), copies at most 10 MiB per file and 256 MiB per user, and the
+copies expire after 7 days. File contents never leave the device: the hook sends the device
+service only the path, size, SHA-256 and time (over the local relay, which learns the user from
+the kernel), and the service forwards that record to `POST /host/v1/undo/changes`.
+
+A restore starts in the console. The service polls `GET /host/v1/undo/restores` and runs
+`manar-edge __undo restore <id> <path>` in a child process that has become the user who took the
+snapshot (no other groups), so a link the user planted can only reach what the user could already
+reach. The path must equal the one recorded with the snapshot, the saved copy's hash is checked,
+the file is written to a temporary name and renamed, and a file the tool created is removed. The
+result goes to `POST /host/v1/undo/restores/:id/result`. `manar-edge undo list|restore <id>` does
+the same for the person at the keyboard on any OS.
+
+Covered: file edit tools whose hook input names one file (Claude Code Edit, MultiEdit, Write and
+NotebookEdit; the same tool names in Gemini CLI, Codex CLI and Copilot CLI hooks). Not covered:
+changes made through the shell, and patch tools that name several files. On Windows the service
+cannot act as the user, so the console button reports that the restore must be run on the device.
+The feature is the `undo` entry of `features` in `GET /host/v1/config`.
+
+## `manar-edge status`
+
+`manar-edge status [--json]` needs no root. The service writes a status file
+(`/run/manar-edge/status.json`, Windows `%ProgramData%\manar-edge\status.json`, world-readable, no
+secrets), and the command adds the service manager's answer and a probe of DOOR on
+`127.0.0.1:848`. Every problem is one line with one fix; the exit code is 1 when there is a
+problem. Other modules publish their state with `daemon.SetComponent("door" | "jail" | "warden" |
+"secrets", daemon.Component{State, Detail, Fix})`; a part nobody reports is shown as "not reported
+by this version" and is not counted as a problem.

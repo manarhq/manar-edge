@@ -29,7 +29,7 @@ type Item struct {
 // Ctx is what plans need besides the user.
 type Ctx struct {
 	Exe        string // the installed manar-edge binary
-	GatewayURL string // local LLM gateway base URL, e.g. http://127.0.0.1:8480
+	GatewayURL string // local LLM gateway base URL, e.g. http://127.0.0.1:848
 	GatewayUp  bool   // answered /healthz just now: never route a tool to a gateway that is down
 	GOOS       string // runtime.GOOS unless a test says otherwise
 }
@@ -117,8 +117,14 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 				"type": "command", "command": hookCommand(c.Exe, key, "tool"),
 			}}})
 		})}
-		if c.GatewayUp && c.GatewayURL != "" {
-			items = append(items, Item{FileEdit{Path: filepath.Join(h, ".codex", "config.toml"), Edit: codexBaseURL(c.GatewayURL + "/v1"), Kind: KindCodexTOML, Mode: 0o600}, RoleGateway})
+		cfg := filepath.Join(h, ".codex", "config.toml")
+		if c.GatewayUp && c.GatewayURL != "" && goos != "windows" {
+			items = append(items, Item{FileEdit{Path: cfg, Edit: codexBaseURL(c.GatewayURL + "/v1"), Kind: KindCodexTOML, Mode: 0o600}, RoleGateway})
+		} else {
+			// DOOR is not healthy (or cannot be trusted on this OS): take any route Manar wrote
+			// earlier out again, so a program that grabs the port gets no API key. A no-op when
+			// there is none. It does not count for the tool's protection mode.
+			items = append(items, Item{FileEdit{Path: cfg, Edit: func(cur []byte, _ bool) ([]byte, error) { return undoCodexTOML(cur, true) }, Kind: KindCodexTOML, Mode: 0o600}, RoleUntrusted})
 		}
 		return items
 	case "copilot-cli":

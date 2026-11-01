@@ -11,6 +11,7 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 func init() { daemon.Register(&module{base: ""}) }
@@ -26,7 +27,18 @@ type pendingItem struct {
 	Resource      string `json:"resource"`
 	HighRisk      bool   `json:"highRisk"`
 	DecidableHere bool   `json:"decidableHere"`
+	// Explanation is the API's plain-words risk text in both languages (deterministic templates).
+	Explanation struct {
+		EN string `json:"en"`
+		AR string `json:"ar"`
+	} `json:"explanation"`
+	ExpiresAt time.Time `json:"expiresAt"`
 }
+
+// NoAnswerAfter is how long a prompt stays on screen. The API denies an unanswered approval after
+// the same 2 minutes ("denied: no answer") and pushes the phone when the approval opens, which is
+// when this prompt appears; the device withdraws the prompt at whichever comes first.
+const NoAnswerAfter = 2 * time.Minute
 
 type pendingReply struct {
 	OwnerMayApprove bool          `json:"ownerMayApprove"`
@@ -45,8 +57,8 @@ func (m *module) Start(ctx context.Context, c *hostclient.Client) error {
 	if p := stateDir.Load(); p != nil {
 		base = *p
 	}
-	if runtime.GOOS == "windows" && !LoadSettings(base).WindowsUI {
-		log.Printf("warden: the Windows prompt is off (manar-edge warden windows-ui on); approvals are answered in the console")
+	if runtime.GOOS == "windows" && LoadSettings(base).WindowsUIOff {
+		log.Printf("warden: the Windows prompt was turned off (manar-edge warden windows-ui on turns it back on); approvals are answered in the console")
 		<-ctx.Done()
 		return nil
 	}
@@ -60,7 +72,7 @@ func (m *module) Start(ctx context.Context, c *hostclient.Client) error {
 	defer vaultAPI.Store(nil)
 	go func() { _ = b.Serve(l) }()
 
-	w := &watcher{broker: b, api: c, seen: map[string]context.CancelFunc{}}
+	w := &watcher{broker: b, api: c, seen: map[string]context.CancelFunc{}, paused: func() bool { return pause.Paused(base) }}
 	return w.run(ctx)
 }
 
@@ -73,6 +85,9 @@ type watcher struct {
 	broker *Broker
 	api    decider
 	poll   time.Duration
+	// paused: while "Pause all AI" is on, nothing is shown (and what is on screen is withdrawn);
+	// the API refuses to approve during a pause and expires what was pending.
+	paused func() bool
 
 	mu   sync.Mutex
 	seen map[string]context.CancelFunc // prompted approvals; the cancel withdraws the prompt
@@ -96,6 +111,15 @@ func (w *watcher) run(ctx context.Context) error {
 }
 
 func (w *watcher) tick(ctx context.Context) {
+	if w.paused != nil && w.paused() {
+		w.mu.Lock()
+		for id, cancel := range w.seen {
+			cancel()
+			delete(w.seen, id)
+		}
+		w.mu.Unlock()
+		return
+	}
 	if !w.broker.HasHelper() {
 		return
 	}
@@ -136,7 +160,15 @@ func (w *watcher) handle(ctx context.Context, it pendingItem, ownerMayApprove bo
 	p := Prompt{
 		ID: it.ID, Kind: KindAction, ToolID: it.ToolID, ActionID: it.ActionID, Resource: it.Resource,
 		ConsoleOnly: it.HighRisk || !it.DecidableHere || !ownerMayApprove,
+		ExplainEN:   clip(it.Explanation.EN, 400), ExplainAR: clip(it.Explanation.AR, 400),
 	}
+	// A prompt is never left on screen past 2 minutes, whatever the API's clock says.
+	limit := time.Now().Add(NoAnswerAfter)
+	if !it.ExpiresAt.IsZero() && it.ExpiresAt.Before(limit) {
+		limit = it.ExpiresAt
+	}
+	ctx, cancel := context.WithDeadline(ctx, limit)
+	defer cancel()
 	d, err := w.broker.Ask(ctx, p)
 	if err != nil {
 		if err == ErrNoHelper {

@@ -8,12 +8,15 @@ import (
 
 // Proc is what the watcher knows about one process. Fields the OS could not give stay zero.
 type Proc struct {
-	PID     int
-	PPID    int
-	Exe     string   // full path of the executable
-	Comm    string   // short name
-	Cmdline []string // arguments, argv[0] first
-	TTY     bool     // has a controlling terminal
+	PID      int
+	PPID     int
+	Exe      string   // full path of the executable
+	Comm     string   // short name
+	Cmdline  []string // arguments, argv[0] first
+	TTY      bool     // has a controlling terminal
+	UID      int      // owner of the process (real uid)
+	UIDKnown bool
+	Start    uint64 // start time in clock ticks since boot (pid reuse check)
 }
 
 // ProcSource reads process info. Get must return an error for a process that is gone.
@@ -74,14 +77,14 @@ type Attribution struct {
 	Interactive bool   // a shell the user types in sits between the opener and the tool
 	Block       bool   // policy allows denying (before the setting is applied)
 	Chain       []Proc // opener first
+	ToolProc    Proc   // the process of the chain that matched the catalogue
 }
 
 const maxChain = 40
 
 // Attribute walks from pid up to the root and finds the first AI tool process. An unreadable
 // chain gives no tool and so never a denial.
-func Attribute(src ProcSource, pid int) Attribution {
-	var a Attribution
+func Attribute(src ProcSource, pid int) (a Attribution) {
 	seen := map[int]bool{}
 	for p := pid; p > 1 && !seen[p] && len(a.Chain) < maxChain; {
 		seen[p] = true
@@ -96,9 +99,25 @@ func Attribute(src ProcSource, pid int) Attribution {
 		return a
 	}
 	a.Process = procName(a.Chain[0])
+	if tt, ok := src.(Tainter); ok {
+		if sy, ok := src.(interface{ Sync() }); ok {
+			sy.Sync() // apply every fork the kernel has queued before looking
+		}
+		defer func() {
+			if a.ToolID != "" {
+				return
+			}
+			for _, pr := range a.Chain { // cut off from its tool by setsid or a re-parent
+				if tool, id, ok := tt.TaintOf(pr.PID); ok {
+					a.ToolID, a.Block, a.ToolProc = id, true, tool
+					return
+				}
+			}
+		}()
+	}
 	for i, pr := range a.Chain {
 		if t := match(pr); t != nil {
-			a.ToolID, a.Block = t.ID, t.Block
+			a.ToolID, a.Block, a.ToolProc = t.ID, t.Block, pr
 			for _, below := range a.Chain[:i] {
 				if interactiveShell(below) {
 					a.Interactive = true
@@ -110,9 +129,12 @@ func Attribute(src ProcSource, pid int) Attribution {
 	return a
 }
 
-// Deny is the whole policy: deny only an AI tool's own non-interactive chain, only where the
-// catalogue allows blocking. Everything else, and every doubt, is allow.
-func (a Attribution) Deny() bool { return a.ToolID != "" && a.Block && !a.Interactive }
+// Deny is the whole policy: deny a blockable AI tool's own chain. There is no "interactive shell"
+// exemption below such a tool: a shell that looks interactive (script, a pty) can be made by the
+// agent itself, and these tools give the person no terminal of their own. The person's terminal
+// sits above the tool or beside it, never in its chain. Editors are not blockable (their
+// integrated terminal is the person's). Everything that is not in such a chain is allowed.
+func (a Attribution) Deny() bool { return a.ToolID != "" && a.Block }
 
 func norm(p string) string { return strings.ToLower(strings.ReplaceAll(p, `\`, "/")) }
 

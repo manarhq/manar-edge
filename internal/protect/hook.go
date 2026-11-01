@@ -9,9 +9,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/undo"
 )
 
 // Hooks run as the user and cannot read the host key, so they ask the device service over a local
@@ -156,6 +159,28 @@ type Relay struct {
 	HTTP *http.Client
 	// PollMin and PollMax bound the wait between approval checks.
 	PollMin, PollMax time.Duration
+	// NoAnswer overrides NoAnswerAfter (tests).
+	NoAnswer time.Duration
+	// Session is the tool's own session id from the hook input, when it gave one. Manar uses it to
+	// group a person's actions into sessions; it is never used to decide anything.
+	Session string
+}
+
+var sessionOK = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+
+// SessionID is the id a tool puts in its hook input (Claude Code, Gemini, Codex, Copilot:
+// session_id; Cursor: conversation_id). Anything that is not a plain id is dropped.
+func SessionID(raw []byte) string {
+	var in map[string]any
+	if json.Unmarshal(raw, &in) != nil {
+		return ""
+	}
+	for _, k := range []string{"session_id", "sessionId", "conversation_id", "conversationId"} {
+		if s, _ := in[k].(string); sessionOK.MatchString(s) {
+			return s
+		}
+	}
+	return ""
 }
 
 // NewRelay returns a client for the local service.
@@ -176,6 +201,9 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	defer cancel()
 	var dec authorizeReply
 	body := map[string]string{"toolId": "host." + key, "actionId": actionID, "resource": resource}
+	if r.Session != "" {
+		body["session"] = r.Session
+	}
 	if err := r.call(ctx, http.MethodPost, "/v1/authorize", body, &dec); err != nil {
 		return Verdict{false, "Manar: authorization failed: " + err.Error() + "." + restoreHint}
 	}
@@ -183,6 +211,9 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	case "ALLOW":
 		return Verdict{true, "Manar: allowed"}
 	case "DENY":
+		if dec.Reason == "paused" {
+			return Verdict{false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"}
+		}
 		return Verdict{false, "Manar denied: " + dec.Reason}
 	case "APPROVAL_REQUIRED":
 		if dec.ApprovalID == "" {
@@ -193,12 +224,23 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	return Verdict{false, fmt.Sprintf("Manar: unknown decision %q", dec.Decision)}
 }
 
+// NoAnswerAfter is how long a person has to answer (founder decision, 1 Nov 2026): the prompt
+// shows and the phone is pushed at the same moment, and after this the call is denied.
+const NoAnswerAfter = 2 * time.Minute
+
 func (r *Relay) wait(ctx context.Context, id string) Verdict {
 	wait := r.PollMin
+	limit := r.NoAnswer
+	if limit == 0 {
+		limit = NoAnswerAfter
+	}
+	giveUp := time.After(limit)
 	for {
 		select {
 		case <-ctx.Done():
 			return Verdict{false, "Manar: approval " + id + " not decided in time"}
+		case <-giveUp:
+			return Verdict{false, "Manar denied: no answer"}
 		case <-time.After(wait):
 		}
 		var ap struct {
@@ -211,6 +253,10 @@ func (r *Relay) wait(ctx context.Context, id string) Verdict {
 		case "APPROVED":
 			return Verdict{true, "Manar: approved (" + id + ")"}
 		case "PENDING":
+		case "EXPIRED":
+			return Verdict{false, "Manar denied: no answer"}
+		case "PAUSED":
+			return Verdict{false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"}
 		default:
 			return Verdict{false, "Manar: approval " + id + " is " + ap.Status}
 		}
@@ -269,5 +315,34 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 		return Render(key, Verdict{false, "Manar: " + err.Error()})
 	}
 	budget := time.Duration(Budget(key)) * time.Second
-	return Render(key, NewRelay().Decide(context.Background(), key, actionID, resource, budget))
+	relay := NewRelay()
+	relay.Session = SessionID(raw)
+	v := relay.Decide(context.Background(), key, actionID, resource, budget)
+	if v.Allow {
+		SnapshotBeforeEdit(key, raw)
+	}
+	return Render(key, v)
+}
+
+// SnapshotBeforeEdit saves a copy of the file an editing tool is about to change when it lies
+// outside the tool's project folder, and tells the device service (best effort: an edit is never
+// blocked because a snapshot could not be taken). It runs as the user the hook runs as.
+func SnapshotBeforeEdit(tool string, raw []byte) {
+	defer func() { _ = recover() }()
+	path, cwd, ok := undo.EditTarget(raw)
+	if !ok || !undo.Outside(path, cwd) {
+		return
+	}
+	s, err := undo.OpenDefault()
+	if err != nil {
+		return
+	}
+	rec, err := s.Snapshot(tool, path, time.Now())
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var ignore map[string]any
+	_ = NewRelay().call(ctx, http.MethodPost, "/v1/changes", rec, &ignore)
 }

@@ -11,7 +11,7 @@ import (
 
 // cmdWarden is `manar-edge warden`: the per-user helper that shows WARDEN prompts, started at
 // logon (XDG autostart on Linux, HKCU Run on Windows). `warden windows-ui on|off` switches the
-// Windows prompt, which is off until an administrator turns it on.
+// Windows prompt, which is on unless an administrator turns it off.
 func cmdWarden(base string, args []string) error {
 	if len(args) == 2 && args[0] == "windows-ui" {
 		if err := requireAdmin(); err != nil {
@@ -20,7 +20,7 @@ func cmdWarden(base string, args []string) error {
 		switch args[1] {
 		case "on", "off":
 			s := warden.LoadSettings(base)
-			s.WindowsUI = args[1] == "on"
+			s.WindowsUIOff = args[1] == "off"
 			return warden.SaveSettings(base, s)
 		}
 	}

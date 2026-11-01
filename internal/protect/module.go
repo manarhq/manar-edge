@@ -15,11 +15,15 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
+	"gitlab.vax.sh/manar/manar-edge/internal/door"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
+	"gitlab.vax.sh/manar/manar-edge/internal/undo"
 )
 
 // GatewayURL is the local LLM gateway base URL; set by the command package.
-var GatewayURL = "http://127.0.0.1:8480"
+var GatewayURL = ports.DoorURL
 
 // ClaudeSettingsPath is the managed Claude Code settings file; set by the command package.
 // Claude Code is protected by `install-claude-code`; this only reads whether that is in place.
@@ -39,6 +43,14 @@ func Configure(dir string) {
 	stateDir, store = dir, NewStore(dir)
 }
 
+// isPaused is "Pause all AI" on this device (a var so tests can set it).
+var isPaused = func() bool {
+	cfgMu.Lock()
+	d := stateDir
+	cfgMu.Unlock()
+	return d != "" && pause.Paused(d)
+}
+
 func theStore() *Store {
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
@@ -47,6 +59,7 @@ func theStore() *Store {
 
 func init() {
 	discovery.SetReconciler(reconcile)
+	discovery.SetUserReader(readUserFile)
 	daemon.Register(&relayModule{})
 }
 
@@ -60,15 +73,9 @@ func logOnce(msg string) {
 	}
 }
 
-func gatewayUp() bool {
-	c := &http.Client{Timeout: time.Second}
-	res, err := c.Get(GatewayURL + "/healthz")
-	if err != nil {
-		return false
-	}
-	res.Body.Close()
-	return res.StatusCode == 200
-}
+// gatewayUp is true only when the port cannot be squatted (door.Routable) and DOOR itself answers a
+// fresh challenge on GatewayURL.
+func gatewayUp() bool { return door.Routable() && door.Healthy(GatewayURL) }
 
 // reconcile protects what was found for every account that uses it, undoes it for tools the
 // owner switched off, and returns the resulting state. Nothing is changed until the owner has
@@ -248,13 +255,38 @@ func relayHandler(b backend) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
+		if isPaused() {
+			// Not even asked: every protected tool is denied while AI is paused.
+			json.NewEncoder(w).Encode(&hostclient.AuthorizeResult{Decision: "DENY", Reason: pause.Reason})
+			return
+		}
 		caller, _ := r.Context().Value(callerKey{}).(string)
+		// The tool's session id rides on the caller string ("uid:1000|s:<id>") so the backend
+		// interface stays as it is; Manar splits it off and records it with the action.
+		if sid := raw["session"]; sessionOK.MatchString(sid) {
+			caller += "|s:" + sid
+		}
 		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller)
 		if err != nil {
 			http.Error(w, "upstream", 502)
 			return
 		}
 		json.NewEncoder(w).Encode(res)
+	})
+	// Undo AI file changes: the hook (running as the user) tells the service what it saved. The
+	// service takes the user from the kernel, never from the body.
+	mux.HandleFunc("POST /v1/changes", func(w http.ResponseWriter, r *http.Request) {
+		var rec undo.Record
+		if json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&rec) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		caller, _ := r.Context().Value(callerKey{}).(string)
+		if undo.Default.Report(caller, rec) != nil {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("GET /v1/approvals/{id}", func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
@@ -263,6 +295,10 @@ func relayHandler(b backend) http.Handler {
 		if err != nil {
 			http.Error(w, "upstream", 502)
 			return
+		}
+		if isPaused() {
+			// An approval that lands during a pause does not let the call through.
+			s = "PAUSED"
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": s})
 	})
@@ -313,4 +349,14 @@ func Changes(f discovery.Found) []string {
 		out = append(out, st.Describe(f.Key, u.Name)...)
 	}
 	return out
+}
+
+// readUserFile is how discovery reads a person's MCP settings: as that person, never following a
+// link, and only below their home folder. A file that cannot be read safely is as good as absent.
+func readUserFile(u discovery.User, path string) ([]byte, bool) {
+	b, exists, _, err := newUserFS(Owner{UID: u.UID, GID: u.GID, Home: u.Home}).Read(path)
+	if err != nil || !exists {
+		return nil, false
+	}
+	return b, true
 }

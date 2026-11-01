@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 	"io"
 	"log"
 	"net"
@@ -18,11 +19,13 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 const (
-	gatewayListen = "127.0.0.1:8480"
-	gatewayURL    = "http://" + gatewayListen
+	gatewayListen = ports.JailGatewayListen
+	gatewayURL    = ports.JailGatewayURL
 	maxBody       = 10 << 20
 )
 
@@ -80,6 +83,8 @@ type localGateway struct {
 	transport http.RoundTripper
 	task      string
 	agent     string
+	// paused says "Pause all AI" is on for this device; nil means never paused (tests).
+	paused func() bool
 }
 
 // hookHandler serves only what the Claude Code hook needs, on the hook socket.
@@ -94,10 +99,27 @@ func (g *localGateway) hookRoutes(mux *http.ServeMux) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "agent": g.agent, "taskId": g.task})
 	})
 	mux.Handle("POST /agent/v1/authorize", g.pinTask(g.proxy(func(*http.Request) (string, bool) { return "/agent/v1/authorize", true }, true, nil)))
-	mux.Handle("GET /agent/v1/approvals/{id}", g.proxy(func(r *http.Request) (string, bool) {
+	// The hook gives up on an approval after 2 minutes and says so; Manar expires it.
+	mux.Handle("POST /agent/v1/approvals/{id}/expire", g.proxy(func(r *http.Request) (string, bool) {
+		id := r.PathValue("id")
+		return "/agent/v1/approvals/" + id + "/expire", idPattern.MatchString(id)
+	}, false, nil))
+	mux.Handle("GET /agent/v1/approvals/{id}", g.pausedApproval(g.proxy(func(r *http.Request) (string, bool) {
 		id := r.PathValue("id")
 		return "/agent/v1/approvals/" + id, idPattern.MatchString(id)
-	}, false, nil))
+	}, false, nil)))
+}
+
+// pausedApproval answers PAUSED instead of the real status while AI is paused, so an approval that
+// lands during a pause never lets the call through.
+func (g *localGateway) pausedApproval(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.paused != nil && g.paused() {
+			writeJSON(w, http.StatusOK, map[string]string{"id": r.PathValue("id"), "status": "PAUSED", "reason": pause.Reason})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (g *localGateway) handler() http.Handler {
@@ -150,6 +172,11 @@ func (g *localGateway) proxy(target func(*http.Request) (string, bool), needTask
 		},
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Model calls and MCP stop too while AI is paused; reading an approval does not.
+		if needTask && g.paused != nil && g.paused() {
+			writeJSONError(w, http.StatusForbidden, pause.Reason)
+			return
+		}
 		if needTask && g.task == "" {
 			writeJSONError(w, http.StatusPreconditionFailed, "manar_task_required")
 			return
@@ -171,6 +198,11 @@ func (g *localGateway) proxy(target func(*http.Request) (string, bool), needTask
 // agent cannot ask Manar about another task with this identity. The body is not rewritten.
 func (g *localGateway) pinTask(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.paused != nil && g.paused() {
+			// The hook reads this as a normal DENY and tells the agent why.
+			writeJSON(w, http.StatusOK, map[string]string{"decision": "DENY", "reason": pause.Reason})
+			return
+		}
 		if g.task == "" {
 			writeJSONError(w, http.StatusPreconditionFailed, "manar_task_required")
 			return
@@ -283,7 +315,8 @@ func serveGateway(ctx context.Context, base, arg string) error {
 	if task != "" && !idPattern.MatchString(task) {
 		return errors.New("task id has characters this gateway does not accept")
 	}
-	g := &localGateway{host: st.Edge.ManarServerName, transport: tr, task: task, agent: st.Name}
+	g := &localGateway{host: st.Edge.ManarServerName, transport: tr, task: task, agent: st.Name,
+		paused: func() bool { return pause.Paused(base) }}
 	ln, err := net.Listen("tcp", gatewayListen)
 	if err != nil {
 		return err

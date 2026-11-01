@@ -184,6 +184,13 @@ var topLevelBaseURL = regexp.MustCompile(`(?m)^\s*openai_base_url\s*=\s*(.*)$`)
 func codexBaseURL(url string) Edit {
 	line := `openai_base_url = "` + url + `"`
 	return func(cur []byte, _ bool) ([]byte, error) {
+		// A line Manar wrote on an earlier run (maybe for another port) is replaced, not kept.
+		if codexAdded.Match(cur) {
+			if bytes.Contains(cur, []byte("# Added by Manar: sends model calls through the local gateway.\n"+line+"\n")) {
+				return cur, nil
+			}
+			cur = codexAdded.ReplaceAll(cur, nil)
+		}
 		if m := topLevelBaseURL.FindSubmatch(cur); m != nil {
 			if strings.TrimSpace(string(m[1])) == `"`+url+`"` {
 				return cur, nil

@@ -9,9 +9,9 @@ import (
 )
 
 // DPAPI with the service account's key (the service is the only reader).
-func protect(b []byte) ([]byte, error) { return crypt(b, true) }
+func protect(_ string, b []byte) ([]byte, error) { return crypt(b, true) }
 
-func unprotect(b []byte) ([]byte, error) { return crypt(b, false) }
+func unprotect(_ string, b []byte) ([]byte, error) { return crypt(b, false) }
 
 func crypt(b []byte, enc bool) ([]byte, error) {
 	if len(b) == 0 {

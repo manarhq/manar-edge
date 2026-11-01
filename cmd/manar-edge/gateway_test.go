@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -372,4 +373,53 @@ func TestGatewayAuthorizePinsTask(t *testing.T) {
 		t.Fatalf("forwarded %s", s.body)
 	default:
 	}
+}
+
+func TestGatewayPausedDeniesWithoutAskingManar(t *testing.T) {
+	p := newTestPKI(t)
+	got := make(chan seen, 4)
+	manar := recordingManar(t, p, got)
+	addr := strings.TrimPrefix(manar.URL, "https://")
+	var paused atomic.Bool
+	g := &localGateway{host: testServerName, task: "task-1", agent: "acme-soc-1",
+		transport: newMTLSTransport(p.clientCert, p.roots, testServerName, addr),
+		paused:    paused.Load}
+	gw := httptest.NewServer(g.handler())
+	t.Cleanup(gw.Close)
+	body := `{"taskId":"task-1","toolId":"host.claude-code","actionId":"bash","resource":"ls"}`
+
+	paused.Store(true)
+	res, err := http.Post(gw.URL+"/agent/v1/authorize", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(res.Body)
+	res.Body.Close()
+	if res.StatusCode != 200 || !strings.Contains(string(b), `"decision":"DENY"`) || !strings.Contains(string(b), `"reason":"paused"`) {
+		t.Fatalf("authorize while paused: %d %s", res.StatusCode, b)
+	}
+	res, err = http.Post(gw.URL+"/v1/messages", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusForbidden {
+		t.Fatalf("model call while paused: %d", res.StatusCode)
+	}
+	select {
+	case s := <-got:
+		t.Fatalf("Manar was asked while paused: %s", s.path)
+	default:
+	}
+
+	paused.Store(false)
+	res, err = http.Post(gw.URL+"/agent/v1/authorize", "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatalf("after resume: %d", res.StatusCode)
+	}
+	<-got
 }

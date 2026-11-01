@@ -46,7 +46,7 @@ func (s FileStore) Put(name string, data []byte) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return err
 	}
-	prot, err := protect(data)
+	prot, err := protect(s.Dir, data)
 	if err != nil {
 		return err
 	}
@@ -76,7 +76,7 @@ func (s FileStore) Get(name string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	return unprotect(b)
+	return unprotect(s.Dir, b)
 }
 
 func (s FileStore) Delete(name string) error {

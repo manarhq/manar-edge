@@ -22,6 +22,9 @@ const (
 	ClassDocker  = "docker"
 	ClassBrowser = "browser"
 	ClassEnv     = "env"
+	ClassNPM     = "npm"
+	ClassPyPI    = "pypi"
+	ClassGitHub  = "github"
 )
 
 // Target is one watched path. Dir targets cover the files directly inside the directory that
@@ -45,6 +48,12 @@ func Targets(home string) []Target {
 		{Path: j(".config", "gcloud"), Class: ClassGCloud, Dir: true, Recursive: true},
 		{Path: j(".kube"), Class: ClassKube, Dir: true},
 		{Path: j(".docker"), Class: ClassDocker, Dir: true},
+		// Single files: an inode mark. A tool that replaces the file by rename loses the mark
+		// until the next rescan (hourly).
+		{Path: j(".npmrc"), Class: ClassNPM},
+		{Path: j(".pypirc"), Class: ClassPyPI},
+		{Path: j(".git-credentials"), Class: ClassGitHub},
+		{Path: j(".config", "gh", "hosts.yml"), Class: ClassGitHub},
 	}
 	return append(t, browserTargets(home)...)
 }
@@ -111,6 +120,12 @@ func ClassOf(p string) string {
 		return ClassKube
 	case has("/.docker/") && base == "config.json":
 		return ClassDocker
+	case base == ".npmrc" && !has("/node_modules/"):
+		return ClassNPM
+	case base == ".pypirc":
+		return ClassPyPI
+	case base == ".git-credentials", has("/.config/gh/") && base == "hosts.yml":
+		return ClassGitHub
 	case isBrowserSecret(n, base):
 		return ClassBrowser
 	case isEnvFile(base):

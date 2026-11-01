@@ -16,8 +16,12 @@ var keyNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
 
 // StoreSSH loads ~/.ssh/<name> into the ssh-agent and removes the file, but only after the
 // vault holds an identical copy and the agent is seen to hold the key.
-func (v *Vault) StoreSSH(name string) (*Entry, error) {
-	if v.Agent == nil {
+func (v *Vault) StoreSSH(name string) (*Entry, error) { return v.StoreSSHFor("", name) }
+
+// StoreSSHFor is StoreSSH limited to one user's home (owner is a Who.Key(); "" means any single
+// user who has that key). The command line uses it so a person can only move their own keys.
+func (v *Vault) StoreSSHFor(owner, name string) (*Entry, error) {
+	if v.Agent == nil && v.Keys == nil {
 		return nil, errors.New("ssh keys cannot be protected on this computer yet")
 	}
 	if !keyNameRe.MatchString(name) || strings.HasSuffix(name, ".pub") {
@@ -30,7 +34,7 @@ func (v *Vault) StoreSSH(name string) (*Entry, error) {
 	found := 0
 	for _, h := range v.Homes() {
 		w, err := WhoOfHome(h)
-		if err != nil {
+		if err != nil || (owner != "" && w.Key() != owner) {
 			continue
 		}
 		p := filepath.Join(h, ".ssh", name)
@@ -48,6 +52,9 @@ func (v *Vault) StoreSSH(name string) (*Entry, error) {
 	id := idOf("ssh", name, who.Key())
 	if _, err := v.Store.Get("m-" + id); err == nil {
 		return nil, ErrExists
+	}
+	if v.Keys != nil {
+		return v.storeOwn(id, name, home, who, orig, fi)
 	}
 	fp, encrypted, err := v.Agent.Fingerprint(path)
 	if err != nil {
@@ -107,11 +114,108 @@ func (v *Vault) restoreSSH(e *Entry) error {
 	if !who.Same(e.Home, e.File, orig) {
 		return errors.New("the key file did not read back identically: the vault copy is kept")
 	}
-	if v.Agent != nil {
+	if v.Keys != nil {
+		v.Keys.Remove(e.Owner, e.Ref)
+	} else if v.Agent != nil {
 		_ = v.Agent.Remove(e.File.Path) // best effort: the file is back, which is what matters
 	}
 	v.drop(e.ID)
+	v.profileAfterRestore(who, e)
 	return nil
+}
+
+// storeOwn moves the key into the vault and into Manar's own agent. The order is the vault rule:
+// vault copy written and read back, key loaded and seen, shell snippet written, only then the file
+// removed. Any failure before the removal leaves the key file where it was.
+func (v *Vault) storeOwn(id, name, home string, who Who, orig []byte, fi FileInfo) (*Entry, error) {
+	_, fp, encrypted, err := ParseSSHKey(orig)
+	if err != nil {
+		return nil, err
+	}
+	if encrypted {
+		return nil, errors.New("this key has a passphrase; it is already protected, so Manar leaves it where it is")
+	}
+	e := &Entry{ID: id, Kind: "ssh", Ref: name, Owner: who.Key(), UID: who.UID, GID: who.GID, Home: home,
+		File: fi, OrigSHA: sum(orig), Fingerprint: fp, StoredAt: time.Now().UTC()}
+	if err := v.put(id, e, orig, []byte(fp)); err != nil { // o-<id> is the encrypted backup of the exact bytes
+		return nil, err
+	}
+	if _, err := v.Keys.Add(e.Owner, name, orig); err != nil || !v.Keys.Has(e.Owner, fp) {
+		v.Keys.Remove(e.Owner, name)
+		v.drop(id)
+		return nil, errors.New("the agent does not hold the key: the file was kept")
+	}
+	if err := v.profileBefore(who, e); err != nil {
+		v.Keys.Remove(e.Owner, name)
+		v.drop(id)
+		return nil, fmt.Errorf("setting up the shell snippet: %w (the key file was kept)", err)
+	}
+	if err := who.Remove(fi.Path); err != nil {
+		return nil, fmt.Errorf("removing the key file: %w (the key is also in the agent and the vault)", err)
+	}
+	return e, nil
+}
+
+// RestoreSSHFor puts back one user's key (all of that user's keys when name is empty).
+func (v *Vault) RestoreSSHFor(owner, name string) error {
+	all, err := v.Entries()
+	errs := []error{err}
+	n := 0
+	for _, e := range all {
+		if e.Kind == "ssh" && e.Owner == owner && (name == "" || e.Ref == name) {
+			n++
+			errs = append(errs, v.restoreSSH(e))
+		}
+	}
+	if n == 0 && name != "" {
+		errs = append(errs, ErrNoSuchSecret)
+	}
+	return errors.Join(errs...)
+}
+
+// DetectSSH lists the unencrypted private keys in each user's ~/.ssh that are not in the vault yet:
+// what the console offers to move. It reads names and key headers only; no key leaves the device.
+func (v *Vault) DetectSSH() []string {
+	have := map[string]bool{}
+	if es, err := v.Entries(); err == nil {
+		for _, e := range es {
+			if e.Kind == "ssh" {
+				have[e.Owner+"\x00"+e.Ref] = true
+			}
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, h := range v.Homes() {
+		w, err := WhoOfHome(h)
+		if err != nil {
+			continue
+		}
+		var names []string
+		_ = w.do(func() error {
+			ents, err := os.ReadDir(filepath.Join(h, ".ssh"))
+			for _, e := range ents {
+				if !e.IsDir() && keyNameRe.MatchString(e.Name()) && !strings.HasSuffix(e.Name(), ".pub") {
+					names = append(names, e.Name())
+				}
+			}
+			return err
+		})
+		for _, n := range names {
+			if len(out) >= 20 || have[w.Key()+"\x00"+n] || seen[n] {
+				continue
+			}
+			b, _, err := w.Read(h, filepath.Join(h, ".ssh", n))
+			if err != nil || len(b) > 16<<10 || !bytes.Contains(b[:min(len(b), 64)], []byte("PRIVATE KEY")) {
+				continue
+			}
+			if _, _, enc, err := ParseSSHKey(b); err == nil && !enc {
+				seen[n] = true
+				out = append(out, n)
+			}
+		}
+	}
+	return out
 }
 
 // RestoreAll puts every vaulted secret back. Uninstall calls it before it changes anything else.

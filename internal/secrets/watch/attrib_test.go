@@ -30,11 +30,11 @@ func TestAttributeAndDeny(t *testing.T) {
 				11: {PID: 11, PPID: 10, Exe: "/bin/sh", Cmdline: []string{"sh", "-c", "cat ~/.aws/credentials"}, TTY: true},
 				12: {PID: 12, PPID: 11, Exe: "/usr/bin/cat", Cmdline: []string{"cat", "x"}, TTY: true}},
 			12, "host.cursor", true, false},
-		"the agent's child behind an interactive terminal shell is allowed": {
+		"a shell that looks interactive below a blockable agent gets no exemption (script, a pty)": {
 			fakeProcs{10: agent,
 				11: {PID: 11, PPID: 10, Exe: "/bin/bash", Cmdline: []string{"bash", "-l"}, TTY: true},
 				12: {PID: 12, PPID: 11, Exe: "/usr/bin/ssh", Cmdline: []string{"ssh", "host"}, TTY: true}},
-			12, "host.cursor", false, true},
+			12, "host.cursor", true, true},
 		"the editor's own git and ssh are reported, never denied": {
 			fakeProcs{20: editor, 21: {PID: 21, PPID: 20, Exe: "/usr/bin/ssh", Cmdline: []string{"ssh", "h"}}},
 			21, "host.cursor", false, false},

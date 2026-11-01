@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -66,5 +67,32 @@ func TestCleanupRunsEveryHookEvenWhenOneFails(t *testing.T) {
 	}
 	if len(errs) != 2 {
 		t.Fatalf("errs = %v", errs)
+	}
+}
+
+func TestMain(m *testing.M) {
+	StatusPath = "" // never write /run in tests
+	os.Exit(m.Run())
+}
+
+func TestStatusFileRoundTrip(t *testing.T) {
+	old := StatusPath
+	StatusPath = t.TempDir() + "/run/status.json"
+	defer func() { StatusPath = old }()
+	SetIdentity("h1", "acme")
+	recordSync("h1", "APPROVED", "ask", []string{"undo"}, nil)
+	SetComponent("door", Component{State: "ok"})
+	SetTools([]ToolStatus{{Name: "Cursor", Protected: true, Mode: "hook"}})
+	if err := writeStatus(); err != nil {
+		t.Fatal(err)
+	}
+	s, err := ReadStatus(StatusPath)
+	if err != nil || s.HostID != "h1" || s.TenantSlug != "acme" || s.Status != "APPROVED" || s.LastSyncAt == nil ||
+		s.Components["door"].State != "ok" || len(s.Tools) != 1 {
+		t.Fatalf("%+v %v", s, err)
+	}
+	recordSync("", "", "", nil, errors.New("boom"))
+	if cur.LastError != "boom" || cur.Status != "APPROVED" {
+		t.Fatal("a failed sync must keep the last good state and record the error")
 	}
 }

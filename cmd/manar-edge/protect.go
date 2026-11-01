@@ -87,4 +87,17 @@ func printCoverage(out io.Writer) {
 	fmt.Fprintln(out, "check before shell, file and MCP actions, and backs up every file first. Each change is listed")
 	fmt.Fprintln(out, "on the AI tools page, where a switch per tool turns it off and puts the original back.")
 	fmt.Fprintln(out, "Uninstalling restores every backup. See: manar-edge protect list")
+	printJail(out)
+}
+
+// printJail discloses the egress filter (JAIL) in the installer's output.
+func printJail(out io.Writer) {
+	if runtime.GOOS != "linux" {
+		return
+	}
+	fmt.Fprintln(out, "JAIL: the processes of Claude Code, Codex CLI, Gemini CLI and Copilot CLI (and what they start)")
+	fmt.Fprintln(out, "  may reach their own AI provider, package registries, GitHub and GitLab. A new site raises a")
+	fmt.Fprintln(out, "  prompt; no answer in 2 minutes means no. Nothing else on this computer is filtered. It adds an")
+	fmt.Fprintln(out, "  nftables table (manar_jail_tools) and a cgroup (manar-jail); `manar-edge jail-restore` or")
+	fmt.Fprintln(out, "  uninstall removes both.")
 }
