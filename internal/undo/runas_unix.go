@@ -34,6 +34,7 @@ func RunAs(uid int, exe string, args ...string) ([]byte, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (re-exec of this binary, os.Executable; arguments are argv, no shell)
 	cmd := exec.CommandContext(ctx, exe, args...)
 	cmd.Dir = "/"
 	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + u.HomeDir}
