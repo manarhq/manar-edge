@@ -44,14 +44,17 @@ func ValidID(s string) bool { return idPattern.MatchString(s) }
 
 // Record is the metadata of one snapshot: what is stored beside the copy and what is reported.
 type Record struct {
-	ID     string    `json:"id"`
-	Tool   string    `json:"tool"`
-	Path   string    `json:"path"`
-	Exists bool      `json:"existed"`
-	Size   int64     `json:"size"`
-	SHA256 string    `json:"sha256"`
-	Mode   uint32    `json:"mode"`
-	Taken  time.Time `json:"takenAt"`
+	ID     string `json:"id"`
+	Tool   string `json:"tool"`
+	Path   string `json:"path"`
+	Exists bool   `json:"existed"`
+	Size   int64  `json:"size"`
+	SHA256 string `json:"sha256"`
+	Mode   uint32 `json:"mode"`
+	// Store is the folder this snapshot lives in, so a restore uses the same one even if
+	// XDG_STATE_HOME differs between the hook and the helper.
+	Store string    `json:"store"`
+	Taken time.Time `json:"takenAt"`
 }
 
 // Store is one user's snapshot folder.
@@ -147,7 +150,7 @@ func (s *Store) Snapshot(tool, path string, now time.Time) (*Record, error) {
 	if err != nil {
 		return nil, err
 	}
-	rec := &Record{ID: id, Tool: tool, Path: filepath.Clean(path), Taken: now.UTC()}
+	rec := &Record{ID: id, Tool: tool, Path: filepath.Clean(path), Taken: now.UTC(), Store: s.Dir}
 	f, st, err := openNoFollow(path)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -273,61 +276,95 @@ func (s *Store) Prune(now time.Time) {
 // Purge removes every snapshot (uninstall).
 func (s *Store) Purge() error { return os.RemoveAll(s.Dir) }
 
+// RestoreResult says what a restore did besides putting the file back.
+type RestoreResult struct {
+	// Backup is the snapshot taken of the file as it was just before the restore, so the restore
+	// can itself be undone (`manar-edge undo restore <Backup>`). Empty when there was no file.
+	Backup string `json:"backup,omitempty"`
+	// Note is set when the file looks changed after the AI tool edited it.
+	Note string `json:"note,omitempty"`
+}
+
+// changedAfter is how long after the snapshot a modification counts as later work: the snapshot
+// is taken just before the tool writes.
+const changedAfter = time.Minute
+
 // Restore puts the file at path back as it was when snapshot id was taken. path must be the path
-// the snapshot recorded: a request cannot redirect it. A file the tool created (it did not exist
-// before) is removed. A link at the target is refused.
-func (s *Store) Restore(id, path string) error {
+// the snapshot recorded: a request cannot redirect it. expectSHA, when given, must equal the
+// content hash recorded for the snapshot (the device service passes the hash it keeps in a place
+// the user cannot edit). The current file is saved first, so the restore can be undone. A file
+// the tool created (it did not exist before) is removed. A link at the target is refused.
+func (s *Store) Restore(id, path, expectSHA string, now time.Time) (*RestoreResult, error) {
 	r, err := s.Load(id)
 	if err != nil {
-		return fmt.Errorf("snapshot not found: %w", err)
+		return nil, fmt.Errorf("snapshot not found: %w", err)
 	}
 	if r.Path != filepath.Clean(path) || !filepath.IsAbs(r.Path) {
-		return errors.New("the path does not match the snapshot")
+		return nil, errors.New("the path does not match the snapshot")
 	}
+	if expectSHA != "" && r.SHA256 != expectSHA {
+		return nil, errors.New("the saved copy does not match what the device recorded")
+	}
+	var data []byte
+	if r.Exists {
+		f, _, err := openNoFollow(s.dataPath(id))
+		if err != nil {
+			return nil, fmt.Errorf("the saved copy is missing: %w", err)
+		}
+		data, err = io.ReadAll(io.LimitReader(f, MaxFileSize+1))
+		f.Close()
+		if err != nil {
+			return nil, err
+		}
+		if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != r.SHA256 {
+			return nil, errors.New("the saved copy was changed and is not restored")
+		}
+	}
+	res := &RestoreResult{}
 	l, lerr := os.Lstat(r.Path)
-	if lerr == nil && !l.Mode().IsRegular() {
-		return ErrNotRegular
-	}
-	if lerr != nil && !errors.Is(lerr, os.ErrNotExist) {
-		return lerr
+	switch {
+	case lerr == nil && !l.Mode().IsRegular():
+		return nil, ErrNotRegular
+	case lerr != nil && !errors.Is(lerr, os.ErrNotExist):
+		return nil, lerr
+	case lerr == nil:
+		if l.ModTime().After(r.Taken.Add(changedAfter)) {
+			res.Note = "The file was changed after the AI tool edited it."
+		}
+		b, err := s.Snapshot("undo-backup", r.Path, now)
+		if err != nil {
+			return nil, fmt.Errorf("cannot save the current file first, so nothing was changed: %w", err)
+		}
+		res.Backup = b.ID
+		if res.Note != "" {
+			res.Note += " Your later version was saved first: manar-edge undo restore " + b.ID
+		}
 	}
 	if !r.Exists {
 		if lerr == nil {
-			return os.Remove(r.Path)
+			return res, os.Remove(r.Path)
 		}
-		return nil
-	}
-	f, _, err := openNoFollow(s.dataPath(id))
-	if err != nil {
-		return fmt.Errorf("the saved copy is missing: %w", err)
-	}
-	defer f.Close()
-	data, err := io.ReadAll(io.LimitReader(f, MaxFileSize+1))
-	if err != nil {
-		return err
-	}
-	if sum := sha256.Sum256(data); hex.EncodeToString(sum[:]) != r.SHA256 {
-		return errors.New("the saved copy was changed and is not restored")
+		return res, nil
 	}
 	dir := filepath.Dir(r.Path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return nil, err
 	}
 	tmp, err := os.CreateTemp(dir, ".manar-undo-*")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer os.Remove(tmp.Name())
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
-		return err
+		return nil, err
 	}
 	if err := tmp.Chmod(os.FileMode(r.Mode)); err != nil && runtime.GOOS != "windows" {
 		tmp.Close()
-		return err
+		return nil, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return nil, err
 	}
-	return os.Rename(tmp.Name(), r.Path)
+	return res, os.Rename(tmp.Name(), r.Path)
 }

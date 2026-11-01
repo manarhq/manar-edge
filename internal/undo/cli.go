@@ -5,16 +5,22 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 )
 
 // Helper is `manar-edge __undo <op> [...]`: it runs as the user whose store it opens (the service
-// starts it through RunAs) and prints one JSON line {"ok":bool,"error":"..."}.
+// starts it through RunAs) and prints one JSON line {"ok":bool,"error":"...","backup":"...","note":"..."}.
+// The service names the store folder it recorded for the snapshot, so a different XDG_STATE_HOME
+// in the helper cannot send it somewhere else.
 func Helper(args []string, out io.Writer) int {
-	reply := func(err error) int {
+	reply := func(res *RestoreResult, err error) int {
 		r := map[string]any{"ok": err == nil}
 		if err != nil {
 			r["error"] = err.Error()
+		}
+		if res != nil {
+			r["backup"], r["note"] = res.Backup, res.Note
 		}
 		_ = json.NewEncoder(out).Encode(r)
 		if err != nil {
@@ -22,26 +28,41 @@ func Helper(args []string, out io.Writer) int {
 		}
 		return 0
 	}
-	if len(args) == 0 {
-		return reply(errors.New("usage: __undo restore <id> <path> | prune | purge"))
+	usage := errors.New("usage: __undo restore <id> <path> <store> <sha256> | prune <store> | purge <store>")
+	if len(args) < 2 {
+		return reply(nil, usage)
 	}
-	s, err := OpenDefault()
+	store := args[len(args)-1]
+	if args[0] == "restore" {
+		if len(args) != 5 {
+			return reply(nil, usage)
+		}
+		store = args[3]
+	}
+	if !validStoreDir(store) {
+		return reply(nil, errors.New("not a Manar snapshot folder"))
+	}
+	s, err := Open(store)
 	if err != nil {
-		return reply(err)
+		return reply(nil, err)
 	}
 	switch args[0] {
 	case "restore":
-		if len(args) != 3 {
-			return reply(errors.New("usage: __undo restore <id> <path>"))
-		}
-		return reply(s.Restore(args[1], args[2]))
+		res, err := s.Restore(args[1], args[2], args[4], time.Now())
+		return reply(res, err)
 	case "prune":
 		s.Prune(time.Now())
-		return reply(nil)
+		return reply(nil, nil)
 	case "purge":
-		return reply(s.Purge())
+		return reply(nil, s.Purge())
 	}
-	return reply(errors.New("unknown operation"))
+	return reply(nil, usage)
+}
+
+// validStoreDir accepts only a folder shaped like the one DefaultDir makes.
+func validStoreDir(d string) bool {
+	return filepath.IsAbs(d) && filepath.Clean(d) == d &&
+		filepath.Base(d) == "undo" && filepath.Base(filepath.Dir(d)) == "manar-edge"
 }
 
 // Command is `manar-edge undo list|restore <id>`, for the person at the keyboard.
@@ -76,10 +97,17 @@ func Command(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		if err := s.Restore(r.ID, r.Path); err != nil {
+		res, err := s.Restore(r.ID, r.Path, "", time.Now())
+		if err != nil {
 			return err
 		}
 		fmt.Fprintf(out, "Put %s back as it was.\n", r.Path)
+		if res.Backup != "" {
+			fmt.Fprintf(out, "The file as it was just before is saved too: manar-edge undo restore %s\n", res.Backup)
+		}
+		if res.Note != "" {
+			fmt.Fprintln(out, res.Note)
+		}
 		return nil
 	}
 	return usage

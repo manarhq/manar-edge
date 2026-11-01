@@ -1,6 +1,8 @@
 package undo
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +12,11 @@ import (
 )
 
 var now = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)
+
+func restore(s *Store, id, path string) error {
+	_, err := s.Restore(id, path, "", now.Add(time.Second))
+	return err
+}
 
 func open(t *testing.T) *Store {
 	t.Helper()
@@ -29,7 +36,7 @@ func TestSnapshotAndRestoreExisting(t *testing.T) {
 		t.Fatalf("rec %+v err %v", rec, err)
 	}
 	os.WriteFile(f, []byte("agent wrote this"), 0o600)
-	if err := s.Restore(rec.ID, f); err != nil {
+	if err := restore(s, rec.ID, f); err != nil {
 		t.Fatal(err)
 	}
 	if b, _ := os.ReadFile(f); string(b) != "original" {
@@ -53,7 +60,7 @@ func TestRestoreRemovesFileTheToolCreated(t *testing.T) {
 		t.Fatalf("rec %+v err %v", rec, err)
 	}
 	os.WriteFile(f, []byte("x"), 0o600)
-	if err := s.Restore(rec.ID, f); err != nil {
+	if err := restore(s, rec.ID, f); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(f); !os.IsNotExist(err) {
@@ -67,7 +74,7 @@ func TestRestoreRefusesAnotherPath(t *testing.T) {
 	f, other := filepath.Join(d, "a"), filepath.Join(d, "b")
 	os.WriteFile(f, []byte("1"), 0o600)
 	rec, _ := s.Snapshot("t", f, now)
-	if err := s.Restore(rec.ID, other); err == nil {
+	if err := restore(s, rec.ID, other); err == nil {
 		t.Fatal("a restore must not be redirected to another path")
 	}
 }
@@ -78,7 +85,7 @@ func TestRestoreDetectsTamperedCopy(t *testing.T) {
 	os.WriteFile(f, []byte("1"), 0o600)
 	rec, _ := s.Snapshot("t", f, now)
 	os.WriteFile(s.dataPath(rec.ID), []byte("evil"), 0o600)
-	if err := s.Restore(rec.ID, f); err == nil || !strings.Contains(err.Error(), "changed") {
+	if err := restore(s, rec.ID, f); err == nil || !strings.Contains(err.Error(), "changed") {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -101,7 +108,7 @@ func TestSymlinksAreNeverFollowed(t *testing.T) {
 	rec, _ := s.Snapshot("t", f, now)
 	os.Remove(f)
 	os.Symlink(secret, f)
-	if err := s.Restore(rec.ID, f); err == nil {
+	if err := restore(s, rec.ID, f); err == nil {
 		t.Fatal("restore wrote through a link")
 	}
 	if b, _ := os.ReadFile(secret); string(b) != "s" {
@@ -174,5 +181,71 @@ func TestEditTargetAndOutside(t *testing.T) {
 		if !Outside(p, cwd) {
 			t.Fatalf("link out of the project counted as inside: %s", p)
 		}
+	}
+}
+
+func TestRestoreSavesTheCurrentFileFirstAndSaysWhenItChanged(t *testing.T) {
+	s := open(t)
+	f := filepath.Join(t.TempDir(), "a.conf")
+	os.WriteFile(f, []byte("original"), 0o600)
+	rec, _ := s.Snapshot("claude-code", f, now)
+	os.WriteFile(f, []byte("my later work"), 0o600)
+	os.Chtimes(f, now.Add(time.Hour), now.Add(time.Hour))
+	res, err := s.Restore(rec.ID, f, rec.SHA256, now.Add(2*time.Hour))
+	if err != nil || res.Backup == "" || res.Note == "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if b, _ := os.ReadFile(f); string(b) != "original" {
+		t.Fatalf("got %q", b)
+	}
+	// the restore is itself undoable
+	if _, err := s.Restore(res.Backup, f, "", now.Add(3*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(f); string(b) != "my later work" {
+		t.Fatalf("backup restore gave %q", b)
+	}
+}
+
+func TestRestoreWithoutLaterChangesHasNoNote(t *testing.T) {
+	s := open(t)
+	f := filepath.Join(t.TempDir(), "a")
+	os.WriteFile(f, []byte("1"), 0o600)
+	rec, _ := s.Snapshot("t", f, time.Now())
+	res, err := s.Restore(rec.ID, f, "", time.Now())
+	if err != nil || res.Note != "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+}
+
+func TestRestoreRefusesAHashTheServiceDidNotRecord(t *testing.T) {
+	s := open(t)
+	f := filepath.Join(t.TempDir(), "a")
+	os.WriteFile(f, []byte("1"), 0o600)
+	rec, _ := s.Snapshot("t", f, now)
+	// the user swaps the copy AND its record so they agree with each other
+	evil := []byte("evil")
+	os.WriteFile(s.dataPath(rec.ID), evil, 0o600)
+	meta, _ := os.ReadFile(s.metaPath(rec.ID))
+	sum := sha256.Sum256(evil)
+	forged := strings.Replace(string(meta), rec.SHA256, hex.EncodeToString(sum[:]), 1)
+	os.WriteFile(s.metaPath(rec.ID), []byte(forged), 0o600)
+	if _, err := s.Restore(rec.ID, f, rec.SHA256, now); err == nil {
+		t.Fatal("restored content whose hash is not the one the service recorded")
+	}
+}
+
+func TestHelperOnlyOpensManarStoreFolders(t *testing.T) {
+	var out strings.Builder
+	if Helper([]string{"purge", t.TempDir()}, &out) == 0 {
+		t.Fatal("purged an arbitrary folder")
+	}
+	d := filepath.Join(t.TempDir(), "manar-edge", "undo")
+	os.MkdirAll(d, 0o700)
+	if Helper([]string{"purge", d}, &out) != 0 {
+		t.Fatal(out.String())
+	}
+	if _, err := os.Stat(d); !os.IsNotExist(err) {
+		t.Fatal("not purged")
 	}
 }

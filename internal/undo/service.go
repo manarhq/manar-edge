@@ -1,7 +1,12 @@
 package undo
 
 import (
+	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log"
@@ -23,13 +28,20 @@ import (
 // the console asked for, each in a child process that has become the user who owns the snapshot.
 
 // Default is the one service instance; protect's relay hands it the records hooks send.
-var Default = &Service{owners: map[string]owner{}, runAs: RunAs, pollEvery: 15 * time.Second}
+var Default = &Service{index: map[string]entry{}, rate: map[string][]time.Time{}, runAs: RunAs, pollEvery: 15 * time.Second, now: time.Now}
 
 func init() { daemon.Register(Default) }
 
-type owner struct {
-	Caller string    `json:"caller"`
-	At     time.Time `json:"at"`
+// entry is what the service (root) remembers about one snapshot. The user cannot edit it: a
+// restore trusts this, not the user's folder, for the content hash, the path and the store.
+type entry struct {
+	ID      string    `json:"id"`
+	Caller  string    `json:"caller"`
+	At      time.Time `json:"at"`
+	SHA     string    `json:"sha"` // SHA-256 of the saved content, when the hook reported it
+	Store   string    `json:"store"`
+	Path    string    `json:"path"`
+	Existed bool      `json:"existed"`
 }
 
 // Service is the daemon module "undo".
@@ -37,19 +49,30 @@ type Service struct {
 	mu        sync.Mutex
 	stateDir  string
 	exe       string
-	queue     []Record
-	owners    map[string]owner // snapshot id -> who took it ("uid:1000")
+	key       []byte // per-device key: Manar only ever sees HMAC(key, content hash)
+	queue     []wireChange
+	index     map[string]entry // snapshot id -> entry
+	rate      map[string][]time.Time
 	runAs     func(uid int, exe string, args ...string) ([]byte, error)
 	pollEvery time.Duration
 	lastPrune time.Time
+	now       func() time.Time
 }
 
-// Configure sets the device state dir (owner index) and the binary used for helpers.
+// Limits that keep a local caller from filling the index or the queue.
+const (
+	maxPerCaller   = 1000
+	reportsPerMin  = 120
+	maxQueuedItems = 500
+)
+
+// Configure sets the device state dir (index, key) and the binary used for helpers.
 func Configure(stateDir, exe string) {
 	Default.mu.Lock()
 	defer Default.mu.Unlock()
 	Default.stateDir, Default.exe = stateDir, exe
-	Default.loadOwners()
+	Default.loadKey()
+	Default.loadIndex()
 }
 
 func (s *Service) Name() string { return "undo" }
@@ -59,12 +82,12 @@ var (
 	shaPattern  = regexp.MustCompile(`^[a-f0-9]{64}$`)
 )
 
-const maxQueue = 500
-
-// Report accepts one record from a hook. caller is the kernel's view of who sent it.
+// Report accepts one record from a hook. caller is the kernel's view of who sent it. An id that
+// already belongs to another caller is refused, so nobody can take over a snapshot.
 func (s *Service) Report(caller string, r Record) error {
 	if !ValidID(r.ID) || !toolPattern.MatchString(r.Tool) || !shaPattern.MatchString(r.SHA256) ||
-		!filepath.IsAbs(r.Path) || len(r.Path) > 1024 || r.Size < 0 || strings.ContainsRune(r.Path, 0) {
+		!filepath.IsAbs(r.Path) || len(r.Path) > 1024 || r.Size < 0 || strings.ContainsRune(r.Path, 0) ||
+		!filepath.IsAbs(r.Store) || len(r.Store) > 1024 || strings.ContainsRune(r.Store, 0) {
 		return errors.New("bad record")
 	}
 	if _, ok := callerUID(caller); !ok && !strings.HasPrefix(caller, "sid:") {
@@ -72,11 +95,42 @@ func (s *Service) Report(caller string, r Record) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.owners[r.ID] = owner{Caller: caller, At: time.Now()}
-	s.saveOwners()
-	s.queue = append(s.queue, r)
-	if len(s.queue) > maxQueue {
-		s.queue = s.queue[len(s.queue)-maxQueue:]
+	now := s.now()
+	recent := s.rate[caller][:0]
+	for _, t := range s.rate[caller] {
+		if now.Sub(t) < time.Minute {
+			recent = append(recent, t)
+		}
+	}
+	if len(recent) >= reportsPerMin {
+		s.rate[caller] = recent
+		return errors.New("too many reports")
+	}
+	s.rate[caller] = append(recent, now)
+	if old, ok := s.index[r.ID]; ok {
+		if old.Caller != caller {
+			return errors.New("that snapshot belongs to someone else")
+		}
+		return nil // the same caller sent it twice
+	}
+	n := 0
+	for _, e := range s.index {
+		if e.Caller == caller {
+			n++
+		}
+	}
+	if n >= maxPerCaller {
+		return errors.New("too many saved copies for this account")
+	}
+	e := entry{ID: r.ID, Caller: caller, At: now, SHA: r.SHA256, Store: filepath.Clean(r.Store), Path: filepath.Clean(r.Path), Existed: r.Exists}
+	s.index[r.ID] = e
+	s.appendIndex(e)
+	s.queue = append(s.queue, wireChange{
+		SnapshotID: r.ID, Tool: r.Tool, Path: e.Path, Existed: r.Exists, SizeBytes: r.Size,
+		SHA256: s.mac(r.SHA256), TakenAt: r.Taken.UTC().Format(time.RFC3339),
+	})
+	if len(s.queue) > maxQueuedItems {
+		s.queue = s.queue[len(s.queue)-maxQueuedItems:]
 	}
 	return nil
 }
@@ -90,30 +144,80 @@ func callerUID(c string) (int, bool) {
 	return n, err == nil && n >= 0
 }
 
-func (s *Service) ownersPath() string { return filepath.Join(s.stateDir, "undo-owners.json") }
+// mac is what Manar sees instead of a hash of the user's file content.
+func (s *Service) mac(contentSHA string) string {
+	m := hmac.New(sha256.New, s.key)
+	m.Write([]byte(contentSHA))
+	return hex.EncodeToString(m.Sum(nil))
+}
 
-func (s *Service) loadOwners() {
+func (s *Service) loadKey() {
+	if s.stateDir == "" {
+		s.key = make([]byte, 32)
+		_, _ = rand.Read(s.key)
+		return
+	}
+	p := filepath.Join(s.stateDir, "undo-key")
+	if b, err := os.ReadFile(p); err == nil && len(b) == 32 {
+		s.key = b
+		return
+	}
+	s.key = make([]byte, 32)
+	_, _ = rand.Read(s.key)
+	_ = os.MkdirAll(s.stateDir, 0o700)
+	_ = os.WriteFile(p, s.key, 0o600)
+}
+
+func (s *Service) indexPath() string { return filepath.Join(s.stateDir, "undo-index.jsonl") }
+
+// loadIndex replays the append-only index file, dropping what is past retention.
+func (s *Service) loadIndex() {
+	s.index = map[string]entry{}
 	if s.stateDir == "" {
 		return
 	}
-	b, err := os.ReadFile(s.ownersPath())
+	f, err := os.Open(s.indexPath())
 	if err != nil {
 		return
 	}
-	m := map[string]owner{}
-	if json.Unmarshal(b, &m) == nil {
-		s.owners = m
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64<<10), 64<<10)
+	for sc.Scan() {
+		var e entry
+		if json.Unmarshal(sc.Bytes(), &e) == nil && ValidID(e.ID) && s.now().Sub(e.At) < Retention {
+			s.index[e.ID] = e
+		}
 	}
 }
 
-func (s *Service) saveOwners() {
+// appendIndex adds one line: a report never rewrites the file.
+func (s *Service) appendIndex(e entry) {
 	if s.stateDir == "" {
 		return
 	}
-	b, _ := json.Marshal(s.owners)
-	tmp := s.ownersPath() + ".tmp"
+	f, err := os.OpenFile(s.indexPath(), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	b, _ := json.Marshal(e)
+	_, _ = f.Write(append(b, '\n'))
+}
+
+// compactIndex rewrites the file from memory (once an hour, after expired entries are dropped).
+func (s *Service) compactIndex() {
+	if s.stateDir == "" {
+		return
+	}
+	var b []byte
+	for _, e := range s.index {
+		line, _ := json.Marshal(e)
+		b = append(append(b, line...), '\n')
+	}
+	tmp := s.indexPath() + ".tmp"
 	if os.WriteFile(tmp, b, 0o600) == nil {
-		_ = os.Rename(tmp, s.ownersPath())
+		_ = os.Rename(tmp, s.indexPath())
 	}
 }
 
@@ -131,6 +235,7 @@ type restoreItem struct {
 	ID         string `json:"id"`
 	SnapshotID string `json:"snapshotId"`
 	Path       string `json:"path"`
+	SHA256     string `json:"sha256"` // Manar's copy: HMAC of the content hash, not the hash
 }
 
 func (s *Service) Start(ctx context.Context, c *hostclient.Client) error {
@@ -167,8 +272,11 @@ func (s *Service) tick(ctx context.Context, c api) {
 	}
 	for _, it := range pending.Items {
 		res := map[string]string{"status": "RESTORED"}
-		if err := s.restore(it); err != nil {
+		note, err := s.restore(it)
+		if err != nil {
 			res = map[string]string{"status": "FAILED", "error": truncate(err.Error(), 280)}
+		} else if note != "" {
+			res["note"] = truncate(note, 280)
 		}
 		if err := c.Do(ctx, "POST", "/undo/restores/"+it.ID+"/result", res, nil); err != nil {
 			log.Printf("manar-edge: undo: result: %v", err)
@@ -180,14 +288,10 @@ func (s *Service) tick(ctx context.Context, c api) {
 func (s *Service) flush(ctx context.Context, c api) {
 	s.mu.Lock()
 	n := min(len(s.queue), 50)
-	batch := slices.Clone(s.queue[:n])
+	body := slices.Clone(s.queue[:n])
 	s.mu.Unlock()
 	if n == 0 {
 		return
-	}
-	body := make([]wireChange, n)
-	for i, r := range batch {
-		body[i] = wireChange{r.ID, r.Tool, r.Path, r.Exists, r.Size, r.SHA256, r.Taken.Format(time.RFC3339)}
 	}
 	if err := c.Do(ctx, "POST", "/undo/changes", map[string]any{"changes": body}, nil); err != nil {
 		log.Printf("manar-edge: undo: report: %v", err)
@@ -198,36 +302,44 @@ func (s *Service) flush(ctx context.Context, c api) {
 	s.mu.Unlock()
 }
 
-func (s *Service) restore(it restoreItem) error {
+// restore runs one restore the console asked for. What it acts on comes from the service's own
+// index (path, store, content hash), and Manar's record must agree with it.
+func (s *Service) restore(it restoreItem) (note string, err error) {
 	if !ValidID(it.SnapshotID) || !filepath.IsAbs(it.Path) {
-		return errors.New("the request is not valid")
+		return "", errors.New("the request is not valid")
 	}
 	s.mu.Lock()
-	o, ok := s.owners[it.SnapshotID]
+	e, ok := s.index[it.SnapshotID]
 	exe := s.exe
+	macOK := ok && hmac.Equal([]byte(s.mac(e.SHA)), []byte(it.SHA256))
 	s.mu.Unlock()
-	if !ok {
-		return errors.New("this device does not know that saved copy")
+	switch {
+	case !ok:
+		return "", errors.New("this device does not know that saved copy")
+	case filepath.Clean(it.Path) != e.Path || !macOK:
+		return "", errors.New("the request does not match what this device recorded")
 	}
-	uid, ok := callerUID(o.Caller)
+	uid, ok := callerUID(e.Caller)
 	if !ok {
-		return ErrNoRunAsMsg()
+		return "", ErrNoRunAsMsg()
 	}
-	out, err := s.runAs(uid, exe, "__undo", "restore", it.SnapshotID, it.Path)
+	out, rerr := s.runAs(uid, exe, "__undo", "restore", it.SnapshotID, e.Path, e.Store, e.SHA)
 	var r struct {
-		OK    bool   `json:"ok"`
-		Error string `json:"error"`
+		OK     bool   `json:"ok"`
+		Error  string `json:"error"`
+		Note   string `json:"note"`
+		Backup string `json:"backup"`
 	}
 	if jerr := json.Unmarshal(out, &r); jerr == nil && !r.OK && r.Error != "" {
-		return errors.New(r.Error)
+		return "", errors.New(r.Error)
 	}
-	if err != nil {
-		return err
+	if rerr != nil {
+		return "", rerr
 	}
 	if !r.OK {
-		return errors.New("the restore did not report success")
+		return "", errors.New("the restore did not report success")
 	}
-	return nil
+	return r.Note, nil
 }
 
 // ErrNoRunAsMsg is the failure for a snapshot taken by an account the service cannot act as.
@@ -242,50 +354,60 @@ func truncate(s string, n int) string {
 	return s
 }
 
-// maybePrune asks each known user's helper to drop expired snapshots, once an hour, and forgets
-// owners past retention.
+type userStore struct {
+	uid   int
+	store string
+}
+
+// stores lists every (account, store folder) the index knows. Callers hold s.mu.
+func (s *Service) stores() map[userStore]bool {
+	m := map[userStore]bool{}
+	for _, e := range s.index {
+		if uid, ok := callerUID(e.Caller); ok {
+			m[userStore{uid, e.Store}] = true
+		}
+	}
+	return m
+}
+
+// maybePrune asks each known store's helper to drop expired snapshots, once an hour, forgets
+// index entries past retention and rewrites the index file.
 func (s *Service) maybePrune() {
 	s.mu.Lock()
-	if time.Since(s.lastPrune) < time.Hour {
+	if s.now().Sub(s.lastPrune) < time.Hour {
 		s.mu.Unlock()
 		return
 	}
-	s.lastPrune = time.Now()
-	uids := map[int]bool{}
-	for id, o := range s.owners {
-		if time.Since(o.At) > Retention {
-			delete(s.owners, id)
-		} else if uid, ok := callerUID(o.Caller); ok {
-			uids[uid] = true
+	s.lastPrune = s.now()
+	for id, e := range s.index {
+		if s.now().Sub(e.At) > Retention {
+			delete(s.index, id)
 		}
 	}
-	s.saveOwners()
+	s.compactIndex()
+	stores := s.stores()
 	exe := s.exe
 	s.mu.Unlock()
-	for uid := range uids {
-		_, _ = s.runAs(uid, exe, "__undo", "prune")
+	for st := range stores {
+		_, _ = s.runAs(st.uid, exe, "__undo", "prune", st.store)
 	}
 }
 
-// Cleanup (uninstall) deletes the saved copies of every user the service knows about.
+// Cleanup (uninstall) deletes the saved copies of every account the service knows about.
 func (s *Service) Cleanup(context.Context) error {
 	s.mu.Lock()
-	uids := map[int]bool{}
-	for _, o := range s.owners {
-		if uid, ok := callerUID(o.Caller); ok {
-			uids[uid] = true
-		}
-	}
+	stores := s.stores()
 	exe := s.exe
 	s.mu.Unlock()
 	var errs []error
-	for uid := range uids {
-		if _, err := s.runAs(uid, exe, "__undo", "purge"); err != nil && !errors.Is(err, ErrNoUser) {
+	for st := range stores {
+		if _, err := s.runAs(st.uid, exe, "__undo", "purge", st.store); err != nil && !errors.Is(err, ErrNoUser) {
 			errs = append(errs, err)
 		}
 	}
 	if s.stateDir != "" {
-		_ = os.Remove(s.ownersPath())
+		_ = os.Remove(s.indexPath())
+		_ = os.Remove(filepath.Join(s.stateDir, "undo-key"))
 	}
 	return errors.Join(errs...)
 }
