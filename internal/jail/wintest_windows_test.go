@@ -139,7 +139,6 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 	}
 
 	pol := NewPolicy()
-	pol.SetRules([]Rule{{Tool: claude, Site: "allowed.test", Mode: "ALLOW"}})
 	ask := &fakeAsker{res: Result{Reason: "denied"}}
 	pf := &winPlatform{
 		users:   func() []discovery.User { return []discovery.User{{Name: "sam", Home: home, UID: -1, GID: -1}} },
@@ -147,7 +146,8 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 	}
 	r := &runner{pf: pf, policy: pol, asker: ask, running: map[string]*toolProxy{},
 		resolve: func(context.Context, string) ([]netip.Addr, error) { return []netip.Addr{netip.MustParseAddr(ip)}, nil }}
-	cfg := &hostclient.Config{Status: "APPROVED", Jail: hostclient.JailConfig{Enabled: true, Windows: true, Tools: []string{claude, "host.codex-cli"}}}
+	cfg := &hostclient.Config{Status: "APPROVED", Jail: hostclient.JailConfig{Enabled: true, Windows: true, Tools: []string{claude, "host.codex-cli"},
+		Rules: []hostclient.JailRule{{ToolID: claude, Site: "allowed.test", Mode: "ALLOW"}}}}
 	r.reconcile(cfg)
 	defer r.stop()
 	if len(r.running) != 1 || r.running[claude] == nil {
@@ -162,9 +162,12 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 		}
 	}
 	// 2. the filters exist under the Manar sublayer
+	// loopback and block on each of two layers, plus one permit per DNS server on its layer
+	want := 4 + len(windowsResolvers())
+	t.Logf("DNS servers: %v", windowsResolvers())
 	n, err := wfpFilterCount()
-	if err != nil || n != 6 {
-		t.Fatalf("filters: %d %v", n, err)
+	if err != nil || n != want {
+		t.Fatalf("filters: %d (want %d) %v", n, want, err)
 	}
 	if d := wfpDump(t); !strings.Contains(d, "Manar JAIL") {
 		t.Fatal("netsh wfp does not show the Manar filters")
@@ -185,8 +188,16 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 		t.Fatalf("new host: %q (asked %d)", got, ask.calls.Load())
 	}
 	// 6. DNS is permitted for the tool (TCP 53 to the domain controller)
-	if got := run(t, claudeExe, "JAILWIN_HELPER=dial", "JAILWIN_ADDR=10.80.0.4:53"); got != "CONNECTED" {
-		t.Logf("DNS port (informational, depends on the machine): %q", got)
+	for _, ns := range windowsResolvers() {
+		if ns.Is4() {
+			if got := run(t, claudeExe, "JAILWIN_HELPER=dial", "JAILWIN_ADDR="+ns.String()+":53"); got != "CONNECTED" {
+				t.Errorf("the configured DNS server %s must stay reachable on port 53: %q", ns, got)
+			}
+		}
+	}
+	// port 53 of any other address is closed (no tunnel through DNS)
+	if got := run(t, claudeExe, "JAILWIN_HELPER=dial", "JAILWIN_ADDR=1.1.1.1:53"); !strings.HasPrefix(got, "BLOCKED") {
+		t.Errorf("port 53 of an arbitrary address was open: %q", got)
 	}
 	// 7. other programs are not affected
 	if got := direct(otherExe); got != "CONNECTED" {
@@ -195,14 +206,14 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 
 	// 8. a config poll with nothing changed does nothing; a flush of our filters is repaired
 	r.reconcile(cfg)
-	if n, _ := wfpFilterCount(); n != 6 {
+	if n, _ := wfpFilterCount(); n != want {
 		t.Fatalf("filters after a repeat: %d", n)
 	}
 	if err := wfpRemove(); err != nil {
 		t.Fatal(err)
 	}
 	r.reconcile(cfg)
-	if n, _ := wfpFilterCount(); n != 6 {
+	if n, _ := wfpFilterCount(); n != want {
 		t.Fatalf("filters not restored after removal: %d", n)
 	}
 
@@ -224,7 +235,7 @@ func TestWindowsFilterEndToEnd(t *testing.T) {
 	// 10. a crash leaves the filters; a fresh process (jail-restore, uninstall) removes them from
 	// the state on the machine
 	r.reconcile(cfg)
-	if n, _ := wfpFilterCount(); n != 6 {
+	if n, _ := wfpFilterCount(); n != want {
 		t.Fatalf("reinstall: %d", n)
 	}
 	r.mu.Lock()

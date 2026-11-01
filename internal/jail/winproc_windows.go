@@ -1,6 +1,7 @@
 package jail
 
 import (
+	"net/netip"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -30,6 +31,57 @@ func runningClaudeExes() []string {
 			out = append(out, windows.UTF16ToString(buf[:n]))
 		}
 		windows.CloseHandle(h)
+	}
+	return out
+}
+
+// windowsResolvers lists the DNS servers of the adapters that are up (what a program's own name
+// lookups go to). The site-local placeholders Windows lists for IPv6 (fec0:0:0:ffff::) are skipped.
+func windowsResolvers() []netip.Addr {
+	size := uint32(15000)
+	var buf []byte
+	for range 3 {
+		buf = make([]byte, size)
+		err := windows.GetAdaptersAddresses(windows.AF_UNSPEC, windows.GAA_FLAG_SKIP_ANYCAST|windows.GAA_FLAG_SKIP_MULTICAST|windows.GAA_FLAG_SKIP_FRIENDLY_NAME,
+			0, (*windows.IpAdapterAddresses)(unsafe.Pointer(&buf[0])), &size)
+		if err == nil {
+			break
+		}
+		if err != windows.ERROR_BUFFER_OVERFLOW {
+			return nil
+		}
+	}
+	var out []netip.Addr
+	seen := map[netip.Addr]bool{}
+	for aa := (*windows.IpAdapterAddresses)(unsafe.Pointer(&buf[0])); aa != nil; aa = aa.Next {
+		if aa.OperStatus != windows.IfOperStatusUp {
+			continue
+		}
+		for d := aa.FirstDnsServerAddress; d != nil; d = d.Next {
+			if d.Address.Sockaddr == nil {
+				continue
+			}
+			sa, err := (*windows.RawSockaddrAny)(unsafe.Pointer(d.Address.Sockaddr)).Sockaddr()
+			if err != nil {
+				continue
+			}
+			var a netip.Addr
+			switch v := sa.(type) {
+			case *windows.SockaddrInet4:
+				a = netip.AddrFrom4(v.Addr)
+			case *windows.SockaddrInet6:
+				a = netip.AddrFrom16(v.Addr)
+			default:
+				continue
+			}
+			if a.Is6() && a.As16()[0] == 0xfe && a.As16()[1]&0xc0 == 0xc0 { // fec0::/10
+				continue
+			}
+			if !seen[a] {
+				seen[a] = true
+				out = append(out, a)
+			}
+		}
 	}
 	return out
 }

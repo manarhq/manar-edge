@@ -7,7 +7,7 @@ On by default. Policy: **ask on new sites**. Spec: public launch design 4.4, bri
 | OS | Filtered | Not filtered |
 |---|---|---|
 | Linux | Claude Code, Codex CLI, Gemini CLI, Copilot CLI, and every process they start | Cursor, Windsurf, VS Code + Copilot, Claude desktop, ChatGPT desktop (their own backends need many hosts), and everything else you run |
-| Windows | nothing yet (`jail.windows` is off, see below) | everything |
+| Windows | Claude Code's native install (`claude.exe`) only, see Windows below | everything else |
 
 Only processes of those tools are touched. A process is the tool's when its name is the tool's
 (`claude`, `codex`, `gemini`, `copilot`) or it is `node`/`bun`/`deno` running the tool's script or
@@ -98,12 +98,48 @@ A new site opens a WARDEN approval (`kind` = tool id, action `site.connect`, res
   directly; it is not a sandbox. Tools are filtered by process name, so a renamed binary is not.
 - Names of a long Unicode look-alike or a very long subdomain are shown cut from the left.
 
-## Windows (off)
+## Windows
 
-`jail.windows` is false in `GET /host/v1/config` unless the API sets `MANAR_JAIL_WINDOWS=true`, and the
-device does nothing on Windows even then. A safe version needs, per tool: a proxy setting injected into the
-tool's own configuration (with backup), a per-program firewall block for its exe, and a test on a real
-desktop. None of that could be proven by the cut line, so no rule is installed.
+Scope: **Claude Code's native install (`claude.exe`) only.** Windows has no transparent redirect without a
+driver, so the tool is pointed at a local proxy through its own settings and Windows blocks everything else
+for its exe. That needs a tool whose own proxy setting is documented and whose exe is its own program:
+
+| Tool | Windows | Why |
+|---|---|---|
+| Claude Code, native install | filtered | `settings.json` `env` takes `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` (code.claude.com network-config: "All environment variables shown on this page can also be configured in settings.json") |
+| Claude Code through npm | not filtered | it runs as `node.exe`; blocking node would block every Node program |
+| Codex CLI, Gemini CLI, Copilot CLI | not filtered | no documented setting for the tool's own proxy (checked in their docs) |
+| Cursor, Windsurf, VS Code, desktop apps | not filtered | as on Linux |
+
+What is installed, per account that has a native `claude.exe` (`~\.local\bin\claude.exe`,
+`~\.local\share\claude\versions\*`, or a running `claude.exe` under the profile):
+
+1. The proxy variables in `~\.claude\settings.json` `env` (`HTTPS_PROXY=HTTP_PROXY=http://127.0.0.1:8491`,
+   `NO_PROXY=localhost,127.0.0.1`), backed up through the same store as the other tools' edits; the original
+   comes back byte for byte, or, if you changed the file since, only these variables are taken out.
+   A settings file that cannot be edited safely (not JSON, a link, unreadable) leaves that account alone:
+   nothing is blocked for it.
+2. A CONNECT proxy on `127.0.0.1:8491`. It sees the host name and port of each tunnel; the TLS inside stays
+   between the tool and the site. The policy is the same as on Linux (built-in list, remembered rules, ask).
+3. Windows Filtering Platform filters at the ALE connect layers (IPv4 and IPv6) under the provider
+   "Manar JAIL" and sublayer "Manar JAIL egress", matched by application id: **permit** loopback, **permit**
+   port 53 of the DNS servers the machine is configured with, **block** everything else. They are not
+   persistent across a reboot (the service starts at boot and puts them back); a service that died leaves
+   them, so the tool stays blocked (fail closed) until the service is back or `manar-edge jail-restore` runs.
+
+The block is installed only after the proxy has answered a **fresh HMAC challenge**: a random per-process
+key signs a nonce, so a program that took the port while the service was down cannot pass for the proxy,
+and nothing is blocked behind it. `jail-restore`, `service remove` and `uninstall` delete the filters of the
+sublayer, then the sublayer and provider, and then restore the settings, in that order.
+
+Residual exposure: the port is fixed because the settings file names it. While the service is down and the
+filters are not (or after a reboot before the service starts) another program could bind `127.0.0.1:8491`
+and receive Claude Code's CONNECT requests. It would see host names and ports and could refuse them; it could
+not read the TLS traffic. A running Claude Code started before the setting was written keeps its old
+environment: restart it. Children Claude Code starts inherit the proxy variables and use the proxy if they
+honour them; they are not blocked.
+
+Switch: the API sends `jail.windows`; `MANAR_JAIL_WINDOWS` (see the API's `docs/jail.md`).
 
 ## Test
 
@@ -114,3 +150,9 @@ network namespace; the host's cgroup tree):
 - the same user's other programs, and root's, are not filtered and the proxy never sees their traffic;
 - a crash-style `Teardown()` from a fresh process removes the table and cgroups and puts processes back;
 - the exec-event watcher sees a process start (needs the host network and pid namespaces).
+
+`scripts/test-jail-windows.md` is not a script: the Windows test (`go test -tags jailwin`) installs real
+filters for a copy of the test binary named `claude.exe` in a throwaway profile, so it must run on a Windows
+machine as administrator or SYSTEM; it checks the direct connect is blocked, an allowed host works through
+the proxy, a new host asks, other programs are unaffected, a dead service leaves the tool blocked, a fresh
+process restores everything, and an impostor on the port blocks nothing.

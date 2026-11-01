@@ -20,7 +20,7 @@ import (
 // at the ALE connect layers (IPv4 and IPv6):
 //
 //	permit  remote address is loopback   (the proxy, DOOR, local MCP servers)
-//	permit  remote port is 53            (DNS: the tool resolves its own names)
+//	permit  remote port 53 of a DNS server the machine is configured with (not any address)
 //	block   everything else
 const (
 	wfpProviderName = "Manar JAIL"
@@ -36,7 +36,7 @@ var (
 
 // wfpInstall replaces JAIL's filters with the set for exes. Executables that do not exist are
 // skipped (WFP cannot name them) and reported in the error only if none could be used.
-func wfpInstall(exes []string) error {
+func wfpInstall(exes []string, resolvers []netip.Addr) error {
 	s, err := wf.New(&wf.Options{Name: wfpProviderName, Description: "Manar JAIL session"})
 	if err != nil {
 		return fmt.Errorf("opening the filtering engine: %w", err)
@@ -60,7 +60,7 @@ func wfpInstall(exes []string) error {
 			skipped = append(skipped, fmt.Sprintf("%s: %v", exe, err))
 			continue
 		}
-		if err := addExe(s, exe, app); err != nil {
+		if err := addExe(s, exe, app, resolvers); err != nil {
 			removeAll(s)
 			return err
 		}
@@ -73,7 +73,7 @@ func wfpInstall(exes []string) error {
 	return nil
 }
 
-func addExe(s *wf.Session, exe, app string) error {
+func addExe(s *wf.Session, exe, app string, resolvers []netip.Addr) error {
 	name := filepath.Base(exe)
 	appCond := &wf.Match{Field: wf.FieldALEAppID, Op: wf.MatchTypeEqual, Value: app}
 	for _, v6 := range []bool{false, true} {
@@ -88,8 +88,20 @@ func addExe(s *wf.Session, exe, app string) error {
 			conds  []*wf.Match
 		}{
 			{"permit loopback", wf.ActionPermit, weightPermit, []*wf.Match{appCond, {Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: loop}}},
-			{"permit DNS", wf.ActionPermit, weightPermit, []*wf.Match{appCond, {Field: wf.FieldIPRemotePort, Op: wf.MatchTypeEqual, Value: uint16(53)}}},
 			{"block", wf.ActionBlock, weightBlock, []*wf.Match{appCond}},
+		}
+		for _, ns := range resolvers {
+			if ns.Is6() != v6 {
+				continue
+			}
+			rules = append(rules, struct {
+				what   string
+				act    wf.Action
+				weight uint64
+				conds  []*wf.Match
+			}{"permit DNS " + ns.String(), wf.ActionPermit, weightPermit, []*wf.Match{appCond,
+				{Field: wf.FieldIPRemotePort, Op: wf.MatchTypeEqual, Value: uint16(53)},
+				{Field: wf.FieldIPRemoteAddress, Op: wf.MatchTypeEqual, Value: ns}}})
 		}
 		for _, r := range rules {
 			id, err := windows.GenerateGUID()

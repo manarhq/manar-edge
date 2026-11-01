@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"slices"
@@ -58,8 +59,9 @@ type winPlatform struct {
 	last string // what is installed, to do nothing when nothing changed
 
 	// users and running are the real accounts and processes unless a test supplies its own.
-	users   func() []discovery.User
-	running func() []string
+	users     func() []discovery.User
+	running   func() []string
+	resolvers func() []netip.Addr
 }
 
 func (w *winPlatform) accounts() []discovery.User {
@@ -67,6 +69,13 @@ func (w *winPlatform) accounts() []discovery.User {
 		return w.users()
 	}
 	return discovery.Users()
+}
+
+func (w *winPlatform) dns() []netip.Addr {
+	if w.resolvers != nil {
+		return w.resolvers()
+	}
+	return windowsResolvers()
 }
 
 func (w *winPlatform) claudeProcs() []string {
@@ -122,7 +131,8 @@ func (w *winPlatform) Apply(ports map[string]int) error {
 		}
 	}
 	slices.Sort(exes)
-	key := fmt.Sprint(port, exes)
+	resolvers := w.dns()
+	key := fmt.Sprint(port, exes, resolvers)
 	if n, err := wfpFilterCount(); err == nil && n > 0 && key == w.last {
 		return nil
 	}
@@ -130,7 +140,7 @@ func (w *winPlatform) Apply(ports map[string]int) error {
 		w.last = ""
 		return wfpRemove()
 	}
-	if err := wfpInstall(exes); err != nil {
+	if err := wfpInstall(exes, resolvers); err != nil {
 		_ = w.teardown()
 		w.last = ""
 		return err
