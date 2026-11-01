@@ -15,6 +15,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf16"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/protect"
 )
 
 const (
@@ -233,6 +235,9 @@ func cmdHook(args []string) (code int) {
 		deadline: hookBudget,
 	}
 	allow, reason = h.decide(context.Background(), raw)
+	if allow {
+		protect.SnapshotBeforeEdit("claude-code", raw)
+	}
 	return
 }
 

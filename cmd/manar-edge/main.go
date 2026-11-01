@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/protect"
+	"gitlab.vax.sh/manar/manar-edge/internal/undo"
 )
 
 var version = "dev"
@@ -29,6 +30,7 @@ const usage = `usage:
   manar-edge hook-tool <tool> <event>   (internal: the hook installed in Cursor, Gemini CLI and the others)
   manar-edge mcp-wrap <tool> <server> -- <command> [args...]   (internal: asks Manar before each MCP tool call)
   manar-edge warden [windows-ui on|off]   (per-user prompt helper, started at logon)
+  manar-edge undo list|restore <id>   (put back a file an AI tool changed outside its project folder)
   manar-edge version
 
 Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`
@@ -46,6 +48,7 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 	protect.Configure(base)
+	undo.Configure(base, exeForHelpers())
 	protect.ClaudeSettingsPath = managedSettingsPath
 	var err error
 	switch cmd {
@@ -89,6 +92,10 @@ func main() {
 		os.Exit(cmdHookTool(rest))
 	case "__userfs": // internal: runs as a user's own uid to touch that user's files (Linux service)
 		os.Exit(protect.ServeUserFS(os.Stdin, os.Stdout))
+	case "__undo": // internal: runs as the snapshot owner (Linux service)
+		os.Exit(undo.Helper(rest, os.Stdout))
+	case "undo":
+		err = undo.Command(rest, os.Stdout)
 	case "mcp-wrap":
 		os.Exit(cmdMCPWrap(rest))
 	case "protect":
@@ -191,4 +198,12 @@ func setEnv(env []string, kvs ...string) []string {
 		}
 	}
 	return append(out, kvs...)
+}
+
+// exeForHelpers is the running binary, which the device service starts for per-user helpers.
+func exeForHelpers() string {
+	if p, err := os.Executable(); err == nil {
+		return p
+	}
+	return "manar-edge"
 }
