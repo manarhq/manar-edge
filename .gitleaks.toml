@@ -1,0 +1,14 @@
+# Default rules plus an allow-list for fake values used in tests (detector fixtures). Values only,
+# never paths, so a real secret in a test file is still caught.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake credentials in test fixtures"
+regexTarget = "secret"
+regexes = [
+  '''^tok-123456789$''',
+  '''^a1B2c3D4e5F6$''',
+  '''^zZ9yY8xX7wW6$''',
+  '''^Xk9#mQ2vLp8zR$''',
+]

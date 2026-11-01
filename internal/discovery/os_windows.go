@@ -40,6 +40,7 @@ func processNames() []string {
 	if sys == "" {
 		sys = `C:\Windows`
 	}
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (fixed System32 path)
 	b, err := exec.CommandContext(ctx, filepath.Join(sys, "System32", "tasklist.exe"), "/fo", "csv", "/nh").Output()
 	if err != nil {
 		return nil

@@ -1,0 +1,170 @@
+package vault
+
+import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
+	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
+)
+
+// featureSSH turns the ssh half of the vault on for a device. It is off unless Manar sets it:
+// moving a private key out of its file needs the OS agent to be proven on that computer first.
+const featureSSH = "secrets.vault.ssh"
+
+func init() { daemon.Register(&Module{}) }
+
+// New builds the vault for this computer.
+func New() *Vault {
+	exe, _ := os.Executable()
+	v := &Vault{Store: FileStore{Dir: filepath.Join(host.StateDir(), "vault")}, Exe: exe, Homes: host.Homes}
+	v.Agent = platformAgent()
+	return v
+}
+
+// RestoreAll is what `manar-edge uninstall` calls first. A failure means: do not remove Manar.
+func RestoreAll() error { return New().RestoreAll() }
+
+// Module is the vault as a daemon module: it carries out the console's store and restore
+// instructions and answers the credential_process helper.
+type Module struct{}
+
+func (*Module) Name() string { return "secrets-vault" }
+
+// Cleanup restores every vaulted secret (uninstall also calls RestoreAll before anything else).
+func (*Module) Cleanup(context.Context) error { return RestoreAll() }
+
+// Approver is replaced by the WARDEN prompt when it exists (Broker.A); until then the person
+// answers in the console.
+var NewApprover func(c *hostclient.Client) Approver = func(c *hostclient.Client) Approver { return consoleApprover{c} }
+
+func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
+	v := New()
+	ensureAgent()
+	b := &Broker{V: v, A: NewApprover(c), OnDenied: func(r Request) {
+		sendEvent(ctx, c, "secret.vault.denied", filepath.Base(r.Program), r)
+	}}
+	env := Env{Identify: Identify, RestoreAll: func() error {
+		quiesced.Store(true) // no new secrets move in while they are being put back
+		return v.RestoreAll()
+	}}
+	errc := make(chan error, 1)
+	go func() { errc <- Serve(ctx, b, env) }()
+	t := time.NewTicker(20 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-errc:
+			return err
+		case <-t.C:
+			runInstructions(ctx, c, v)
+		}
+	}
+}
+
+type instruction struct {
+	Kind   string `json:"kind"`
+	Ref    string `json:"ref"`
+	Action string `json:"action"`
+}
+
+// quiesced is set when uninstall starts: the module takes no more store instructions.
+var quiesced atomic.Bool
+
+func runInstructions(ctx context.Context, c *hostclient.Client, v *Vault) {
+	if quiesced.Load() {
+		return
+	}
+	var in struct {
+		Vault []instruction `json:"vault"`
+	}
+	if err := c.Do(ctx, http.MethodGet, "/secrets/instructions", nil, &in); err != nil {
+		return
+	}
+	var features []string
+	if cfg, err := c.Config(ctx); err == nil {
+		features = cfg.Features
+	}
+	for _, i := range in.Vault {
+		state, detail := "FAILED", ""
+		var err error
+		switch {
+		case i.Kind == "ssh" && !slices.Contains(features, featureSSH):
+			err = errors.New("protecting ssh keys is turned off on this device")
+		case i.Action == "store" && i.Kind == "aws":
+			_, err = v.StoreAWS(i.Ref)
+		case i.Action == "store" && i.Kind == "ssh":
+			_, err = v.StoreSSH(i.Ref)
+		case i.Action == "restore" && i.Kind == "aws":
+			err = v.RestoreAWS(i.Ref)
+		case i.Action == "restore" && i.Kind == "ssh":
+			err = v.RestoreSSH(i.Ref)
+		default:
+			err = errors.New("unknown instruction")
+		}
+		switch {
+		case err == nil && i.Action == "store", errors.Is(err, ErrExists):
+			state = "STORED"
+		case err == nil:
+			state = "RESTORED"
+		default:
+			detail = err.Error()
+			if len(detail) > 280 {
+				detail = detail[:280]
+			}
+			log.Printf("manar-edge: vault %s %s %s: %v", i.Action, i.Kind, i.Ref, err)
+		}
+		// The detail never carries a secret: errors above name files and steps only.
+		_ = c.Do(ctx, http.MethodPost, "/secrets/vault/report",
+			map[string]string{"kind": i.Kind, "ref": i.Ref, "state": state, "detail": detail}, nil)
+	}
+}
+
+func sendEvent(ctx context.Context, c *hostclient.Client, typ, process string, r Request) {
+	ev := map[string]any{"type": typ, "process": process, "pathClass": r.Kind, "maskedPath": r.Ref, "blocked": true, "at": time.Now().UTC()}
+	if err := c.Do(ctx, http.MethodPost, "/events", map[string]any{"events": []any{ev}}, nil); err != nil {
+		log.Printf("manar-edge: vault event: %v", err)
+	}
+}
+
+// consoleApprover asks in the console: it opens a request and waits for the person.
+type consoleApprover struct{ c *hostclient.Client }
+
+func (a consoleApprover) Ask(ctx context.Context, r Request) (Decision, error) {
+	var created struct{ ID string }
+	// The console sees the full path (home masked) and the hash of the binary, not just a name.
+	body := map[string]string{"kind": r.Kind, "ref": r.Ref, "program": filepath.Base(r.Program),
+		"programPath": host.MaskPath(host.Homes(), r.Program), "programSha": r.SHA}
+	if r.Program == "" {
+		body["program"], body["programPath"], body["programSha"] = "unknown program", "unknown", strings.Repeat("0", 64)
+	}
+	if err := a.c.Do(ctx, http.MethodPost, "/secrets/access", body, &created); err != nil {
+		return Deny, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	t := time.NewTicker(2 * time.Second)
+	defer t.Stop()
+	for {
+		var st struct{ Status string }
+		if err := a.c.Do(ctx, http.MethodGet, "/secrets/access/"+created.ID, nil, &st); err == nil && st.Status != "PENDING" {
+			return Decision(st.Status), nil
+		}
+		select {
+		case <-ctx.Done():
+			return Deny, ctx.Err()
+		case <-t.C:
+		}
+	}
+}
