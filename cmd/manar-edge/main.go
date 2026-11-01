@@ -39,6 +39,7 @@ const usage = `usage:
   manar-edge mcp-wrap <tool> <server> -- <command> [args...]   (internal: asks Manar before each MCP tool call)
   manar-edge warden [windows-ui on|off]   (per-user prompt helper, started at logon)
   manar-edge undo list|restore <id>   (put back a file an AI tool changed outside its project folder)
+  manar-edge jail-restore   (internal: give the protected tools their network back)
   manar-edge version
 
 Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`
@@ -77,6 +78,8 @@ func main() {
 		err = cmdUninstall(base, os.Stdout)
 	case "service":
 		err = cmdService(base, rest)
+	case "jail-restore":
+		err = jailRestore(os.Stdout)
 	case "warden":
 		err = cmdWarden(base, rest)
 	case "secret":

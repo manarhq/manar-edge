@@ -276,6 +276,8 @@ type Config struct {
 	// Door is the owner's DOOR (local LLM gateway) setup: secrets guard mode and tools paused by
 	// the monthly spend cap. Nil from an API that does not send it.
 	Door *DoorSettings `json:"door,omitempty"`
+	// Jail is the egress filter for protected AI tools (jail track).
+	Jail JailConfig `json:"jail"`
 }
 
 // DoorSettings is the "door" part of GET /host/v1/config.
@@ -284,6 +286,25 @@ type DoorSettings struct {
 	Paused  []string `json:"paused"`  // providers (anthropic, openai, gemini) a monthly cap paused
 	// Unavailable is set by the API when it could not work the settings out: keep the last ones.
 	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// JailConfig is the "jail" part of GET /host/v1/config.
+type JailConfig struct {
+	Enabled bool `json:"enabled"`
+	// Windows is the separate switch for Windows (off until proven on a real desktop).
+	Windows bool `json:"windows"`
+	// Tools are the tool ids to filter on this device.
+	Tools []string `json:"tools"`
+	// Rules are the remembered per-site decisions.
+	Rules []JailRule `json:"rules"`
+}
+
+// JailRule is one remembered decision: a site an owner allowed or blocked for one tool.
+type JailRule struct {
+	ToolID    string     `json:"toolId"`
+	Site      string     `json:"site"`
+	Mode      string     `json:"mode"` // ALLOW or DENY
+	ExpiresAt *time.Time `json:"expiresAt"`
 }
 
 // ToolInstructions is the "tools" part of GET /host/v1/config.

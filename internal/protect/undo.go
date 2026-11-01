@@ -15,6 +15,8 @@ func undoFor(kind string) Edit {
 		return jsonObject(undoJSON)
 	case KindCodexTOML:
 		return undoCodexTOML
+	case KindJSONEnv:
+		return jsonObject(undoJSONEnv)
 	}
 	return func([]byte, bool) ([]byte, error) { return nil, fmt.Errorf("unknown kind %q", kind) }
 }

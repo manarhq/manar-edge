@@ -507,3 +507,66 @@ func TestNoCodexRouteOnWindows(t *testing.T) {
 		}
 	}
 }
+
+func TestJailEnvEditKeepsOtherSettingsAndRestoresThem(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	path := filepath.Join(home, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orig := `{"model":"opus","env":{"FOO":"bar"}}`
+	if err := os.WriteFile(path, []byte(orig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	st := NewStore(filepath.Join(dir, "state"))
+	vars := map[string]string{"HTTPS_PROXY": "http://127.0.0.1:8491", "HTTP_PROXY": "http://127.0.0.1:8491", "NO_PROXY": JailNoProxy}
+	out, err := st.Apply("jail-claude-code", "sam", Owner{UID: -1, GID: -1, Home: home}, []FileEdit{JailEnvEdit(path, vars)})
+	if err != nil || len(out) != 1 || !out[0].Changed {
+		t.Fatalf("%+v %v", out, err)
+	}
+	b, _ := os.ReadFile(path)
+	for _, want := range []string{`"HTTPS_PROXY": "http://127.0.0.1:8491"`, `"FOO": "bar"`, `"model": "opus"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("missing %s in %s", want, b)
+		}
+	}
+	// untouched file: restored byte for byte
+	if err := st.Restore("jail-claude-code", "sam"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != orig {
+		t.Fatalf("not restored: %s", b)
+	}
+
+	// the user changed the file after protection: only our variables go, their change stays
+	if _, err := st.Apply("jail-claude-code", "sam", Owner{UID: -1, GID: -1, Home: home}, []FileEdit{JailEnvEdit(path, vars)}); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	changed := strings.Replace(string(b), `"model": "opus"`, `"model": "sonnet"`, 1)
+	if err := os.WriteFile(path, []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Restore("jail-claude-code", "sam"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(path)
+	if strings.Contains(string(b), "PROXY") || !strings.Contains(string(b), "sonnet") || !strings.Contains(string(b), `"FOO": "bar"`) {
+		t.Fatalf("bad reverse: %s", b)
+	}
+
+	// a proxy the user set themselves is not ours
+	own := `{"env":{"HTTPS_PROXY":"http://corp:3128"}}`
+	os.WriteFile(path, []byte(own), 0o644)
+	if _, err := st.Apply("jail-claude-code", "sam", Owner{UID: -1, GID: -1, Home: home}, []FileEdit{JailEnvEdit(path, vars)}); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(path, []byte(`{"env":{"HTTPS_PROXY":"http://corp:3128","X":"1"}}`), 0o644)
+	if err := st.Restore("jail-claude-code", "sam"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "corp:3128") {
+		t.Fatalf("user proxy lost: %s", b)
+	}
+}

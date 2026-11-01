@@ -84,10 +84,23 @@ func clip(s string, n int) string {
 	return string(r[:n-1]) + "…"
 }
 
+func clipLeft(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return "…" + string(r[len(r)-n+1:])
+}
+
 // Render builds the prompt text. The resource is clipped; Arabic puts the tool name and the
 // resource in their own isolates so a path keeps its direction inside right-to-left text.
 func Render(p Prompt, lang Lang) Text {
 	res := Display(p.Resource, 120)
+	if p.ActionID == "site.connect" {
+		// A long name is cut from the left, so the part that says whose site it is stays visible:
+		// "…evil.example", never "paypal.com.login.ver…".
+		res = clipLeft(Display(p.Resource, 1<<16), 60)
+	}
 	name := Display(ToolName(p.ToolID), 40)
 	t := Text{}
 	if lang == AR {
@@ -120,6 +133,8 @@ func englishVerb(p Prompt) string {
 	switch {
 	case p.ActionID == "secret.use":
 		return "use the secret"
+	case p.ActionID == "site.connect":
+		return "connect to"
 	case strings.HasPrefix(p.ActionID, "file.read"):
 		return "read"
 	case strings.HasPrefix(p.ActionID, "file.write"), strings.HasPrefix(p.ActionID, "file.delete"):
@@ -134,6 +149,8 @@ func arabicVerb(p Prompt) string {
 	switch {
 	case p.ActionID == "secret.use":
 		return "استخدام السر"
+	case p.ActionID == "site.connect":
+		return "الاتصال بـ"
 	case strings.HasPrefix(p.ActionID, "file.read"):
 		return "قراءة"
 	case strings.HasPrefix(p.ActionID, "file.write"), strings.HasPrefix(p.ActionID, "file.delete"):
