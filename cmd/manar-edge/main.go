@@ -14,6 +14,9 @@ var version = "dev"
 const usage = `usage:
   manar-edge enroll --api <url> [--state-dir D]   (token on stdin or in MANAR_ENROLL_TOKEN)
   manar-edge enrol --server <url> --tenant <slug> [--machine-id ID]   (Windows, domain-joined: computer certificate)
+  manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL]   (personal device: enrol and install the service)
+  manar-edge uninstall   (stop the service, restore what Manar changed, remove its files)
+  manar-edge service run|install|remove
   manar-edge up <agent> [--task <taskId>]` + upUsageExtra + `
   manar-edge down <agent> [--purge]
   manar-edge run <agent> [--task <taskId>] -- <command> [args...]
@@ -47,6 +50,12 @@ func main() {
 		err = cmdEnroll(rest)
 	case "enrol":
 		err = cmdEnrolHost(base, rest)
+	case "install":
+		err = cmdInstall(base, rest, os.Stdout)
+	case "uninstall":
+		err = cmdUninstall(base, os.Stdout)
+	case "service":
+		err = cmdService(base, rest)
 	case "up":
 		err = cmdUp(base, rest)
 	case "down":
