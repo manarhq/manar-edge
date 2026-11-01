@@ -35,7 +35,9 @@ type Vault struct {
 	Store Store
 	// Exe is the path written into credential_process.
 	Exe   string
-	Agent Agent // ssh; nil where unsupported
+	Agent Agent // ssh (Windows OpenSSH agent); nil where unsupported
+	// Keys is Manar's own ssh agent keyring (Linux). When set, ssh keys go there, not to Agent.
+	Keys  *Keyring
 	Homes func() []string
 }
 
