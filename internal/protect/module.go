@@ -15,6 +15,7 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
+	"gitlab.vax.sh/manar/manar-edge/internal/door"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
 )
 
@@ -60,15 +61,9 @@ func logOnce(msg string) {
 	}
 }
 
-func gatewayUp() bool {
-	c := &http.Client{Timeout: time.Second}
-	res, err := c.Get(GatewayURL + "/healthz")
-	if err != nil {
-		return false
-	}
-	res.Body.Close()
-	return res.StatusCode == 200
-}
+// gatewayUp is true only when DOOR itself answers a fresh challenge on GatewayURL: another program
+// that grabbed the port cannot, so a tool is never routed to it.
+func gatewayUp() bool { return door.Healthy(GatewayURL) }
 
 // reconcile protects what was found for every account that uses it, undoes it for tools the
 // owner switched off, and returns the resulting state. Nothing is changed until the owner has

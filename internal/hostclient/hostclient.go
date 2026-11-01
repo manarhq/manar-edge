@@ -266,6 +266,15 @@ type Config struct {
 	// Tools carries the owner's per-tool choices (coverage track): Unprotect lists tool ids
 	// whose protection the owner turned off; the device restores their backups.
 	Tools ToolInstructions `json:"tools"`
+	// Door is the owner's DOOR (local LLM gateway) setup: secrets guard mode and tools paused by
+	// the monthly spend cap. Nil from an API that does not send it.
+	Door *DoorSettings `json:"door,omitempty"`
+}
+
+// DoorSettings is the "door" part of GET /host/v1/config.
+type DoorSettings struct {
+	Secrets string   `json:"secrets"` // "mask" (default) or "block"
+	Paused  []string `json:"paused"`  // tool ids the monthly cap paused
 }
 
 // ToolInstructions is the "tools" part of GET /host/v1/config.
