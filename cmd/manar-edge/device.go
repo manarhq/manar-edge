@@ -18,6 +18,7 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/warden"
 )
 
 // The one-liner path for personal devices (manar-api GET /i/<code>): `install --code` enrols
@@ -81,6 +82,9 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	if err := deviceServiceInstall(exe, base); err != nil {
 		return fmt.Errorf("installing the service: %w", err)
 	}
+	if err := warden.Install(base, exe); err != nil {
+		fmt.Fprintf(out, "warning: WARDEN prompts are not set up (approve in the console): %v\n", err)
+	}
 	fmt.Fprintf(out, "Installed the Manar device service and started it (host %s).\n", info.HostID)
 	printCoverage(out)
 	fmt.Fprintln(out, "Done, approve it in the console.")
@@ -93,6 +97,7 @@ type uninstallSteps struct {
 	cleanup       func(ctx context.Context) []error
 	agents        func() []string // every enrolled agent's name
 	down          func(agent string) error
+	warden        func() error // WARDEN helper autostart and its files
 	claudeCode    func() error
 	removeHost    func() error
 	removeBinary  func() error
@@ -112,6 +117,9 @@ func runUninstall(ctx context.Context, st uninstallSteps, out io.Writer) []error
 	note("removing the service", st.removeService())
 	for _, err := range st.cleanup(ctx) {
 		note("restore step", err)
+	}
+	if st.warden != nil {
+		note("removing WARDEN", st.warden())
 	}
 	for _, agent := range st.agents() {
 		note("taking down agent "+agent, st.down(agent))
@@ -147,6 +155,7 @@ func cmdUninstall(base string, out io.Writer) error {
 			return names
 		},
 		down:       func(agent string) error { return cmdDown(base, agent, true) },
+		warden:     func() error { return warden.Remove(base) },
 		claudeCode: uninstallClaudeCode,
 		removeHost: func() error { return os.RemoveAll(hostclient.Dir(base)) },
 		removeBinary: func() error {
@@ -207,6 +216,7 @@ func serveDevice(ctx context.Context, base string) error {
 	if err != nil {
 		return err
 	}
+	warden.SetStateDir(base)
 	return daemon.Run(ctx, c)
 }
 
