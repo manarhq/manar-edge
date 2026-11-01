@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -106,7 +107,7 @@ func (r *runner) reconcile(cfg *hostclient.Config) {
 	// than locked out of the sites its tools need.
 	if cfg.Status == "APPROVED" && j.Enabled && (runtime.GOOS != "windows" || j.Windows) {
 		for _, t := range j.Tools {
-			if known(t) {
+			if known(t) && (runtime.GOOS != "windows" || slices.Contains(WindowsTools(), t)) {
 				want[t] = true
 			}
 		}

@@ -153,6 +153,11 @@ func (p *Proxy) connect(ctx context.Context, host string, dst netip.AddrPort, ki
 		dial = d.DialContext
 	}
 	if a, err := netip.ParseAddr(host); err == nil {
+		// The proxy may run with more rights than the tool (root, SYSTEM): it never connects on
+		// the tool's behalf to this computer's own services or the metadata address.
+		if a = a.Unmap(); a.IsLoopback() || a.IsLinkLocalUnicast() || a.IsUnspecified() || a.IsMulticast() {
+			return nil, fmt.Errorf("refused: %s is a local address", a)
+		}
 		return dial(ctx, "tcp", netip.AddrPortFrom(a, dst.Port()).String())
 	}
 	resolve := p.Resolve
