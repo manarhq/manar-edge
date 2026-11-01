@@ -20,11 +20,15 @@ type fakeAPI struct {
 	mu      sync.Mutex
 	batches []batch
 	fail    bool
+	err     error
 }
 
 func (f *fakeAPI) Do(_ context.Context, _, path string, in, _ any) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
 	if f.fail || path != "/ai-usage" {
 		return io.ErrUnexpectedEOF
 	}
@@ -215,5 +219,24 @@ func TestCachedSettingsApplyOfflineAndFetchErrorsNeverRelax(t *testing.T) {
 	d3.refresh(context.Background(), h)
 	if d3.loaded.Load() {
 		t.Fatal("a fetch error opened the gateway")
+	}
+}
+
+func TestModelNamesAreCleanedAndRefusedBatchesDropped(t *testing.T) {
+	if got := cleanModel("models/gemini 2.5;x"); got != "models/gemini_2.5_x" {
+		t.Fatal(got)
+	}
+	r := newRecorder()
+	r.usage("host.codex-cli", "openai", usage{Model: "gpt-5", In: 1})
+	api := &fakeAPI{}
+	api.err = &hostclient.StatusError{Code: 400, Message: "bad"}
+	if r.flush(context.Background(), api) == nil || r.pending != nil {
+		t.Fatal("a refused batch must be dropped, not resent forever")
+	}
+	r.usage("host.codex-cli", "openai", usage{Model: "gpt-5", In: 1})
+	api.err = &hostclient.StatusError{Code: 429, Message: "slow down"}
+	_ = r.flush(context.Background(), api)
+	if r.pending == nil {
+		t.Fatal("a rate-limited batch must be kept")
 	}
 }

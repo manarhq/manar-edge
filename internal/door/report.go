@@ -4,8 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"net/http"
+	"strings"
 	"sync"
+
+	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
 )
 
 type ukey struct{ tool, provider, model string }
@@ -41,6 +45,23 @@ type guardItem struct {
 	Sample string `json:"sample"`
 }
 
+// cleanModel keeps what the API accepts for a model name: letters, digits and . _ : / -, at most 100.
+func cleanModel(m string) string {
+	b := []byte(m)
+	if len(b) > 100 {
+		b = b[:100]
+	}
+	for i, c := range b {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("._:/-", c) >= 0) {
+			b[i] = '_'
+		}
+	}
+	if len(b) == 0 {
+		return "unknown"
+	}
+	return string(b)
+}
+
 // recorder sums usage in memory and hands it to the API in batches.
 // ponytail: a crash loses up to one flush interval of counts; persist to disk if that matters.
 type recorder struct {
@@ -62,9 +83,7 @@ func (r *recorder) usage(tool, provider string, u usage) {
 	if model == "" {
 		model = "unknown"
 	}
-	if len(model) > 100 {
-		model = model[:100]
-	}
+	model = cleanModel(model)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	k := ukey{tool, provider, model}
@@ -132,7 +151,14 @@ func (r *recorder) flush(ctx context.Context, s sender) error {
 	if b == nil {
 		return nil
 	}
-	if err := s.Do(ctx, http.MethodPost, "/ai-usage", b, nil); err != nil {
+	err := s.Do(ctx, http.MethodPost, "/ai-usage", b, nil)
+	var se *hostclient.StatusError
+	if errors.As(err, &se) && se.Code >= 400 && se.Code < 500 && se.Code != 429 {
+		// The API refused this report for good (not approved, out of bounds): resending cannot help.
+		r.acked(b)
+		return err
+	}
+	if err != nil {
 		return err
 	}
 	r.acked(b)
