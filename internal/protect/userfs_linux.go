@@ -72,6 +72,7 @@ func (a asUserFS) do(req fsReq) (fsResp, error) {
 	in, _ := json.Marshal(req)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (re-exec of this binary)
 	cmd := exec.CommandContext(ctx, a.Exe, "__userfs")
 	cmd.Dir = "/"
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}

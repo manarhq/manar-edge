@@ -21,6 +21,7 @@ func RunMCPWrap(key, server string, argv []string, in io.Reader, out, errw io.Wr
 	if len(argv) == 0 {
 		return 2
 	}
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (the MCP server command from the tool's own config, which this wrapper exists to run)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = errw
 	childIn, err := cmd.StdinPipe()
@@ -57,6 +58,7 @@ func RunMCPWrap(key, server string, argv []string, in io.Reader, out, errw io.Wr
 	send := func(b []byte) {
 		inMu.Lock()
 		defer inMu.Unlock()
+		// nosemgrep: go.lang.security.audit.dangerous-command-write.dangerous-command-write (relays the MCP client's messages to the server it launched)
 		childIn.Write(append(bytes.TrimRight(b, "\n"), '\n'))
 	}
 	var wg sync.WaitGroup

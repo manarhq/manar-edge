@@ -68,6 +68,7 @@ func execRunner(ctx context.Context) Runner {
 	return func(name string, args ...string) ([]byte, error) {
 		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
+		// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (callers pass fixed program names (wevtutil, auditpol))
 		return exec.CommandContext(cctx, name, args...).CombinedOutput()
 	}
 }

@@ -145,6 +145,7 @@ func wrap(e *Entry, err error) error {
 type ExecAgent struct{ Sock string }
 
 func (a ExecAgent) run(name string, args ...string) (string, error) {
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (callers pass ssh-add or ssh-keygen)
 	cmd := exec.Command(name, args...)
 	cmd.Env = os.Environ()
 	if a.Sock != "" {
