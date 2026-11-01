@@ -43,9 +43,11 @@ func connect(t *testing.T, l fakeListener, uid uint32) net.Conn {
 	return client
 }
 
+// Set once: brokers from earlier cases still read it from their goroutines.
+func init() { writeTimeout = 100 * time.Millisecond }
+
 func serve(t *testing.T, check PeerCheck) (*Broker, fakeListener) {
 	t.Helper()
-	writeTimeout = 100 * time.Millisecond
 	b := NewBroker(check)
 	l := fakeListener{ch: make(chan net.Conn)}
 	go b.Serve(l)
