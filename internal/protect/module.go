@@ -16,6 +16,7 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
 
 // GatewayURL is the local LLM gateway base URL; set by the command package.
@@ -37,6 +38,14 @@ func Configure(dir string) {
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
 	stateDir, store = dir, NewStore(dir)
+}
+
+// isPaused is "Pause all AI" on this device (a var so tests can set it).
+var isPaused = func() bool {
+	cfgMu.Lock()
+	d := stateDir
+	cfgMu.Unlock()
+	return d != "" && pause.Paused(d)
 }
 
 func theStore() *Store {
@@ -248,6 +257,11 @@ func relayHandler(b backend) http.Handler {
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
+		if isPaused() {
+			// Not even asked: every protected tool is denied while AI is paused.
+			json.NewEncoder(w).Encode(&hostclient.AuthorizeResult{Decision: "DENY", Reason: pause.Reason})
+			return
+		}
 		caller, _ := r.Context().Value(callerKey{}).(string)
 		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller)
 		if err != nil {
@@ -263,6 +277,10 @@ func relayHandler(b backend) http.Handler {
 		if err != nil {
 			http.Error(w, "upstream", 502)
 			return
+		}
+		if isPaused() {
+			// An approval that lands during a pause does not let the call through.
+			s = "PAUSED"
 		}
 		json.NewEncoder(w).Encode(map[string]string{"status": s})
 	})

@@ -98,10 +98,27 @@ func (g *localGateway) hookRoutes(mux *http.ServeMux) {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "agent": g.agent, "taskId": g.task})
 	})
 	mux.Handle("POST /agent/v1/authorize", g.pinTask(g.proxy(func(*http.Request) (string, bool) { return "/agent/v1/authorize", true }, true, nil)))
-	mux.Handle("GET /agent/v1/approvals/{id}", g.proxy(func(r *http.Request) (string, bool) {
+	// The hook gives up on an approval after 2 minutes and says so; Manar expires it.
+	mux.Handle("POST /agent/v1/approvals/{id}/expire", g.proxy(func(r *http.Request) (string, bool) {
+		id := r.PathValue("id")
+		return "/agent/v1/approvals/" + id + "/expire", idPattern.MatchString(id)
+	}, false, nil))
+	mux.Handle("GET /agent/v1/approvals/{id}", g.pausedApproval(g.proxy(func(r *http.Request) (string, bool) {
 		id := r.PathValue("id")
 		return "/agent/v1/approvals/" + id, idPattern.MatchString(id)
-	}, false, nil))
+	}, false, nil)))
+}
+
+// pausedApproval answers PAUSED instead of the real status while AI is paused, so an approval that
+// lands during a pause never lets the call through.
+func (g *localGateway) pausedApproval(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if g.paused != nil && g.paused() {
+			writeJSON(w, http.StatusOK, map[string]string{"id": r.PathValue("id"), "status": "PAUSED", "reason": pause.Reason})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (g *localGateway) handler() http.Handler {

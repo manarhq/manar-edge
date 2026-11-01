@@ -14,6 +14,8 @@ import (
 	"time"
 )
 
+var expireCalls atomic.Int32
+
 // fakeGateway plays the local gateway: healthz with a task, authorize, and approvals that answer
 // statuses in order.
 func fakeGateway(t *testing.T, task string, authorize func(map[string]string) (int, string), approvals []string) (*httptest.Server, *atomic.Int32) {
@@ -40,6 +42,10 @@ func fakeGateway(t *testing.T, task string, authorize func(map[string]string) (i
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"id": r.PathValue("id"), "status": approvals[n]})
+	})
+	mux.HandleFunc("POST /agent/v1/approvals/{id}/expire", func(w http.ResponseWriter, r *http.Request) {
+		expireCalls.Add(1)
+		_, _ = io.WriteString(w, "{}")
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -73,6 +79,7 @@ func TestHookDecisions(t *testing.T) {
 		{"approval denied", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING", "DENIED"}, bashInput, false, "DENIED"},
 		{"approval expired", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"EXPIRED"}, bashInput, false, "denied: no answer"},
 		{"paused", "t1", reply(200, `{"decision":"DENY","reason":"paused"}`), nil, bashInput, false, "denied: paused"},
+		{"approved during a pause", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PAUSED"}, bashInput, false, "denied: paused"},
 		{"approval timeout", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING"}, bashInput, false, "not decided in time"},
 		{"approval poll error", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"ERROR"}, bashInput, false, "approval check failed"},
 		{"approval without id", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"risk","riskScore":80}`), nil, bashInput, false, "no approval id"},
@@ -296,6 +303,9 @@ func TestHookNoAnswerDeniesAfterTheLimit(t *testing.T) {
 	allow, reason := h.decide(context.Background(), []byte(bashInput))
 	if allow || reason != "Manar denied: no answer" || time.Since(start) > 2*time.Second {
 		t.Fatalf("got (%v, %q) after %v", allow, reason, time.Since(start))
+	}
+	if expireCalls.Load() != 1 {
+		t.Fatalf("the hook must tell Manar to expire the approval, calls=%d", expireCalls.Load())
 	}
 	if noAnswerAfter != 2*time.Minute {
 		t.Fatalf("the founder's limit is 2 minutes, got %v", noAnswerAfter)

@@ -34,6 +34,12 @@ or Arabic (from the user's locale). Product name WARDEN, subtitle "Manar app on 
 - **No answer in 2 minutes**: the prompt is withdrawn, the API marks the approval EXPIRED (audit
   `approval.expired`, reason `no_answer`) and the hook tells the agent "Manar denied: no answer". The
   phone is pushed by the API when the approval opens, the same moment the prompt appears.
+- **Text safety.** Everything an AI tool controls (paths, commands) is cleaned before display: `]]>`, `$`,
+  backticks, angle brackets, control and bidi characters are removed and the text is cut. The Windows toast
+  is shown through the Windows Runtime only; the library's PowerShell fallback is never used, so a toast that
+  cannot be shown is not shown and the approval waits for the console or phone. The helper file and its
+  folders up to Program Files must be owned by SYSTEM, Administrators or TrustedInstaller and not writable by
+  ordinary users.
 - **Pause all AI**: while the workspace is paused the gateway answers every authorize with
   DENY `paused` and refuses model and MCP calls (`internal/pause`, copied from `/host/v1/config`
   every 15 s; the API denies at once regardless).

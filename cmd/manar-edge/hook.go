@@ -148,6 +148,11 @@ func (h *hookClient) waitApproval(ctx context.Context, id string) (bool, string)
 		case <-ctx.Done():
 			return false, "Manar: approval " + id + " not decided in time"
 		case <-giveUp:
+			// Tell Manar too, so the console cannot approve after the agent was told "denied".
+			// Best effort: the 30-minute server expiry is the backstop.
+			ectx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = h.do(ectx, http.MethodPost, "/agent/v1/approvals/"+id+"/expire", []byte("{}"), &struct{}{})
+			cancel()
 			return false, "Manar denied: no answer"
 		case <-time.After(wait):
 		}
@@ -164,6 +169,8 @@ func (h *hookClient) waitApproval(ctx context.Context, id string) (bool, string)
 		case "APPROVED":
 			return true, "Manar: approved (" + id + ")"
 		case "PENDING":
+		case "PAUSED":
+			return false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"
 		case "EXPIRED":
 			return false, "Manar denied: no answer"
 		default:
