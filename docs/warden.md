@@ -17,8 +17,8 @@ or Arabic (from the user's locale). Product name WARDEN, subtitle "Manar app on 
     user's SID (`<state>\warden\user-sid`). Toast through the Windows Runtime
     (`git.sr.ht/~jackmordaunt/go-toast/v2`, no PowerShell for the toast). Autostart: HKCU Run.
     **On by default** since 1 Nov 2026 (founder decision); `manar-edge warden windows-ui off`
-    (administrator) opts a device out. It builds and its mapping is unit tested; run the manual
-    check in `docs/windows-warden-check.md` of the workspace on a real desktop before relying on it.
+    (administrator) opts a device out. It builds and its mapping is unit tested; it has not been
+    run on a real desktop here, so check one Windows device by hand (toast, both buttons, 2 minutes).
 - **Closing or ignoring a prompt approves nothing.** The approval stays pending and expires.
 - **Secrets vault API**: `warden.AskSecret(ctx, program, secretName) (Decision, error)` opens a
   console-only approval (`POST /host/v1/approvals/vault`) and waits for a signed-in person to decide
