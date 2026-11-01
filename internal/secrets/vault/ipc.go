@@ -1,0 +1,126 @@
+package vault
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"time"
+)
+
+type ipcRequest struct {
+	Op   string `json:"op,omitempty"` // "" (credential) | "restore-all"
+	Kind string `json:"kind,omitempty"`
+	Ref  string `json:"ref,omitempty"`
+}
+
+type ipcReply struct {
+	OK    bool            `json:"ok"`
+	Data  json.RawMessage `json:"data,omitempty"`
+	Error string          `json:"error,omitempty"`
+}
+
+// Peer is who is on the other end, as the operating system reports it (not as it says).
+type Peer struct {
+	PID   int
+	Owner string // Who.Key() of the calling user
+	Admin bool   // root / elevated administrator
+}
+
+// Program is the binary that asked the helper, pinned and hashed.
+type Program struct{ Path, SHA string }
+
+// Env is what a connection handler needs from the platform.
+type Env struct {
+	// Identify pins the helper's parent process and hashes its binary; it also checks that the
+	// peer is the manar-edge helper binary. An error means "unidentified", never "allow".
+	Identify func(helperPID int) (Program, error)
+	// RestoreAll quiesces the module and puts every secret back (admin only).
+	RestoreAll func() error
+}
+
+func handleConn(ctx context.Context, rw io.ReadWriter, peer Peer, b *Broker, env Env) {
+	var req ipcRequest
+	line, err := bufio.NewReaderSize(io.LimitReader(rw, 4096), 4096).ReadBytes('\n')
+	reply := func(r ipcReply) { out, _ := json.Marshal(r); _, _ = rw.Write(append(out, '\n')) }
+	if err != nil || json.Unmarshal(line, &req) != nil {
+		reply(ipcReply{Error: "bad request"})
+		return
+	}
+	if req.Op == "restore-all" {
+		if !peer.Admin || env.RestoreAll == nil {
+			reply(ipcReply{Error: "only an administrator can ask for this"})
+			return
+		}
+		if err := env.RestoreAll(); err != nil {
+			reply(ipcReply{Error: err.Error()})
+			return
+		}
+		reply(ipcReply{OK: true, Data: json.RawMessage(`{}`)})
+		return
+	}
+	if req.Op != "" || !profileRe.MatchString(req.Ref) || peer.Owner == "" {
+		reply(ipcReply{Error: "bad request"})
+		return
+	}
+	r := Request{Kind: req.Kind, Ref: req.Ref, Owner: peer.Owner}
+	if env.Identify != nil {
+		if p, err := env.Identify(peer.PID); err == nil {
+			r.Program, r.SHA = p.Path, p.SHA
+		}
+	}
+	data, err := b.Credential(ctx, r)
+	if err != nil {
+		reply(ipcReply{Error: err.Error()})
+		return
+	}
+	reply(ipcReply{OK: true, Data: data})
+}
+
+func ask(rw io.ReadWriter, req ipcRequest) ([]byte, error) {
+	out, _ := json.Marshal(req)
+	if _, err := rw.Write(append(out, '\n')); err != nil {
+		return nil, err
+	}
+	line, err := bufio.NewReader(io.LimitReader(rw, 1<<16)).ReadBytes('\n')
+	if err != nil {
+		return nil, err
+	}
+	var r ipcReply
+	if err := json.Unmarshal(line, &r); err != nil {
+		return nil, err
+	}
+	if !r.OK {
+		return nil, errors.New(r.Error)
+	}
+	return r.Data, nil
+}
+
+// RunHelper is `manar-edge secret aws <profile>`: it prints the credential_process JSON.
+func RunHelper(kind, ref string, w io.Writer) error {
+	c, err := dialDaemon(5 * time.Second)
+	if err != nil {
+		return errors.New("Manar's service is not running; run `manar-edge secret restore --all` as an administrator to put the keys back")
+	}
+	defer c.Close()
+	data, err := ask(c, ipcRequest{Kind: kind, Ref: ref})
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(append(data, '\n'))
+	return err
+}
+
+// RestoreAllViaService asks the running service to restore every secret (it must be an
+// administrator). On Windows the service is the only process that can decrypt the vault. It
+// reports whether a service answered; when none did, the caller restores locally.
+func RestoreAllViaService() (answered bool, err error) {
+	c, derr := dialDaemon(3 * time.Second)
+	if derr != nil {
+		return false, nil
+	}
+	defer c.Close()
+	_, err = ask(c, ipcRequest{Op: "restore-all"})
+	return true, err
+}
