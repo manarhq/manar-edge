@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -45,6 +47,8 @@ func newTestDoor(t *testing.T, reply func(w http.ResponseWriter, r *http.Request
 	u, _ := url.Parse(up.URL)
 	d := New()
 	d.anthropic.url, d.openai.url, d.gemini.url = u, u, u
+	d.loaded.Store(true)
+	d.settings.Store(&hostclient.DoorSettings{Secrets: "mask"})
 	d.transport = http.DefaultTransport
 	d.rp.Transport = http.DefaultTransport
 	front := httptest.NewServer(d)
@@ -154,5 +158,62 @@ func TestUnknownRoute(t *testing.T) {
 	_, front, _ := newTestDoor(t, func(http.ResponseWriter, *http.Request) {})
 	if res := post(t, front.URL, "/admin", "x", `{}`); res.StatusCode != 404 {
 		t.Fatal(res.StatusCode)
+	}
+}
+
+func TestStartsClosedUntilSettingsLoad(t *testing.T) {
+	d, front, seen := newTestDoor(t, func(w http.ResponseWriter, _ *http.Request) { _, _ = io.WriteString(w, `{}`) })
+	d.loaded.Store(false) // newTestDoor marks it loaded; undo for this test
+	if res := post(t, front.URL, "/v1/chat/completions", "codex", `{"m":"hi"}`); res.StatusCode != 503 || len(*seen) != 0 {
+		t.Fatalf("forwarded before settings: %d", res.StatusCode)
+	}
+	if !Healthy(front.URL) {
+		t.Fatal("health must answer while waiting")
+	}
+	if got := New().settings.Load().Secrets; got != "block" {
+		t.Fatalf("default secrets mode %q, want block", got)
+	}
+}
+
+type fakeHost struct {
+	fakeAPI
+	cfg *hostclient.Config
+	err error
+}
+
+func (f *fakeHost) Config(context.Context) (*hostclient.Config, error) { return f.cfg, f.err }
+
+func TestCachedSettingsApplyOfflineAndFetchErrorsNeverRelax(t *testing.T) {
+	dir := t.TempDir()
+	d := New()
+	d.stateDir = dir
+	h := &fakeHost{cfg: &hostclient.Config{Door: &hostclient.DoorSettings{Secrets: "mask", Paused: []string{"host.codex-cli"}}}}
+	d.refresh(context.Background(), h)
+	if !d.loaded.Load() || d.settings.Load().Paused[0] != "host.codex-cli" {
+		t.Fatal("first fetch not applied")
+	}
+	if fi, err := os.Stat(filepath.Join(dir, cacheFile)); err != nil || fi.Mode().Perm()&0o077 != 0 {
+		t.Fatalf("cache file: %v %v", fi, err)
+	}
+	// A restart with the API unreachable: the cache applies before serving.
+	d2 := New()
+	d2.stateDir = dir
+	d2.loadCached()
+	h.err, h.cfg = io.ErrUnexpectedEOF, nil
+	d2.refresh(context.Background(), h)
+	if !d2.loaded.Load() || d2.settings.Load().Secrets != "mask" || len(d2.settings.Load().Paused) != 1 {
+		t.Fatalf("offline state wrong: %+v", d2.settings.Load())
+	}
+	// Garbage or a symlink as cache is ignored: stays closed.
+	d3 := New()
+	d3.stateDir = t.TempDir()
+	_ = os.WriteFile(filepath.Join(d3.stateDir, cacheFile), []byte("{nope"), 0o600)
+	d3.loadCached()
+	if d3.loaded.Load() || d3.settings.Load().Secrets != "block" {
+		t.Fatal("bad cache accepted")
+	}
+	d3.refresh(context.Background(), h)
+	if d3.loaded.Load() {
+		t.Fatal("a fetch error opened the gateway")
 	}
 }

@@ -88,6 +88,8 @@ type Door struct {
 	transport                 http.RoundTripper
 	settings                  atomic.Pointer[Settings]
 	rec                       *recorder
+	loaded                    atomic.Bool // settings fetched (or restored from the cache) at least once
+	stateDir                  string
 	rp                        *httputil.ReverseProxy
 }
 
@@ -102,7 +104,8 @@ func New() *Door {
 		},
 		rec: newRecorder(),
 	}
-	d.settings.Store(&Settings{Secrets: "mask"})
+	// Until settings load DOOR forwards nothing, and the secrets guard is at its strictest.
+	d.settings.Store(&Settings{Secrets: "block"})
 	d.rp = &httputil.ReverseProxy{
 		Rewrite:        d.rewrite,
 		Transport:      d.transport,
@@ -178,6 +181,10 @@ func (d *Door) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"status":"ok","service":"door"}`)
+		return
+	}
+	if !d.loaded.Load() {
+		writeErr(w, http.StatusServiceUnavailable, "manar_door_starting", "Manar DOOR is starting, waiting for settings")
 		return
 	}
 	up, ok := d.route(r.URL.Path)
