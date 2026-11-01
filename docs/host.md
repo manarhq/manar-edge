@@ -129,7 +129,7 @@ The feature is the `undo` entry of `features` in `GET /host/v1/config`.
 `manar-edge status [--json]` needs no root. The service writes a status file
 (`/run/manar-edge/status.json`, Windows `%ProgramData%\manar-edge\status.json`, world-readable, no
 secrets), and the command adds the service manager's answer and a probe of DOOR on
-`127.0.0.1:8480`. Every problem is one line with one fix; the exit code is 1 when there is a
+`127.0.0.1:848`. Every problem is one line with one fix; the exit code is 1 when there is a
 problem. Other modules publish their state with `daemon.SetComponent("door" | "jail" | "warden" |
 "secrets", daemon.Component{State, Detail, Fix})`; a part nobody reports is shown as "not reported
 by this version" and is not counted as a problem.

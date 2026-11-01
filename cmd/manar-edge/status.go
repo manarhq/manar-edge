@@ -15,6 +15,7 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/ports"
 )
 
 // `manar-edge status` tells a person whether this computer is protected and, for each problem,
@@ -68,7 +69,7 @@ func realProbes(base string) statusProbes {
 		hostInfo:   func() (*hostclient.Info, error) { return readHostInfo(base) },
 		doorUp: func() bool {
 			c := &http.Client{Timeout: time.Second}
-			res, err := c.Get("http://127.0.0.1:8480/healthz")
+			res, err := c.Get(ports.DoorURL + "/healthz")
 			if err != nil {
 				return false
 			}
@@ -171,9 +172,9 @@ func buildStatus(p statusProbes) statusReport {
 			add(c.label+": "+orDefault(part.Detail, "not working"), fix)
 		case !ok && c.key == "door":
 			if r.Service == "active" && p.doorUp() {
-				r.Parts[c.key] = daemon.Component{State: "ok", Detail: "answering on 127.0.0.1:8480"}
+				r.Parts[c.key] = daemon.Component{State: "ok", Detail: "answering on " + ports.DoorListen}
 			} else {
-				r.Parts[c.key] = daemon.Component{State: "off", Detail: "not answering on 127.0.0.1:8480"}
+				r.Parts[c.key] = daemon.Component{State: "off", Detail: "not answering on " + ports.DoorListen}
 			}
 		}
 	}

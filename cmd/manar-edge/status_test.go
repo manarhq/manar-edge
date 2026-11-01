@@ -97,9 +97,9 @@ func TestDoorDownIsShownButOnlyAComponentReportMakesItAProblem(t *testing.T) {
 		t.Fatalf("%+v", r)
 	}
 	s := healthy()
-	s.Components = map[string]daemon.Component{"door": {State: "problem", Detail: "port 8480 is in use", Fix: "stop the program using port 8480"}}
+	s.Components = map[string]daemon.Component{"door": {State: "problem", Detail: "port 848 is in use", Fix: "stop the program using port 848"}}
 	r = buildStatus(probes(s, nil, nil, "active", false))
-	if r.OK || !strings.Contains(fixes(r), "stop the program using port 8480") {
+	if r.OK || !strings.Contains(fixes(r), "stop the program using port 848") {
 		t.Fatalf("%s", fixes(r))
 	}
 }
