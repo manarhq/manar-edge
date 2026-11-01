@@ -105,13 +105,16 @@ func (b *Broker) Authorize(ctx context.Context, r Request) error {
 	if r.Owner == "" {
 		return errors.New("unsupported secret request")
 	}
-	if _, err := b.V.Entry(r.Owner, r.Kind, r.Ref); err != nil {
-		return errors.New("no such secret in the vault for you")
+	restore := r.Kind == kindRestore
+	if !restore {
+		if _, err := b.V.Entry(r.Owner, r.Kind, r.Ref); err != nil {
+			return errors.New("no such secret in the vault for you")
+		}
 	}
 	key := grantKey(r)
 	b.mu.Lock()
 	g, ok := b.grants()[key]
-	if r.Program != "" && r.SHA != "" && ok && (g.Always || b.now().Before(g.Until)) {
+	if !restore && r.Program != "" && r.SHA != "" && ok && (g.Always || b.now().Before(g.Until)) {
 		b.mu.Unlock()
 		return nil
 	}
@@ -140,7 +143,7 @@ func (b *Broker) Authorize(ctx context.Context, r Request) error {
 	}
 
 	b.mu.Lock()
-	if r.Program != "" && r.SHA != "" { // never keep a standing grant for a binary we could not pin
+	if !restore && r.Program != "" && r.SHA != "" { // never keep a standing grant for a binary we could not pin
 		switch d {
 		case Allow8h:
 			m := b.grants()
@@ -164,4 +167,26 @@ func (b *Broker) Authorize(ctx context.Context, r Request) error {
 		return errNotAllowed
 	}
 	return nil
+}
+
+// kindRestore is the approval kind for "take this key out of the vault". Only a one-time answer
+// counts: no standing grant is ever kept for it.
+const kindRestore = "ssh-restore"
+
+// AuthorizeRestore asks the person before an AI tool's own restore request is carried out. toolPID
+// is the AI tool of the caller's chain; ref is the key name, or "" for all of the user's keys.
+func (b *Broker) AuthorizeRestore(ctx context.Context, toolPID int, owner, ref string) error {
+	if b == nil || b.A == nil {
+		return errNotAllowed
+	}
+	path, sha := "", ""
+	if HashExe != nil && toolPID > 0 {
+		path, sha = HashExe(toolPID)
+	}
+	if ref == "" {
+		ref = "*"
+	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute+10*time.Second)
+	defer cancel()
+	return b.Authorize(ctx, Request{Kind: kindRestore, Ref: ref, Owner: owner, Program: path, SHA: sha})
 }

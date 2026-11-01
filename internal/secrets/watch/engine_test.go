@@ -84,7 +84,7 @@ func TestEngineDeniesAIAllowsTerminalAndOthers(t *testing.T) {
 	const aws = "/home/alice/.aws/credentials"
 	src := newFake(
 		PermEvent{PID: 12, Path: aws, Handle: 1},                            // AI tool's non-interactive child
-		PermEvent{PID: 21, Path: aws, Handle: 2},                            // behind an interactive terminal
+		PermEvent{PID: 21, Path: aws, Handle: 2},                            // behind a shell that merely looks interactive
 		PermEvent{PID: 30, Path: aws, Handle: 3},                            // not an AI tool
 		PermEvent{PID: 12, Path: "/home/alice/.ssh/known_hosts", Handle: 4}, // not a secret file
 		PermEvent{PID: 4242, Path: aws, Handle: 5},                          // Manar itself
@@ -95,7 +95,7 @@ func TestEngineDeniesAIAllowsTerminalAndOthers(t *testing.T) {
 	if err := e.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	want := map[uint64]bool{1: false, 2: true, 3: true, 4: true, 5: true}
+	want := map[uint64]bool{1: false, 2: false, 3: true, 4: true, 5: true}
 	for h, w := range want {
 		if got, ok := src.answered(h); !ok || got != w {
 			t.Errorf("handle %d: allow=%v answered=%v, want %v", h, got, ok, w)
@@ -105,8 +105,8 @@ func TestEngineDeniesAIAllowsTerminalAndOthers(t *testing.T) {
 	if !first.Blocked || first.ToolID != "host.cursor" || first.MaskedPath != "~/.aws/credentials" || first.PathClass != ClassAWS {
 		t.Errorf("first event %+v", first)
 	}
-	if second.Blocked {
-		t.Errorf("terminal chain must be alert-only: %+v", second)
+	if !second.Blocked {
+		t.Errorf("a pty-looking shell below the agent is still the agent: %+v", second)
 	}
 	if len(out) != 0 {
 		t.Errorf("only AI-attributed opens are reported, got %d more", len(out))

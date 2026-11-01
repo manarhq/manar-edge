@@ -19,6 +19,10 @@ type PermEvent struct {
 	// (fstat), not by looking the path up again. OwnerKnown is false when the source could not say.
 	Owner      int
 	OwnerKnown bool
+	// Dev and Ino identify the file that was really opened (from the descriptor), so a hard link
+	// under another name is still the protected file. InoKnown is false when the source cannot say.
+	Dev, Ino uint64
+	InoKnown bool
 }
 
 // ErrIdle is returned by Source.Next when nothing arrived within its poll interval.
@@ -63,6 +67,8 @@ type Engine struct {
 	// Mode is the device setting (see Mode). Nil or ModeAlert means every open is allowed and
 	// reported.
 	Mode func() Mode
+	// InodeClass returns the class of a protected file by (device, inode); nil means paths only.
+	InodeClass func(dev, ino uint64) string
 	// Gate, if set, remembers the person's answers and asks the questions (WARDEN ask once).
 	Gate *Gate
 	// Self reports whether a pid is Manar's own (never delayed, never reported).
@@ -173,6 +179,9 @@ func (e *Engine) decide(ev PermEvent) (allow bool) {
 		return true
 	}
 	class := ClassOf(ev.Path)
+	if class == "" && ev.InoKnown && e.InodeClass != nil {
+		class = e.InodeClass(ev.Dev, ev.Ino) // a hard link under another name
+	}
 	if class == "" {
 		return true
 	}

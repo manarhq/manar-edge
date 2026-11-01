@@ -9,10 +9,15 @@ them. The setting comes from `GET /host/v1/config` `features`:
 | `secrets.block` | keys (default for new workspaces) | ssh keys, AWS / Azure / Google Cloud credentials, npm, PyPI and GitHub tokens are refused for an AI tool until the person allows that program. `.env` files, kube and docker config and browser stores are reported only |
 | `secrets.block` + `secrets.block.all` | all | every watched class is treated like keys |
 
-Only a catalogue tool that is on the blockable list (its desktop app or stand-alone CLI) with no
-interactive shell between it and the opener is refused. The person's own shell, ssh, git, the aws CLI
-and editor terminals are never refused. Every doubt (unknown process, unreadable /proc, any error)
-allows.
+Only a catalogue tool that is on the blockable list (its desktop app or stand-alone CLI) and what
+descends from it is refused. There is no "interactive shell" exemption below such a tool (a shell that
+looks interactive, `script`, a pty, can be made by the agent). The person's own terminal is never in
+the tool's chain, and editors (VS Code, Cursor, Windsurf) are not blockable, so their terminals, git
+and ssh are never refused. Whether an opener is an AI tool's descendant is decided from its ancestry
+and from a fork/exit memory kept through the kernel's process connector (netlink, root), so `setsid`,
+a double fork or a re-parent to init does not shake the attribution off; without the connector it is
+ancestry only. Doubt about *who the opener is* allows. Once the verdict is deny, doubt about the file
+owner does not turn it into allow.
 
 ## Ask once per program
 
@@ -84,3 +89,34 @@ Put it back (needs no API and no internet):
 - If the agent dies, the service starts it again within 20 seconds; until then, restore as above.
 - If the service is stopped, the socket is gone, the snippet leaves your old agent in place, and
   `sudo manar-edge vault restore --all` puts the keys back.
+
+## Ceilings (what this does not stop)
+
+Blocking and the sign gate are policy for honest tools and a seat belt against accidents, not a
+sandbox. Known ways around them, tonight:
+- A process the agent gets someone else to start: `systemd-run --user`, `at`/`cron`, an already
+  running tmux/screen server, `xdg-open`/`gio`, a desktop launcher, a daemon that was running before
+  the agent started. These are not descendants.
+- Editing the user's own rc files (`~/.bashrc`, `~/.profile`): the next terminal the person opens runs
+  the agent's code as the person.
+- Process-connector events can be lost under extreme load (the memory is then cleared and attribution
+  falls back to ancestry).
+- Hard links: every secret file that exists at a mark time also gets an inode mark and is recognised by
+  (device, inode) under any name, including links made before or after. A link made on a filesystem
+  that cannot take marks is not covered. Files are re-marked every 30 s.
+- The old ssh agent (gnome-keyring, gcr, ssh-agent) may still have held the key before it moved. Manar
+  asks it to forget the key on the first connection and never passes a request for a vaulted key to
+  another agent, but an agent that ignores `ssh-add -d` keeps it until it is restarted
+  (`systemctl --user restart gcr-ssh-agent` / log out and in). A key the agent had already handed to a
+  process is out of Manar's reach.
+- `manar-edge restore`/`vault restore` run by an AI tool is a question to the person, but a program the
+  AI persuades the person to run is the person.
+- /proc reads have no timeout of their own; the 2-second watchdog turns a stall into
+  `monitoring unavailable` and the watcher fails open.
+
+The full answer is confinement of the agent itself (JAIL, `manar-edge run`: its own cgroup and
+network), which is the next step; this document is about what the watcher can honestly promise today.
+
+After a stall, or when the service starts without a network, the watcher keeps the last known mode
+(`<state>/secrets/mode`) and, after a stall, reports `monitoring unavailable` instead of claiming
+that blocking is on.

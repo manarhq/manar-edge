@@ -28,6 +28,34 @@ type fanSource struct {
 	closed  bool
 	pending []unix.FanotifyEventMetadata
 	buf     []byte
+
+	imu    sync.RWMutex
+	inodes map[[2]uint64]string // (device, inode) -> class of the protected files
+}
+
+type inodeKey = [2]uint64
+
+// ClassOfInode answers for a hard link whose own name says nothing.
+func (f *fanSource) ClassOfInode(dev, ino uint64) string {
+	f.imu.RLock()
+	defer f.imu.RUnlock()
+	return f.inodes[inodeKey{dev, ino}]
+}
+
+// Protect marks the file's inode itself (so every name it has, now or later, raises events) and
+// remembers its identity and class.
+func (f *fanSource) Protect(path, class string) {
+	var st unix.Stat_t
+	if unix.Lstat(path, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFREG {
+		return
+	}
+	f.imu.Lock()
+	if f.inodes == nil {
+		f.inodes = map[inodeKey]string{}
+	}
+	f.inodes[inodeKey{uint64(st.Dev), st.Ino}] = class
+	f.imu.Unlock()
+	_ = f.Mark(path, false)
 }
 
 const (
@@ -141,6 +169,9 @@ func (f *fanSource) pop() (PermEvent, bool) {
 		if unix.Fstat(int(m.Fd), &stt) == nil { // the owner of the file actually opened
 			ev.Owner, ev.OwnerKnown = int(stt.Uid), true
 		}
+		if stt.Ino != 0 {
+			ev.Dev, ev.Ino, ev.InoKnown = uint64(stt.Dev), stt.Ino, true
+		}
 		if m.Mask&unix.FAN_OPEN_PERM == 0 { // alert mode: nothing to answer, close the fd now
 			_ = unix.Close(int(m.Fd))
 			ev.Handle = 0
@@ -209,6 +240,7 @@ func markAll(f *fanSource, targets []Target, envFiles []string, want func(class 
 			// replaces the file (write a temp file, rename it over) would otherwise drop the mark.
 			// Events for the other files in that directory are answered at once (ClassOf is "").
 			mark(filepath.Dir(t.Path), true)
+			f.Protect(t.Path, t.Class)
 			continue
 		}
 		dirs := []string{t.Path}
@@ -222,6 +254,7 @@ func markAll(f *fanSource, targets []Target, envFiles []string, want func(class 
 		}
 		for _, d := range dirs {
 			mark(d, true)
+			protectFiles(f, d, t.Class)
 		}
 	}
 	if want == nil || want(ClassEnv) {
@@ -234,4 +267,18 @@ func markAll(f *fanSource, targets []Target, envFiles []string, want func(class 
 		}
 	}
 	return ok
+}
+
+// protectFiles puts an inode mark on each secret file directly inside dir.
+func protectFiles(f *fanSource, dir, class string) {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, e := range ents {
+		p := filepath.Join(dir, e.Name())
+		if e.Type().IsRegular() && ClassOf(p) != "" {
+			f.Protect(p, class)
+		}
+	}
 }

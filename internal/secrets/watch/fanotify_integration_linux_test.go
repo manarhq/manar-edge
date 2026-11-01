@@ -38,7 +38,7 @@ func TestFanotifyDeniesAIToolAllowsOthers(t *testing.T) {
 	procs := newProcSource()
 	out := make(chan Event, 8)
 	e := &Engine{Src: src, Procs: procs, Mode: func() Mode { return ModeKeys }, Self: selfFunc(procs), Out: out,
-		Homes: func() []string { return []string{home} }, Trace: t.Logf}
+		Homes: func() []string { return []string{home} }}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	runDone := make(chan struct{})
@@ -114,7 +114,7 @@ func TestFanotifyKeysAskOnceEnvAlertOnly(t *testing.T) {
 	gate := &Gate{Approver: allowAlways{}, Out: out}
 	mk := func(s Source) *Engine {
 		return &Engine{Src: s, Procs: procs, Mode: func() Mode { return ModeKeys }, Gate: gate, Self: selfFunc(procs), Out: out,
-			Homes: func() []string { return []string{home} }, Trace: t.Logf}
+			Homes: func() []string { return []string{home} }}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -229,7 +229,7 @@ func TestFanotifyAtomicReplaceKeepsProtection(t *testing.T) {
 	procs := newProcSource()
 	out := make(chan Event, 32)
 	e := &Engine{Src: perm, Procs: procs, Mode: func() Mode { return ModeKeys }, Gate: &Gate{Out: out}, Self: selfFunc(procs), Out: out,
-		Homes: func() []string { return []string{home} }, Trace: t.Logf}
+		Homes: func() []string { return []string{home} }}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = e.Run(ctx); close(done) }()
@@ -250,5 +250,72 @@ func TestFanotifyAtomicReplaceKeepsProtection(t *testing.T) {
 	}
 	if err := exec.Command("/bin/cat", npmrc).Run(); err != nil {
 		t.Fatalf("the person's own cat must work: %v", err)
+	}
+}
+
+// Regression for the independent review: a blockable agent must not read a key by cutting itself
+// off from its process tree (setsid, a pty, a script) or through a hard link. Needs the host's
+// process connector: run with --pid=host --net=host --privileged.
+func TestFanotifyEscapesAreBlocked(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root")
+	}
+	home := t.TempDir()
+	ssh := filepath.Join(home, ".ssh")
+	_ = os.MkdirAll(ssh, 0o700)
+	key := filepath.Join(ssh, "id_ed25519")
+	_ = os.WriteFile(key, []byte("SECRET\n"), 0o600)
+	src, err := newFanSource(true)
+	if err != nil {
+		t.Skipf("fanotify unavailable: %v", err)
+	}
+	if markAll(src, Targets(home), nil, ModeKeys.Held, false) == 0 {
+		t.Fatal("no marks")
+	}
+	procs := newProcSource()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	tainted := startTaint(ctx, procs)
+	e := &Engine{Src: src, Procs: procsWithTaint(procs), Mode: func() Mode { return ModeKeys }, Self: selfFunc(procs),
+		Out: make(chan Event, 256), Homes: func() []string { return []string{home} }, InodeClass: src.ClassOfInode}
+	go func() { _ = e.Run(ctx) }()
+	time.Sleep(300 * time.Millisecond)
+
+	dir := filepath.Join(home, ".local", "share", "cursor-agent")
+	_ = os.MkdirAll(dir, 0o755)
+	tool := filepath.Join(dir, "bash")
+	b, _ := os.ReadFile("/bin/bash")
+	_ = os.WriteFile(tool, b, 0o755)
+	out := filepath.Join(home, "out")
+	script := filepath.Join(home, "s.sh")
+	_ = os.WriteFile(script, []byte("cat "+key+" > "+out+"\n"), 0o755)
+	// hard links: made by the person before the agent runs (so only the inode identifies them) and
+	// by the agent itself.
+	if err := os.Link(key, filepath.Join(home, "pre-linked")); err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name, script string
+		needTaint    bool
+	}{
+		{"baseline", "cat " + key + " > " + out, false},
+		{"hardlink-made-earlier", "cat " + home + "/pre-linked > " + out, false},
+		{"hardlink-by-the-agent", "ln " + key + " " + home + "/k1 && cat " + home + "/k1 > " + out, false},
+		{"setsid-fork", "setsid -f sh -c 'cat " + key + " > " + out + "'; sleep 1", true},
+		{"subshell-bg", "( (sleep 0.3; cat " + key + " > " + out + ") & ); sleep 1", true},
+		{"script-pty", "echo 'cat " + key + " > " + out + "; exit' | SHELL=/bin/bash script -q /dev/null >/dev/null; true", false},
+		{"bash-script-file", "script -qec 'bash " + script + "' /dev/null >/dev/null; true", false},
+	}
+	for _, c := range cases {
+		if c.needTaint && !tainted {
+			t.Logf("%s: process connector unavailable here, skipped", c.name)
+			continue
+		}
+		_ = os.Remove(out)
+		_ = exec.Command(tool, "-c", c.script).Run()
+		time.Sleep(400 * time.Millisecond)
+		if got, _ := os.ReadFile(out); string(got) == "SECRET\n" {
+			t.Errorf("%s: the agent's chain read the key", c.name)
+		}
 	}
 }

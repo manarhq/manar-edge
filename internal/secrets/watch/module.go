@@ -32,8 +32,13 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 	for ctx.Err() == nil {
 		cfg, err := c.Config(ctx)
 		mode := ModeAlert
-		if err == nil && !degraded {
+		switch {
+		case degraded:
+		case err == nil:
 			mode = ModeFromFeatures(cfg.Features)
+			saveMode(mode)
+		default: // offline at boot: keep protecting the way the last known setting said
+			mode = loadMode()
 		}
 		rctx, cancel := context.WithCancel(ctx)
 		go func() { // restart on a setting change
@@ -50,7 +55,7 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 				}
 			}
 		}()
-		stalled := runPlatform(rctx, out, mode, gate)
+		stalled := runPlatform(rctx, out, mode, gate, degraded)
 		cancel()
 		if stalled {
 			degraded = true // after a stall the watcher only observes until the service restarts
@@ -64,6 +69,7 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 // remembered answers). The fanotify marks go with the process.
 func (*Module) Cleanup(ctx context.Context) error {
 	_ = os.Remove(grantsFile())
+	_ = os.Remove(modeFile())
 	return cleanupPlatform(ctx)
 }
 
@@ -117,4 +123,27 @@ func report(ctx context.Context, c *hostclient.Client, in <-chan Event) {
 			held = held[n:]
 		}
 	}
+}
+
+func modeFile() string { return filepath.Join(host.StateDir(), "secrets", "mode") }
+
+// saveMode keeps the last mode the workspace asked for, so a boot without the network does not
+// quietly drop to alert-only.
+func saveMode(m Mode) {
+	_ = os.MkdirAll(filepath.Dir(modeFile()), 0o700)
+	_ = os.WriteFile(modeFile(), []byte(m.String()), 0o600)
+}
+
+func loadMode() Mode {
+	b, err := os.ReadFile(modeFile())
+	if err != nil {
+		return ModeAlert
+	}
+	switch string(b) {
+	case "keys":
+		return ModeKeys
+	case "all":
+		return ModeAll
+	}
+	return ModeAlert
 }

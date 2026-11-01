@@ -6,8 +6,40 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"sync/atomic"
 	"time"
 )
+
+// AIChain tells whether the process pid is a blockable AI tool's chain (or descends from one), and
+// which process of the chain is the tool. The watcher package sets it (it owns the tool catalogue).
+// nil, or "not an AI tool", means the person's own program.
+//
+// This is how the person's own shell maps to requests: a sign request or a restore from a program
+// with no blockable AI tool above it is answered at once. From an AI tool's chain it is a question
+// to the person (WARDEN): once, 8 hours or always for that exact binary (sign), once only (restore);
+// no answer in 2 minutes is a denial.
+var aiChain atomic.Pointer[func(pid int) (int, bool)]
+
+// SetAIChain installs the classifier (nil removes it).
+func SetAIChain(f func(pid int) (toolPID int, ok bool)) {
+	if f == nil {
+		aiChain.Store(nil)
+		return
+	}
+	aiChain.Store(&f)
+}
+
+// AIChain asks the installed classifier; without one nothing is an AI tool.
+func AIChain(pid int) (int, bool) {
+	if f := aiChain.Load(); f != nil {
+		return (*f)(pid)
+	}
+	return 0, false
+}
+
+// HashExe returns the path and SHA-256 of a running process's executable (empty when it cannot be
+// read). Set on Linux.
+var HashExe func(pid int) (path, sha string)
 
 type ipcRequest struct {
 	Op   string `json:"op,omitempty"` // "" (credential) | "restore-all"
@@ -45,12 +77,24 @@ type Env struct {
 }
 
 func handleConn(ctx context.Context, rw io.ReadWriter, peer Peer, b *Broker, env Env) {
+	defer func() { _ = recover() }()
 	var req ipcRequest
 	line, err := bufio.NewReaderSize(io.LimitReader(rw, 4096), 4096).ReadBytes('\n')
 	reply := func(r ipcReply) { out, _ := json.Marshal(r); _, _ = rw.Write(append(out, '\n')) }
 	if err != nil || json.Unmarshal(line, &req) != nil {
 		reply(ipcReply{Error: "bad request"})
 		return
+	}
+	if (req.Op == "ssh-restore" || req.Op == "restore-all") && aiChain.Load() != nil && peer.PID > 0 {
+		// An AI tool running `manar-edge vault restore` is a request to take keys out of the vault:
+		// a question to the person, never an answer by itself. Sudo (a person at the terminal) is
+		// not in an AI tool's chain.
+		if toolPID, ai := AIChain(peer.PID); ai {
+			if err := b.AuthorizeRestore(ctx, toolPID, peer.Owner, req.Ref); err != nil {
+				reply(ipcReply{Error: err.Error()})
+				return
+			}
+		}
 	}
 	if req.Op == "restore-all" {
 		if !peer.Admin || env.RestoreAll == nil {

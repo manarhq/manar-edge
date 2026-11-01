@@ -72,7 +72,7 @@ func newRig(t *testing.T) *rig {
 	pk, _ := ssh.NewPublicKey(pubk)
 	oldSock := AgentSocket
 	AgentSocket = func(uid int) string { return filepath.Join(root, "s"+strconv.Itoa(uid)+".sock") }
-	t.Cleanup(func() { AgentSocket = oldSock; AIChain = nil })
+	t.Cleanup(func() { AgentSocket = oldSock; SetAIChain(nil) })
 	v := &Vault{Store: FileStore{Dir: filepath.Join(root, "state", "vault")}, Homes: func() []string { return []string{home} }, Keys: NewKeyring()}
 	w, err := WhoOfHome(home)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestMoveSignAskDenyRestoreByteIdentical(t *testing.T) {
 	data := []byte("challenge")
 
 	// The person's own terminal (no AI tool above the caller): signs without a question.
-	AIChain = func(int) (int, bool) { return 0, false }
+	SetAIChain(func(int) (int, bool) { return 0, false })
 	c := r.client()
 	keys, err := c.List()
 	if err != nil || len(keys) != 1 || keys[0].Comment != "manar:id_test" {
@@ -143,7 +143,7 @@ func TestMoveSignAskDenyRestoreByteIdentical(t *testing.T) {
 	}
 
 	// An AI tool's chain: denied when the person says no (or does not answer)...
-	AIChain = func(int) (int, bool) { return os.Getpid(), true }
+	SetAIChain(func(int) (int, bool) { return os.Getpid(), true })
 	if _, err := r.client().Sign(r.pub, data); err == nil {
 		t.Fatal("an AI tool must not sign without a yes")
 	}
@@ -182,7 +182,7 @@ func TestMoveSignAskDenyRestoreByteIdentical(t *testing.T) {
 func TestAgentKilledIsRestartedByTheService(t *testing.T) {
 	r := newRig(t)
 	r.move()
-	AIChain = func(int) (int, bool) { return 0, false }
+	SetAIChain(func(int) (int, bool) { return 0, false })
 	r.srv.mu.Lock()
 	al := r.srv.ls[r.uid]
 	r.srv.mu.Unlock()
@@ -271,5 +271,64 @@ func TestFailureBeforeRemovalKeepsTheKey(t *testing.T) {
 	}
 	if es, _ := r.v.Entries(); len(es) != 0 || len(r.v.Keys.For(r.owner)) != 0 {
 		t.Fatal("nothing may be left in the vault or the agent")
+	}
+}
+
+// bufRW is an in-memory connection for handleConn.
+type bufRW struct{ in, out bytes.Buffer }
+
+func (b *bufRW) Read(p []byte) (int, error)  { return b.in.Read(p) }
+func (b *bufRW) Write(p []byte) (int, error) { return b.out.Write(p) }
+
+func TestRestoreFromAnAIToolIsAQuestion(t *testing.T) {
+	r := newRig(t)
+	r.move()
+	restored := 0
+	env := Env{RestoreSSH: func(owner, name string) error { restored++; return nil }}
+	b := &Broker{V: r.v, A: r.ans}
+	call := func() string {
+		c := &bufRW{}
+		c.in.WriteString(`{"op":"ssh-restore","ref":""}` + "\n")
+		handleConn(context.Background(), c, Peer{PID: os.Getpid(), Owner: r.owner}, b, env)
+		return c.out.String()
+	}
+	// The person at a terminal: no question.
+	SetAIChain(func(int) (int, bool) { return 0, false })
+	if out := call(); !strings.Contains(out, `"ok":true`) || restored != 1 || r.ans.calls.Load() != 0 {
+		t.Fatalf("human restore: %s restored=%d", out, restored)
+	}
+	// An AI tool's chain: refused when the person says no, done after a yes, and never remembered.
+	SetAIChain(func(int) (int, bool) { return os.Getpid(), true })
+	r.ans.d.Store(Deny)
+	if out := call(); strings.Contains(out, `"ok":true`) || restored != 1 {
+		t.Fatalf("an AI tool must not restore without a yes: %s", out)
+	}
+	r.ans.d.Store(AllowAlways)
+	if out := call(); !strings.Contains(out, `"ok":true`) || restored != 2 {
+		t.Fatalf("after a yes: %s", out)
+	}
+	n := r.ans.calls.Load()
+	_ = call()
+	if r.ans.calls.Load() != n+1 {
+		t.Fatal("a restore is asked every time: no standing grant for it")
+	}
+}
+
+func TestACallerThatAlreadyExitedIsTreatedAsAnAITool(t *testing.T) {
+	SetAIChain(func(int) (int, bool) { return 0, false })
+	defer SetAIChain(nil)
+	if _, ai := classify(1 << 22); !ai { // no such process
+		t.Fatal("an unclassifiable caller must not pass as the person")
+	}
+	if _, ai := classify(os.Getpid()); ai {
+		t.Fatal("a live human caller is the person")
+	}
+}
+
+func TestVaultedKeyIsNeverHandedToAnotherAgent(t *testing.T) {
+	r := newRig(t)
+	r.move()
+	if !r.v.Keys.HasBlob(r.pub.Marshal()) || r.v.Keys.HasBlob([]byte("other")) {
+		t.Fatal("HasBlob")
 	}
 }

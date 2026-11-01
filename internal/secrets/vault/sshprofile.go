@@ -2,6 +2,7 @@ package vault
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,7 +46,10 @@ func (v *Vault) profileBefore(w Who, e *Entry) error {
 	sock := AgentSocket(w.UID)
 	changed := 0
 	for _, rel := range profileFiles {
-		p := filepath.Join(e.Home, rel)
+		p, ok := profilePath(e.Home, rel)
+		if !ok {
+			continue
+		}
 		b, fi, err := w.Read(e.Home, p)
 		if err != nil {
 			continue
@@ -76,6 +80,9 @@ func (v *Vault) profileBefore(w Who, e *Entry) error {
 	}
 	if changed == 0 { // no profile to extend: create ~/.profile, which every login shell can read
 		p := filepath.Join(e.Home, ".profile")
+		if _, err := os.Lstat(p); err == nil { // exists (a link we do not follow, or unreadable): leave it
+			return errors.New("no shell profile Manar may change (a linked or unreadable ~/.profile)")
+		}
 		if err := w.Write(FileInfo{Path: p, Mode: 0o644}, []byte(snippet(sock))); err != nil {
 			return err
 		}
@@ -104,7 +111,9 @@ func (v *Vault) profileAfterRestore(w Who, e *Entry) {
 		return b
 	}, AgentSocket(w.UID))
 	for _, rel := range profileFiles {
-		_ = v.Store.Delete("pb-" + sum([]byte(e.Owner + filepath.Join(e.Home, rel)))[:16])
+		if p, ok := profilePath(e.Home, rel); ok {
+			_ = v.Store.Delete("pb-" + sum([]byte(e.Owner + p))[:16])
+		}
 	}
 }
 
@@ -113,7 +122,10 @@ func (v *Vault) profileAfterRestore(w Who, e *Entry) {
 // original comes back byte for byte.
 func removeBlocks(w Who, home string, orig func(path string) []byte, sock string) {
 	for _, rel := range profileFiles {
-		p := filepath.Join(home, rel)
+		p, ok := profilePath(home, rel)
+		if !ok {
+			continue
+		}
 		b, fi, err := w.Read(home, p)
 		if err != nil {
 			continue
@@ -143,4 +155,23 @@ func removeBlocks(w Who, home string, orig func(path string) []byte, sock string
 	if b, _, err := w.Read(home, fish); err == nil && strings.Contains(string(b), "added by manar-edge") {
 		_ = w.Remove(fish)
 	}
+}
+
+// profilePath resolves a profile file. A link (dotfile managers do this) is followed only when its
+// target is inside the user's home; Who.Read then still checks the owner and refuses any link left
+// in the resolved path.
+func profilePath(home, rel string) (string, bool) {
+	p := filepath.Join(home, rel)
+	if _, err := os.Lstat(p); err != nil {
+		return "", false
+	}
+	r, err := filepath.EvalSymlinks(p)
+	if err != nil {
+		return "", false
+	}
+	h, err := filepath.EvalSymlinks(home)
+	if err != nil || !strings.HasPrefix(r, h+string(filepath.Separator)) {
+		return "", false
+	}
+	return r, true
 }

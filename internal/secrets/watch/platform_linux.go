@@ -22,7 +22,7 @@ func cleanupPlatform(context.Context) error { return nil } // the marks go with 
 // sits in a notify-only group
 // that can never hold an open up. So a busy browser profile is never in the permission path
 // unless the person chose "block all".
-func runPlatform(ctx context.Context, out chan<- Event, mode Mode, gate *Gate) (stalled bool) {
+func runPlatform(ctx context.Context, out chan<- Event, mode Mode, gate *Gate, degraded bool) (stalled bool) {
 	var perm, notif *fanSource
 	var err error
 	if mode != ModeAlert {
@@ -62,11 +62,20 @@ func runPlatform(ctx context.Context, out chan<- Event, mode Mode, gate *Gate) (
 		log.Printf("manar-edge: secrets watcher: nothing to watch yet")
 	}
 	procs := newProcSource()
+	startTaint(ctx, procs) // follows descendants of AI tools past setsid and re-parenting
 	engine := func(src Source) *Engine {
-		return &Engine{Src: src, Procs: procs, Mode: func() Mode { return mode }, Gate: gate,
+		e := &Engine{Src: src, Procs: procsWithTaint(procs), Mode: func() Mode { return mode }, Gate: gate,
 			Self: selfFunc(procs), Out: out, Homes: host.Homes}
+		if fs, ok := src.(*fanSource); ok {
+			e.InodeClass = fs.ClassOfInode
+		}
+		return e
 	}
-	notice(out, TypeAvailable)
+	if degraded { // blocking was asked for but a stall switched it off: say so, do not claim all is well
+		notice(out, TypeUnavailable)
+	} else {
+		notice(out, TypeAvailable)
+	}
 	go func() {
 		// Key and token files are re-marked every 30 s, which only matters for a directory that
 		// did not exist yet (first `gh auth login`, first ~/.aws). A file that is replaced inside

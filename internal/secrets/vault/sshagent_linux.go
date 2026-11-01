@@ -20,18 +20,8 @@ import (
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
+	"golang.org/x/sys/unix"
 )
-
-// AIChain tells whether the process pid is an AI tool's own non-interactive chain, and which
-// process of the chain is the tool. It is set by the watcher package (which owns the tool
-// catalogue). nil, or "not an AI tool", means the person's own program.
-//
-// This is how the person's own shell maps to sign requests: a sign request from a program with no AI
-// tool above it, or with an interactive terminal between it and the tool (the person typing `ssh`
-// or `git push`), is answered at once. A request from an AI tool's non-interactive chain is the
-// question "may this program sign": answered by a standing grant for that exact binary and user, or
-// by the person (WARDEN), and no answer in 2 minutes is a denial.
-var AIChain func(pid int) (toolPID int, ok bool)
 
 // AgentServer runs Manar's ssh agent: one socket per user who has vaulted keys.
 type AgentServer struct {
@@ -153,14 +143,35 @@ func homeOfUID(v *Vault, uid int) string {
 	return ""
 }
 
+func init() { HashExe = hashExe }
+
+// classify decides, once, at accept time and while the caller is certainly the process that
+// connected (a pidfd is opened first and checked again after), whether the caller is an AI tool's
+// chain. A caller that has already exited cannot be classified and is treated as one: a program
+// that connects and exits (setsid, a background job) must not pass as the person.
+func classify(pid int) (toolPID int, ai bool) {
+	pfd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		return 0, true
+	}
+	defer unix.Close(pfd)
+	toolPID, ai = AIChain(pid)
+	if unix.PidfdSendSignal(pfd, 0, nil, 0) != nil { // gone while we looked
+		return 0, true
+	}
+	return toolPID, ai
+}
+
 func (s *AgentServer) serve(c net.Conn, uid int) {
 	defer c.Close()
+	defer func() { _ = recover() }()
 	pid, puid := peerCred(c)
 	if pid <= 0 || puid != uid { // only the owner of the socket
 		return
 	}
+	toolPID, ai := classify(pid)
 	_ = c.SetDeadline(time.Now().Add(10 * time.Minute))
-	ag := &connAgent{s: s, uid: uid, pid: pid, owner: "u" + strconv.Itoa(uid)}
+	ag := &connAgent{s: s, uid: uid, pid: pid, owner: "u" + strconv.Itoa(uid), toolPID: toolPID, ai: ai}
 	defer func() {
 		if ag.upConn != nil {
 			ag.upConn.Close()
@@ -177,6 +188,9 @@ type connAgent struct {
 	uid   int
 	pid   int
 	owner string
+	// toolPID and ai are the classification made at accept.
+	toolPID int
+	ai      bool
 
 	upTried bool
 	up      agent.ExtendedAgent
@@ -192,7 +206,11 @@ func (a *connAgent) List() ([]*agent.Key, error) {
 	}
 	if up := a.upstream(); up != nil {
 		if ks, err := up.List(); err == nil {
-			out = append(out, ks...)
+			for _, k := range ks {
+				if !a.s.V.Keys.HasBlob(k.Blob) { // the old agent may still hold a moved key
+					out = append(out, k)
+				}
+			}
 		}
 	}
 	return out, nil
@@ -223,6 +241,9 @@ func (a *connAgent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Si
 		}
 		return h.Signer.Sign(rand0(), data)
 	}
+	if a.s.V.Keys.HasBlob(blob) { // never hand a vaulted key's request to another agent
+		return nil, errors.New("no such key")
+	}
 	if up := a.upstream(); up != nil { // the user's other keys keep working
 		if ea, ok := up.(agent.ExtendedAgent); ok {
 			return ea.SignWithFlags(key, data, flags)
@@ -234,14 +255,13 @@ func (a *connAgent) SignWithFlags(key ssh.PublicKey, data []byte, flags agent.Si
 
 // authorize is the sign decision (see AIChain).
 func (a *connAgent) authorize(keyName string) error {
-	if AIChain == nil {
+	if !a.ai {
 		return nil
 	}
-	toolPID, ai := AIChain(a.pid)
-	if !ai {
-		return nil
+	path, sha := "", ""
+	if a.toolPID > 0 {
+		path, sha = hashExe(a.toolPID)
 	}
-	path, sha := hashExe(toolPID)
 	ctx := a.s.Ctx
 	if ctx == nil {
 		ctx = context.Background()
@@ -328,5 +348,9 @@ func (a *connAgent) dialUpstream() (agent.ExtendedAgent, net.Conn) {
 	if err != nil {
 		return nil, nil
 	}
-	return agent.NewClient(c).(agent.ExtendedAgent), c
+	cl := agent.NewClient(c).(agent.ExtendedAgent)
+	for _, h := range a.s.V.Keys.For(a.owner) { // the old agent must not keep serving a key that moved
+		_ = cl.Remove(h.Signer.PublicKey())
+	}
+	return cl, c
 }

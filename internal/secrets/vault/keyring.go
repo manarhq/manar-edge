@@ -1,6 +1,7 @@
 package vault
 
 import (
+	"bytes"
 	"errors"
 	"strings"
 	"sync"
@@ -69,6 +70,18 @@ func (k *Keyring) Has(owner, fp string) bool {
 	defer k.mu.RUnlock()
 	for _, h := range k.keys {
 		if h.Owner == owner && h.Fingerprint == fp {
+			return true
+		}
+	}
+	return false
+}
+
+// HasBlob reports whether any user's vaulted key has this public key blob.
+func (k *Keyring) HasBlob(blob []byte) bool {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	for _, h := range k.keys {
+		if bytes.Equal(h.Signer.PublicKey().Marshal(), blob) {
 			return true
 		}
 	}

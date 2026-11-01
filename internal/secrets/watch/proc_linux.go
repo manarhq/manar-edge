@@ -59,7 +59,11 @@ func parseStat(s string) (Proc, error) {
 	if err1 != nil || err2 != nil {
 		return Proc{}, fmt.Errorf("bad stat numbers")
 	}
-	return Proc{Comm: s[o+1 : i], PPID: ppid, TTY: tty != 0}, nil
+	var start uint64
+	if len(f) > 19 {
+		start, _ = strconv.ParseUint(f[19], 10, 64)
+	}
+	return Proc{Comm: s[o+1 : i], PPID: ppid, TTY: tty != 0, Start: start}, nil
 }
 
 // selfFunc reports Manar's own process and any process running Manar's own binary (the

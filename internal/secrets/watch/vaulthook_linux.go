@@ -4,15 +4,16 @@ package watch
 
 import "gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
 
-// The ssh agent asks the watcher's catalogue who is behind a sign request: an AI tool's own
-// non-interactive chain needs the person's yes; the person's own terminal does not.
+// The ssh agent and the restore command ask the watcher's catalogue who is behind a request.
+// Only blockable AI tools count (the same rule as the file block): an editor's own git push is the
+// person's, and a shell that looks interactive below a blockable tool gets no exemption.
 func init() {
 	procs := newProcSource()
-	vault.AIChain = func(pid int) (int, bool) {
-		a := Attribute(procs, pid)
-		if a.ToolID == "" || a.Interactive {
+	vault.SetAIChain(func(pid int) (int, bool) {
+		a := Attribute(procsWithTaint(procs), pid)
+		if a.ToolID == "" || !a.Block {
 			return 0, false
 		}
 		return a.ToolProc.PID, true
-	}
+	})
 }
