@@ -18,6 +18,8 @@ import (
 
 	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+	"gitlab.vax.sh/manar/manar-edge/internal/warden"
 )
 
 // The one-liner path for personal devices (manar-api GET /i/<code>): `install --code` enrols
@@ -81,20 +83,28 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	if err := deviceServiceInstall(exe, base); err != nil {
 		return fmt.Errorf("installing the service: %w", err)
 	}
+	if err := warden.Install(base, exe); err != nil {
+		fmt.Fprintf(out, "warning: WARDEN prompts are not set up (approve in the console): %v\n", err)
+	}
 	fmt.Fprintf(out, "Installed the Manar device service and started it (host %s).\n", info.HostID)
+	printCoverage(out)
 	fmt.Fprintln(out, "Done, approve it in the console.")
 	return nil
 }
 
 // uninstallSteps are the pieces of uninstall, as values so the order can be tested.
 type uninstallSteps struct {
-	removeService func() error
-	cleanup       func(ctx context.Context) []error
-	agents        func() []string // every enrolled agent's name
-	down          func(agent string) error
-	claudeCode    func() error
-	removeHost    func() error
-	removeBinary  func() error
+	// restoreSecrets puts every vaulted secret back (nil: nothing to do). It runs before anything
+	// is stopped or removed: on Windows only the running service can decrypt the vault.
+	restoreSecrets func() error
+	removeService  func() error
+	cleanup        func(ctx context.Context) []error
+	agents         func() []string // every enrolled agent's name
+	down           func(agent string) error
+	warden         func() error // WARDEN helper autostart and its files
+	claudeCode     func() error
+	removeHost     func() error
+	removeBinary   func() error
 }
 
 // runUninstall: service, module cleanups, every agent (jail, gateway units, namespaces, users),
@@ -108,9 +118,19 @@ func runUninstall(ctx context.Context, st uninstallSteps, out io.Writer) []error
 			fmt.Fprintf(out, "warning: %s: %v\n", what, err)
 		}
 	}
+	if st.restoreSecrets != nil {
+		if err := st.restoreSecrets(); err != nil {
+			fmt.Fprintf(out, "Manar was not removed: vaulted secrets could not all be put back (%v).\n"+
+				"Fix that, or run `manar-edge secret restore --all` as an administrator to see what is left, then run uninstall again.\n", err)
+			return []error{fmt.Errorf("restoring vaulted secrets: %w", err)}
+		}
+	}
 	note("removing the service", st.removeService())
 	for _, err := range st.cleanup(ctx) {
 		note("restore step", err)
+	}
+	if st.warden != nil {
+		note("removing WARDEN", st.warden())
 	}
 	for _, agent := range st.agents() {
 		note("taking down agent "+agent, st.down(agent))
@@ -134,8 +154,9 @@ func cmdUninstall(base string, out io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	errs := runUninstall(ctx, uninstallSteps{
-		removeService: deviceServiceRemove,
-		cleanup:       daemon.Cleanup,
+		restoreSecrets: restoreSecrets,
+		removeService:  deviceServiceRemove,
+		cleanup:        daemon.Cleanup,
 		agents: func() []string {
 			var names []string
 			for _, dir := range listAgents(base) {
@@ -146,8 +167,15 @@ func cmdUninstall(base string, out io.Writer) error {
 			return names
 		},
 		down:       func(agent string) error { return cmdDown(base, agent, true) },
+		warden:     func() error { return warden.Remove(base) },
 		claudeCode: uninstallClaudeCode,
-		removeHost: func() error { return os.RemoveAll(hostclient.Dir(base)) },
+		removeHost: func() error {
+			// The vault folders are removed only when empty: os.Remove, never RemoveAll, so a
+			// secret that is somehow still there is not deleted with them.
+			_ = os.Remove(filepath.Join(base, "vault"))
+			_ = os.Remove(filepath.Join(base, "secrets"))
+			return os.RemoveAll(hostclient.Dir(base))
+		},
 		removeBinary: func() error {
 			if runtime.GOOS == "windows" {
 				return nil
@@ -164,6 +192,15 @@ func cmdUninstall(base string, out io.Writer) error {
 	}
 	fmt.Fprintln(out, "Manar is removed from this computer.")
 	return nil
+}
+
+// restoreSecrets asks the running service to put every vaulted secret back (it is the one that can
+// decrypt them on Windows), then checks locally that nothing is left.
+func restoreSecrets() error {
+	if _, err := vault.RestoreAllViaService(); err != nil {
+		return err
+	}
+	return vault.RestoreAll()
 }
 
 // writePrivateMode writes through a temp file and rename.
@@ -206,6 +243,7 @@ func serveDevice(ctx context.Context, base string) error {
 	if err != nil {
 		return err
 	}
+	warden.SetStateDir(base)
 	return daemon.Run(ctx, c)
 }
 

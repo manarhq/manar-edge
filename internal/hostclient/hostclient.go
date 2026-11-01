@@ -263,6 +263,63 @@ type Config struct {
 	Status    string   `json:"status"` // PENDING until the owner approves it
 	StartMode string   `json:"startMode"`
 	Features  []string `json:"features"`
+	// Tools carries the owner's per-tool choices (coverage track): Unprotect lists tool ids
+	// whose protection the owner turned off; the device restores their backups.
+	Tools ToolInstructions `json:"tools"`
+}
+
+// ToolInstructions is the "tools" part of GET /host/v1/config.
+type ToolInstructions struct {
+	Unprotect []string `json:"unprotect"`
+}
+
+// Tool is one AI tool in the inventory (POST /host/v1/inventory).
+type Tool struct {
+	ID          string   `json:"id"`
+	Name        string   `json:"name"`
+	Version     string   `json:"version,omitempty"`
+	Path        string   `json:"path,omitempty"`
+	Protected   bool     `json:"protected"`
+	ProtectMode string   `json:"protectMode"` // hook, mcp, gateway or none
+	Changes     []string `json:"changes,omitempty"`
+}
+
+// Inventory reports the AI tools found on this device. It is the whole list: a tool left out is
+// treated as gone.
+func (c *Client) Inventory(ctx context.Context, tools []Tool) error {
+	if tools == nil {
+		tools = []Tool{}
+	}
+	return c.Do(ctx, http.MethodPost, "/inventory", map[string]any{"tools": tools}, nil)
+}
+
+// Authorize asks for a decision on an action of another AI tool (POST /host/v1/authorize).
+type AuthorizeResult struct {
+	Decision   string `json:"decision"`
+	Reason     string `json:"reason"`
+	ApprovalID string `json:"approvalId"`
+}
+
+func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*AuthorizeResult, error) {
+	var out AuthorizeResult
+	err := c.Do(ctx, http.MethodPost, "/authorize", map[string]string{"toolId": toolID, "actionId": actionID, "resource": resource, "caller": caller}, &out)
+	if err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// ApprovalStatus reads the state of an approval opened by Authorize (APPROVED, PENDING, ...).
+// The approvals track serves GET /host/v1/approvals/:id; until it does this returns an error and
+// the hook denies.
+func (c *Client) ApprovalStatus(ctx context.Context, id string) (string, error) {
+	var out struct {
+		Status string `json:"status"`
+	}
+	if err := c.Do(ctx, http.MethodGet, "/approvals/"+url.PathEscape(id), nil, &out); err != nil {
+		return "", err
+	}
+	return out.Status, nil
 }
 
 // Config fetches the device's effective configuration.

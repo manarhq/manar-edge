@@ -114,3 +114,33 @@ func TestRemoveClaudeSettingsUndoesOnlyWhatManarWrote(t *testing.T) {
 		t.Fatal("touched a file that is not ours")
 	}
 }
+
+func TestUninstallRestoresSecretsFirstAndStopsIfItCannot(t *testing.T) {
+	var order []string
+	st := uninstallSteps{
+		restoreSecrets: func() error { order = append(order, "restore"); return nil },
+		removeService:  func() error { order = append(order, "service"); return nil },
+		cleanup:        func(context.Context) []error { order = append(order, "cleanup"); return nil },
+		agents:         func() []string { return nil },
+		claudeCode:     func() error { return nil },
+		removeHost:     func() error { return nil },
+		removeBinary:   func() error { return nil },
+	}
+	if errs := runUninstall(context.Background(), st, io.Discard); len(errs) != 0 {
+		t.Fatal(errs)
+	}
+	if got := strings.Join(order, ","); got != "restore,service,cleanup" {
+		t.Fatalf("order = %s", got)
+	}
+
+	order = nil
+	st.restoreSecrets = func() error { order = append(order, "restore"); return errors.New("key file in the way") }
+	var out strings.Builder
+	errs := runUninstall(context.Background(), st, &out)
+	if len(errs) != 1 || strings.Join(order, ",") != "restore" {
+		t.Fatalf("a failed restore must stop everything: errs=%v order=%v", errs, order)
+	}
+	if !strings.Contains(out.String(), "manar-edge secret restore --all") {
+		t.Fatalf("the message must name a command that exists:\n%s", out.String())
+	}
+}
