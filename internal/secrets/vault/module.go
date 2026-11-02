@@ -180,8 +180,31 @@ func reportRestored(ctx context.Context, c *hostclient.Client, kind, ref string)
 	_ = c.Do(ctx, http.MethodPost, "/secrets/vault/report", map[string]string{"kind": kind, "ref": ref, "state": "RESTORED"}, nil)
 }
 
+// eventClass is the watcher's path class for a vault request kind ("" leaves it out): an SSH key
+// restore is about SSH keys, and a refused secret file's Ref already is its class.
+func eventClass(r Request) string {
+	switch r.Kind {
+	case "aws", "ssh":
+		return r.Kind
+	case kindRestore:
+		return "ssh"
+	case "file":
+		return r.Ref
+	}
+	return ""
+}
+
 func sendEvent(ctx context.Context, c *hostclient.Client, typ, process string, r Request) {
-	ev := map[string]any{"type": typ, "process": process, "pathClass": r.Kind, "maskedPath": r.Ref, "blocked": true, "at": time.Now().UTC()}
+	ev := map[string]any{"type": typ, "blocked": true, "at": time.Now().UTC()}
+	if process != "" && process != "." {
+		ev["process"] = process
+	}
+	if cl := eventClass(r); cl != "" {
+		ev["pathClass"] = cl
+	}
+	if r.Ref != "" && r.Kind != "file" {
+		ev["maskedPath"] = r.Ref
+	}
 	if err := c.Do(ctx, http.MethodPost, "/events", map[string]any{"events": []any{ev}}, nil); err != nil {
 		log.Printf("manar-edge: vault event: %v", err)
 	}

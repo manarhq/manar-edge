@@ -3,7 +3,6 @@ package watch
 import (
 	"context"
 	"log"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -93,38 +92,7 @@ func notice(out chan<- Event, typ string) {
 	}
 }
 
-// report sends queued events to Manar in batches. It is the only place that waits on the
-// network, and it never sits in the permission path.
-func report(ctx context.Context, c *hostclient.Client, in <-chan Event) {
-	const maxHeld = 2000
-	var held []Event
-	t := time.NewTicker(5 * time.Second)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case ev := <-in:
-			held = append(held, ev)
-			if len(held) > maxHeld {
-				held = held[len(held)-maxHeld:]
-			}
-		case <-t.C:
-			if len(held) == 0 {
-				continue
-			}
-			n := min(len(held), 100)
-			if err := c.Do(ctx, http.MethodPost, "/events", map[string]any{"events": held[:n]}, nil); err != nil {
-				if se, ok := err.(*hostclient.StatusError); ok && se.Code >= 400 && se.Code < 500 && se.Code != 429 {
-					held = held[n:] // the API refused these: do not retry forever
-				}
-				log.Printf("manar-edge: sending secret events: %v", err)
-				continue
-			}
-			held = held[n:]
-		}
-	}
-}
+func outboxFile() string { return filepath.Join(host.StateDir(), "secrets", "events.json") }
 
 func modeFile() string { return filepath.Join(host.StateDir(), "secrets", "mode") }
 
