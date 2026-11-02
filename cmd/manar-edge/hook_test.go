@@ -78,6 +78,7 @@ func TestHookDecisions(t *testing.T) {
 		{"approved", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING", "PENDING", "APPROVED"}, bashInput, true, "approved"},
 		{"approval denied", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING", "DENIED"}, bashInput, false, "DENIED"},
 		{"approval expired", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"EXPIRED"}, bashInput, false, "denied: no answer"},
+		{"approval revoked before it ran", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING", "REVOKED"}, bashInput, false, "approval revoked"},
 		{"paused", "t1", reply(200, `{"decision":"DENY","reason":"paused"}`), nil, bashInput, false, "denied: paused"},
 		{"approved during a pause", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PAUSED"}, bashInput, false, "denied: paused"},
 		{"approval timeout", "t1", reply(201, `{"decision":"APPROVAL_REQUIRED","reason":"r","approvalId":"ap-1"}`), []string{"PENDING"}, bashInput, false, "not decided in time"},

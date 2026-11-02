@@ -59,7 +59,7 @@ func askSecret(ctx context.Context, api decider, program, secret string, every t
 			return Dismissed, nil // an approval without a known decision is not consent
 		case "DENIED":
 			return Deny, nil
-		case "EXPIRED":
+		case "EXPIRED", "REVOKED": // no answer, or a person withdrew the approval: not consent
 			return Dismissed, nil
 		}
 		select {

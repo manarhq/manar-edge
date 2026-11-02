@@ -83,3 +83,14 @@ func TestNoAnswerIsDeniedAfterTheLimitOrWhenExpired(t *testing.T) {
 		t.Fatal("the founder's limit is 2 minutes")
 	}
 }
+
+func TestRevokedBeforeTheDeviceReadItIsRefused(t *testing.T) {
+	old := isPaused
+	defer func() { isPaused = old }()
+	isPaused = func() bool { return false }
+	b := &stubBackend{result: hostclient.AuthorizeResult{Decision: "APPROVAL_REQUIRED", ApprovalID: "ap1"}, status: "REVOKED"}
+	r := relayFor(t, b)
+	if v := r.Decide(context.Background(), "cursor", "shell", "ls", 5*time.Second); v.Allow || !strings.Contains(v.Reason, "approval revoked") {
+		t.Fatalf("revoked: %+v", v)
+	}
+}
