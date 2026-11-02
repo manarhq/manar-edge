@@ -55,9 +55,9 @@ Response adds `edge` when the request had one and the install has edge enabled
     "peerId": "uuid",
     "address": "100.88.0.17/32",
     "gatewayPublicKey": "<base64>",
-    "gatewayEndpoint": "edge.manar.vax.sh:51820",
+    "gatewayEndpoint": "edge-manar.fixio.ae:51820",
     "manarAddress": "100.88.0.1:443",
-    "manarServerName": "agents.manar.vax.sh",
+    "manarServerName": "agents-manar.fixio.ae",
     "proxyAddress": "100.88.0.1:3128",
     "keepaliveSeconds": 25
   }
