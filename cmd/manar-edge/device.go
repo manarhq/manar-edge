@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/jail"
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
-	"gitlab.vax.sh/manar/manar-edge/internal/warden"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/jail"
+	"github.com/manarhq/manar-edge/internal/secrets/vault"
+	"github.com/manarhq/manar-edge/internal/warden"
 )
 
 // The one-liner path for personal devices (manar-api GET /i/<code>): `install --code` enrols
@@ -28,9 +28,11 @@ import (
 // lands PENDING until the owner approves it in the console. There is no WireGuard here: the
 // egress filter of a personal device runs on the device itself.
 
-const (
-	defaultAPIURL  = "https://console-manar.vax.sh"
-	defaultHostURL = "https://agents-manar.vax.sh:3443"
+// Defaults for new installs; the release build overrides them with
+// -ldflags "-X main.defaultAPIURL=... -X main.defaultHostURL=..." so a domain move is a build change.
+var (
+	defaultAPIURL  = "https://console-manar.fixio.ae"
+	defaultHostURL = "https://agents-manar.fixio.ae:3443"
 )
 
 func cmdInstall(base string, args []string, out io.Writer) error {

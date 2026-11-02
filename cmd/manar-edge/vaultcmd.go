@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+	"github.com/manarhq/manar-edge/internal/secrets/vault"
 )
 
 // cmdVault is `manar-edge vault add <path> | restore <key> | restore --all`. Nothing here needs the

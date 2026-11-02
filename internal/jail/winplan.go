@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
-	"gitlab.vax.sh/manar/manar-edge/internal/ports"
-	"gitlab.vax.sh/manar/manar-edge/internal/protect"
+	"github.com/manarhq/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/ports"
+	"github.com/manarhq/manar-edge/internal/protect"
 )
 
 // Windows scope. A tool is filtered on Windows only when two things are verified: the tool honours

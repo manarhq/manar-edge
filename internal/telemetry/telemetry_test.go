@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 type fakeAPI struct {

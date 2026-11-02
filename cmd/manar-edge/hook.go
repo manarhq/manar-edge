@@ -16,7 +16,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/protect"
+	"github.com/manarhq/manar-edge/internal/protect"
 )
 
 const (

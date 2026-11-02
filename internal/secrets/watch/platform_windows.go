@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
+	"github.com/manarhq/manar-edge/internal/secrets/host"
 )
 
 func cleanupPlatform(ctx context.Context) error {

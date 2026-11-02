@@ -7,7 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"gitlab.vax.sh/manar/manar-edge/internal/ports"
+	"github.com/manarhq/manar-edge/internal/ports"
 	"io"
 	"log"
 	"net"
@@ -20,7 +20,7 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/pause"
+	"github.com/manarhq/manar-edge/internal/pause"
 )
 
 const (

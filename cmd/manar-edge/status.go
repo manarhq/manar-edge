@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/ports"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/ports"
 )
 
 // `manar-edge status` tells a person whether this computer is protected and, for each problem,

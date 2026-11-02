@@ -2,7 +2,7 @@
 
 package watch
 
-import "gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+import "github.com/manarhq/manar-edge/internal/secrets/vault"
 
 // The ssh agent and the restore command ask the watcher's catalogue who is behind a request.
 // Only blockable AI tools count (the same rule as the file block): an editor's own git push is the

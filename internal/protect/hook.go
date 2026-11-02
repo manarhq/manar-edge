@@ -14,7 +14,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/undo"
+	"github.com/manarhq/manar-edge/internal/undo"
 )
 
 // Hooks run as the user and cannot read the host key, so they ask the device service over a local

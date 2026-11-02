@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 type ukey struct{ tool, provider, model, user string }

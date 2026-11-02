@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+	"github.com/manarhq/manar-edge/internal/secrets/vault"
 )
 
 // Run as root: go test -tags fanotify_integration -run Fanotify ./internal/secrets/watch

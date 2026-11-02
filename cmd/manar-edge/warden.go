@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/warden"
+	"github.com/manarhq/manar-edge/internal/warden"
 )
 
 // cmdWarden is `manar-edge warden`: the per-user helper that shows WARDEN prompts, started at

@@ -72,4 +72,4 @@ Contributions need a DCO sign-off: [CONTRIBUTING.md](CONTRIBUTING.md). Report vu
 privately: [SECURITY.md](SECURITY.md). The Manar name and logo are trademarks of Fixio:
 [TRADEMARK.md](TRADEMARK.md). Everyone taking part follows the [Code of Conduct](CODE_OF_CONDUCT.md).
 
-Product site: <https://manar.vax.sh>
+Product site: <https://manar.fixio.ae>

@@ -25,8 +25,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 // telemetryPath is relative to the host API base: POST /host/v1/telemetry (manar-api#24).

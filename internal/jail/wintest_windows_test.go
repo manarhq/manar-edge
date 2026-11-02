@@ -22,9 +22,9 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/protect"
+	"github.com/manarhq/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/protect"
 )
 
 func TestMain(m *testing.M) {

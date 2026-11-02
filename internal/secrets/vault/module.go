@@ -12,9 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/secrets/host"
 )
 
 // featureSSH means "the option to move an ssh key is offered on this device". Manar moves a key only

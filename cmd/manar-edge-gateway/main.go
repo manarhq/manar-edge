@@ -20,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/gateway"
+	"github.com/manarhq/manar-edge/internal/gateway"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 

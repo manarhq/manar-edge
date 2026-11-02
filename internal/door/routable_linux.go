@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/ports"
+	"github.com/manarhq/manar-edge/internal/ports"
 )
 
 // Routable says whether tools may be pointed at DOOR. On Linux that holds only while binding the

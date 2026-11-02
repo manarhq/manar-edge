@@ -1,4 +1,4 @@
-module gitlab.vax.sh/manar/manar-edge
+module github.com/manarhq/manar-edge
 
 go 1.26.8
 

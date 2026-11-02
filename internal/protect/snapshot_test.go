@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/undo"
+	"github.com/manarhq/manar-edge/internal/undo"
 )
 
 func TestSnapshotBeforeEditOnlyOutsideTheProject(t *testing.T) {

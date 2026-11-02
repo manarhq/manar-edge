@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 // StatusRevoked is the status the module reports to the reconciler when Manar keeps refusing the

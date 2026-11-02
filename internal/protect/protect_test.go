@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/discovery"
 )
 
 const exe = "/usr/local/bin/manar-edge"

@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+	"github.com/manarhq/manar-edge/internal/secrets/vault"
 )
 
 // Gate is "WARDEN asks once per program". A denied open starts one question (never inside the

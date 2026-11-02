@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"gitlab.vax.sh/manar/manar-edge/internal/telemetry"
+	"github.com/manarhq/manar-edge/internal/telemetry"
 	"io"
 	"net"
 	"net/http"
@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/gateway"
+	"github.com/manarhq/manar-edge/internal/gateway"
 )
 
 // Proxy is the transparent proxy for one tool. The OS layer redirects the tool's TCP connections

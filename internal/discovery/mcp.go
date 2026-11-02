@@ -3,7 +3,7 @@ package discovery
 import (
 	"encoding/json"
 	"github.com/BurntSushi/toml"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 	"net/url"
 	"path/filepath"
 	"regexp"
