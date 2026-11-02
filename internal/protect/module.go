@@ -273,7 +273,7 @@ func relayHandler(b backend) http.Handler {
 			http.Error(w, "upstream", 502)
 			return
 		}
-		recordDecision(in.ToolID, in.ActionID, in.Resource, res.Decision, time.Since(t0))
+		recordDecision(in.ToolID, in.ActionID, in.Resource, res.Decision, caller, time.Since(t0))
 		json.NewEncoder(w).Encode(res)
 	})
 	// Undo AI file changes: the hook (running as the user) tells the service what it saved. The
@@ -365,7 +365,7 @@ func readUserFile(u discovery.User, path string) ([]byte, bool) {
 }
 
 // recordDecision hands a WARDEN decision to telemetry (non-blocking; a no-op while it is off).
-func recordDecision(toolID, actionID, resource, decision string, took time.Duration) {
+func recordDecision(toolID, actionID, resource, decision, caller string, took time.Duration) {
 	d := map[string]string{"ALLOW": "allow", "APPROVAL_REQUIRED": "ask", "DENY": "block"}[decision]
 	if d == "" {
 		return
@@ -375,7 +375,10 @@ func recordDecision(toolID, actionID, resource, decision string, took time.Durat
 	case "shell":
 		kind = "command"
 	case "webfetch":
-		kind, text = "domain", telemetry.HostOf(resource)
+		kind, text = "domain", telemetry.SampleHost(resource)
+		if text == "" {
+			kind = ""
+		}
 	}
-	telemetry.Record("warden", strings.TrimPrefix(toolID, "host."), d, kind, text, took)
+	telemetry.Record("warden", strings.TrimPrefix(toolID, "host."), d, kind, text, caller, took)
 }
