@@ -6,8 +6,10 @@ import (
 	"errors"
 	"math"
 	"os"
+	"os/user"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -59,7 +61,7 @@ func TestSendsOnlyWhenFlagTrue(t *testing.T) {
 		if enabled.Load() {
 			t.Fatalf("%s: enabled", name)
 		}
-		Record("jail", "t", "block", "domain", "evil.example", time.Millisecond)
+		Record("jail", "t", "block", "domain", "evil.example", "", time.Millisecond)
 		if len(queue) != 0 {
 			t.Fatalf("%s: recorded while off", name)
 		}
@@ -79,9 +81,9 @@ func TestBatchContentAndPath(t *testing.T) {
 		t.Fatal("not enabled")
 	}
 	for i := 0; i < 30; i++ {
-		mem.add(record{"warden", "cursor", "ask", "command", "rm -rf /home/zed/x PASSWORD=hunter2hunter2", time.Duration(i+1) * time.Millisecond})
+		mem.add(rec("warden", "cursor", "ask", "command", "rm -rf /home/zed/x PASSWORD=hunter2hunter2", time.Duration(i+1)*time.Millisecond))
 	}
-	mem.add(record{"jail", "claude-code", "allow", "", "", 2 * time.Millisecond})
+	mem.add(rec("jail", "claude-code", "allow", "", "", 2*time.Millisecond))
 	writeCrash(errors.New("boom secret=abc"), []byte("goroutine 1 [running]:\nmain.f(0xc000012345, {0x1, 0x2})\n\t/home/zed/src/a.go:10 +0x1f\n"))
 	if err := send(context.Background(), a); err != nil {
 		t.Fatal(err)
@@ -145,7 +147,7 @@ func TestTurningOffClearsSpool(t *testing.T) {
 	d := setup(t)
 	a := &fakeAPI{cfg: flag(true)}
 	syncFlag(context.Background(), a)
-	mem.add(record{"jail", "t", "block", "domain", "a.example", time.Millisecond})
+	mem.add(rec("jail", "t", "block", "domain", "a.example", time.Millisecond))
 	mem.save()
 	writeCrash("x", []byte("s"))
 	a.cfg = flag(false)
@@ -167,8 +169,9 @@ func TestTurningOffClearsSpool(t *testing.T) {
 
 func TestSpoolRoundTripAndBound(t *testing.T) {
 	d := setup(t)
+	enabled.Store(true)
 	for i := 0; i < 5000; i++ {
-		mem.add(record{"jail", "t", "allow", "", "", time.Millisecond})
+		mem.add(rec("jail", "t", "allow", "", "", time.Millisecond))
 	}
 	mem.save()
 	fi, err := os.Stat(filepath.Join(d, "spool.json"))
@@ -192,7 +195,7 @@ func TestRecordNeverBlocks(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		for i := 0; i < 10*cap(queue); i++ { // nobody drains the queue
-			Record("jail", "t", "allow", "", "", 0)
+			Record("jail", "t", "allow", "", "", "", 0)
 		}
 		close(done)
 	}()
@@ -217,7 +220,9 @@ func TestRunSendsAtStartThenStops(t *testing.T) {
 	setup(t)
 	a := &fakeAPI{cfg: flag(true)}
 	ctx, cancel := context.WithCancel(context.Background())
-	go run(ctx, a, time.Hour)
+	stopped := make(chan struct{})
+	go func() { run(ctx, a, time.Hour); close(stopped) }()
+	defer func() { cancel(); <-stopped }() // run saves on exit; wait before the temp dir goes
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		a.mu.Lock()
@@ -247,11 +252,11 @@ func TestBatchSatisfiesApiContract(t *testing.T) {
 	huge := strings.Repeat("goroutine 1 [running]:\nmain.f(0x1)\n\t/home/zed/src/a.go:10 +0x1f\n", 400)
 	writeCrash(errors.New("x"), []byte(huge))
 	for i := 0; i < 80; i++ {
-		mem.add(record{"warden", strings.Repeat("t", 100), "ask", "command", "ls " + strings.Repeat("a b ", 300), time.Millisecond})
-		mem.add(record{"warden", "cursor", "block", "domain", "x.example", 2 * time.Millisecond})
-		mem.add(record{"warden", "cursor", "allow", "", "", 3 * time.Millisecond})
-		mem.add(record{"jail", "claude-code", "ask", "domain", "y.example", time.Millisecond})
-		mem.add(record{"jail", "claude-code", "block", "domain", "z.example", time.Millisecond})
+		mem.add(rec("warden", strings.Repeat("t", 100), "ask", "command", "ls "+strings.Repeat("a b ", 300), time.Millisecond))
+		mem.add(rec("warden", "cursor", "block", "domain", "x.example", 2*time.Millisecond))
+		mem.add(rec("warden", "cursor", "allow", "", "", 3*time.Millisecond))
+		mem.add(rec("jail", "claude-code", "ask", "domain", "y.example", time.Millisecond))
+		mem.add(rec("jail", "claude-code", "block", "domain", "z.example", time.Millisecond))
 	}
 	b, _ := build(mem.peek(), time.Now())
 	body, _ := json.Marshal(b)
@@ -315,7 +320,7 @@ func TestFailedSendKeepsSamples(t *testing.T) {
 	setup(t)
 	a := &fakeAPI{cfg: flag(true), perr: errors.New("503")}
 	syncFlag(context.Background(), a)
-	mem.add(record{"jail", "t", "block", "domain", "a.example", time.Millisecond})
+	mem.add(rec("jail", "t", "block", "domain", "a.example", time.Millisecond))
 	if send(context.Background(), a) == nil {
 		t.Fatal("expected error")
 	}
@@ -324,7 +329,7 @@ func TestFailedSendKeepsSamples(t *testing.T) {
 	}
 	// A record that arrives during a successful send is kept.
 	a.perr = nil
-	mem.add(record{"jail", "t", "block", "domain", "b.example", time.Millisecond})
+	mem.add(rec("jail", "t", "block", "domain", "b.example", time.Millisecond))
 	if err := send(context.Background(), a); err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +343,7 @@ func TestRejectedBatchIsDropped(t *testing.T) {
 	a := &fakeAPI{cfg: flag(true), perr: &hostclient.StatusError{Code: 400, Message: "bad"}}
 	syncFlag(context.Background(), a)
 	writeCrash("x", []byte("s"))
-	mem.add(record{"jail", "t", "block", "domain", "a.example", time.Millisecond})
+	mem.add(rec("jail", "t", "block", "domain", "a.example", time.Millisecond))
 	if send(context.Background(), a) == nil {
 		t.Fatal("expected the error to be returned")
 	}
@@ -350,5 +355,112 @@ func TestRejectedBatchIsDropped(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(d, "first_run")); err == nil {
 		t.Fatal("first_run marked after a 400")
+	}
+}
+
+// rec is a record made under the current consent epoch.
+func rec(component, tool, decision, kind, text string, took time.Duration) record {
+	return record{component, tool, decision, kind, text, "", took, epoch.Load()}
+}
+
+func TestMinimise(t *testing.T) {
+	for in, want := range map[string]string{
+		"git push --force":                          "git push --force",
+		"git push --force origin main":              "git push --force",
+		"mysql -u root -pHunter2 db":                "mysql -u -p",
+		"/usr/bin/curl -H 'X: y' --data=secret url": "curl -H --data",
+		"AWS_KEY=zzz rm -rf /home/a/b":              "rm -r",
+		"git -C /x push --force origin main":        "git -C push --force",
+		"C:\\Tools\\Kubectl.exe delete pod x":       "kubectl delete",
+		"cd /srv && npm install left-pad | tee out": "<cmd> ; npm install ; <cmd>",
+		"python3 script.py --token abc":             "python3 --token",
+		"python3.11 script.py --token abc":          "<cmd>",
+		"./mytool --secret-flag=abc":                "<cmd>",
+		`echo "a; secretvalue"`:                     "<cmd> ; <cmd>",
+		`bash -c 'x; y'`:                            "bash -c ; <cmd>",
+		`echo "a && sk_live_abc" | cat`:             "<cmd> ; <cmd> ; cat",
+		`ls "x; --token=abc"`:                       "ls ; <cmd>",
+		"":                                          "",
+	} {
+		if got := Minimise(in); got != want {
+			t.Errorf("Minimise(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+func TestSampleHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"https://Docs.Example.com/a?q=1": "docs.example.com",
+		"http://example.org":             "example.org",
+		"http://localhost:3000/x":        "",
+		"https://10.1.2.3/x":             "",
+		"https://[2001:db8::1]/":         "",
+		"ftp://example.com/":             "",
+		"how do I fix my password":       "",
+		"example.com":                    "",
+		"":                               "",
+	} {
+		if got := SampleHost(in); got != want {
+			t.Errorf("SampleHost(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if sampleText(record{kind: "domain", text: "10.0.0.1"}) != "" || sampleText(record{kind: "domain", text: "intranet"}) != "" {
+		t.Error("ip or dotless host sampled")
+	}
+}
+
+func TestSampleScrubsCallerUser(t *testing.T) {
+	u, err := user.Current()
+	if err != nil || len(u.Username) < 3 {
+		t.Skip("no usable user")
+	}
+	caller := "uid:" + u.Uid
+	if runtime.GOOS == "windows" {
+		caller = "sid:" + u.Uid
+	}
+	for _, c := range []string{caller, caller + "|s:abc123"} { // the relay may append a session id
+		got := scrubUser("owner "+u.Username+" home "+u.HomeDir+"/x", c)
+		if strings.Contains(got, u.Username) || (len(u.HomeDir) > 1 && strings.Contains(got, u.HomeDir)) {
+			t.Errorf("caller %q: name or home survived: %q", c, got)
+		}
+	}
+}
+
+// Records queued or in flight when consent is withdrawn are neither stored, saved nor sent.
+func TestConsentWithdrawnDropsQueued(t *testing.T) {
+	d := setup(t)
+	a := &fakeAPI{cfg: flag(true)}
+	syncFlag(context.Background(), a)
+	for i := 0; i < 50; i++ {
+		Record("jail", "t", "block", "domain", "a.example.com", "", time.Millisecond)
+	}
+	inflight := rec("jail", "t", "block", "domain", "b.example.com", time.Millisecond) // already taken from the queue
+	a.cfg = flag(false)
+	syncFlag(context.Background(), a)
+	if len(queue) != 0 {
+		t.Fatal("queue not drained")
+	}
+	mem.add(inflight)
+	for i := 0; i < 3; i++ { // a worker that was slow: epoch is old, flag is off
+		mem.add(record{component: "jail", decision: "block", epoch: 0, took: time.Millisecond})
+	}
+	mem.save()
+	if _, err := os.Stat(filepath.Join(d, "spool.json")); err == nil {
+		t.Fatal("spool saved after off")
+	}
+	if len(mem.st.Counts) != 0 || len(mem.st.Samples) != 0 || len(mem.st.Dur) != 0 {
+		t.Fatalf("stored after off: %+v", mem.st)
+	}
+	// Back on: a record from before the toggle (old epoch) is still refused.
+	old := rec("jail", "t", "block", "domain", "c.example.com", time.Millisecond)
+	a.cfg = flag(true)
+	syncFlag(context.Background(), a)
+	mem.add(old)
+	if len(mem.st.Counts) != 0 {
+		t.Fatal("old-epoch record accepted")
+	}
+	mem.add(rec("jail", "t", "block", "domain", "d.example.com", time.Millisecond))
+	if mem.st.Counts["jail"]["block"] != 1 {
+		t.Fatal("current record refused")
 	}
 }

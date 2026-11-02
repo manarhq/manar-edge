@@ -437,6 +437,6 @@ func relayHTTP(c net.Conn, br *bufio.Reader, up net.Conn, host string) {
 func recordDecision(tool, host string, v Verdict, took time.Duration) {
 	d := map[Verdict]string{Allow: "allow", Ask: "ask", Deny: "block"}[v]
 	if d != "" {
-		telemetry.Record("jail", tool, d, "domain", host, took)
+		telemetry.Record("jail", tool, d, "domain", host, "", took)
 	}
 }

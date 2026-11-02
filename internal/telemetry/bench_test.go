@@ -11,6 +11,6 @@ func BenchmarkRedactCommand(b *testing.B) {
 func BenchmarkRecordOff(b *testing.B) {
 	enabled.Store(false)
 	for i := 0; i < b.N; i++ {
-		Record("jail", "t", "allow", "", "", 0)
+		Record("jail", "t", "allow", "", "", "", 0)
 	}
 }

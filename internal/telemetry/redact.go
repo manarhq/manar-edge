@@ -8,6 +8,7 @@ import (
 	"os/user"
 	"regexp"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/door"
@@ -174,4 +175,111 @@ func replaceWord(s, name, with string) string {
 	}
 	return regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])`+regexp.QuoteMeta(name)+`($|[^A-Za-z0-9])`).
 		ReplaceAllString(s, "${1}"+with+"${2}")
+}
+
+// ---- sample minimisation ----
+
+var (
+	reFlagName = regexp.MustCompile(`^-{1,2}[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
+	reAssignTk = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
+	reSegment  = regexp.MustCompile(`&&|\|\||[;|\n]`)
+	programs   = set("git", "gh", "npm", "npx", "pnpm", "yarn", "node", "python", "python3", "pip", "go",
+		"cargo", "make", "docker", "kubectl", "helm", "terraform", "az", "aws", "gcloud", "curl", "wget",
+		"ssh", "scp", "rsync", "rm", "mv", "cp", "chmod", "chown", "sudo", "bash", "sh", "zsh", "pwsh",
+		"powershell", "cmd", "mysql", "psql", "sqlite3", "redis-cli", "mongo", "ls", "cat", "sed", "awk",
+		"grep", "find", "tar", "unzip", "systemctl", "apt", "dnf", "brew", "winget", "choco", "claude",
+		"codex", "cursor", "code")
+	// verbs that may stay as plain words
+	verbs = map[string]bool{"push": true, "pull": true, "reset": true, "rm": true, "install": true,
+		"run": true, "exec": true, "apply": true, "delete": true}
+)
+
+// Minimise reduces a shell command to what is safe to look at: per command, the program's base
+// name, its flag NAMES (never their values), and a few common verbs. `mysql -u root -pX db` becomes
+// `mysql -u -p`; `git push --force origin main` becomes `git push --force`. At most 5 commands.
+func Minimise(cmd string) string {
+	var out []string
+	for _, seg := range reSegment.Split(strings.ToValidUTF8(cmd, ""), 6) {
+		if len(out) == 5 {
+			break
+		}
+		var words []string
+		started, unknown := false, false
+		for _, tk := range strings.Fields(seg) {
+			tk = strings.Trim(tk, "()")
+			switch {
+			case tk == "" || unknown:
+			case !started:
+				if reAssignTk.MatchString(tk) { // FOO=bar prefix: dropped
+					continue
+				}
+				started = true
+				tk = tk[strings.LastIndexAny(tk, `/\`)+1:]
+				tk = strings.TrimSuffix(strings.ToLower(tk), ".exe")
+				// The splitting is not quote-aware, so a quoted fragment can land here as a
+				// "program": anything not on the list is replaced and its words are dropped.
+				if !programs[tk] {
+					words = []string{"<cmd>"}
+					unknown = true
+					continue
+				}
+				words = append(words, tk)
+			case strings.HasPrefix(tk, "-"):
+				name, _, _ := strings.Cut(tk, "=")
+				if !strings.HasPrefix(name, "--") && len(name) > 2 {
+					name = name[:2] // -pSECRET is "-p"
+				}
+				if reFlagName.MatchString(name) {
+					words = append(words, name)
+				}
+			case verbs[tk]:
+				words = append(words, tk)
+			}
+		}
+		if len(words) > 0 {
+			out = append(out, strings.Join(words, " "))
+		}
+	}
+	return strings.Join(out, " ; ")
+}
+
+func set(ns ...string) map[string]bool {
+	m := map[string]bool{}
+	for _, n := range ns {
+		m[n] = true
+	}
+	return m
+}
+
+var userCache sync.Map // normalised caller -> *user.User or nil
+
+// scrubUser removes the calling user's name and home directory (the relay caller is not
+// necessarily the account the service runs as). caller is "uid:N" or "sid:S-...".
+func scrubUser(s, caller string) string {
+	caller, _, _ = strings.Cut(caller, "|") // "uid:1000|s:<session>" -> "uid:1000"
+	_, id, ok := strings.Cut(caller, ":")
+	if !ok || id == "" {
+		return s
+	}
+	v, found := userCache.Load(caller)
+	if !found {
+		u, err := user.LookupId(id)
+		if err != nil {
+			u = nil
+		}
+		v = u
+		userCache.Store(caller, u)
+	}
+	u, _ := v.(*user.User)
+	if u == nil {
+		return s
+	}
+	if len(u.HomeDir) > 1 {
+		s = strings.ReplaceAll(s, u.HomeDir, "~")
+	}
+	name := u.Username
+	if i := strings.LastIndex(name, `\`); i >= 0 {
+		name = name[i+1:]
+	}
+	return replaceWord(s, name, "<user>")
 }

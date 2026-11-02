@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -48,7 +49,10 @@ var (
 	dir       atomic.Pointer[string]
 	version   atomic.Pointer[string]
 	enabled   atomic.Bool // last synced dataCollection.improveManar
-	queue     = make(chan record, 256)
+	// epoch changes every time the flag changes; a record made under an older epoch is dropped,
+	// so nothing recorded before "off" can be stored or sent after it.
+	epoch atomic.Uint64
+	queue = make(chan record, 256)
 )
 
 func init() {
@@ -71,19 +75,22 @@ func spoolDir() string {
 }
 
 type record struct {
-	component, tool, decision, kind, text string
-	took                                  time.Duration
+	component, tool, decision, kind, text, owner string
+	took                                         time.Duration
+	epoch                                        uint64
 }
 
 // Record notes one WARDEN or JAIL decision. It never blocks: when telemetry is off it returns at
 // once, and when the queue is full the record is dropped. decision is allow, ask or block; kind
-// (command or domain) and text only matter for ask and block, which are sampled after redaction.
-func Record(component, tool, decision, kind, text string, took time.Duration) {
+// (command or domain) and text only matter for ask and block, which are sampled after
+// minimisation and redaction. owner is the caller ("uid:1000", "sid:S-1-5-..."), so that user's
+// name and home directory can be scrubbed too; "" when unknown.
+func Record(component, tool, decision, kind, text, owner string, took time.Duration) {
 	if !enabled.Load() {
 		return
 	}
 	select {
-	case queue <- record{component, tool, decision, kind, text, took}:
+	case queue <- record{component, tool, decision, kind, text, owner, took, epoch.Load()}:
 	default:
 	}
 }
@@ -122,12 +129,18 @@ func (s *store) add(r record) {
 		s.mu.Lock()
 		full := len(s.st.Samples) >= maxSamples
 		s.mu.Unlock()
-		if !full { // redact outside the lock; it is the costly part
-			smp = &Sample{r.kind, cut(r.tool, 64), r.decision, Redact(r.text), time.Now().UTC().Format(time.RFC3339)}
+		if !full { // minimise and redact outside the lock; it is the costly part
+			if text := sampleText(r); text != "" {
+				smp = &Sample{r.kind, cut(r.tool, 64), r.decision, text, time.Now().UTC().Format(time.RFC3339)}
+			}
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Consent is checked under the lock that clearAll and save also take.
+	if !enabled.Load() || r.epoch != epoch.Load() {
+		return
+	}
 	c := s.st.Counts[r.component]
 	if c == nil {
 		c = map[string]int{}
@@ -142,6 +155,18 @@ func (s *store) add(r record) {
 	if smp != nil && len(s.st.Samples) < maxSamples {
 		s.st.Samples = append(s.st.Samples, *smp)
 	}
+}
+
+// sampleText is what may leave the device: a command shrinks to program and flag names, a domain
+// must be a real host name; then redaction and the caller's name and home are scrubbed as well.
+func sampleText(r record) string {
+	t := r.text
+	if r.kind == "command" {
+		t = Minimise(t)
+	} else if !eligibleHost(t) {
+		return ""
+	}
+	return cut(scrubUser(Redact(t), r.owner), maxSample)
 }
 
 func (s *store) take() state {
@@ -204,9 +229,13 @@ func (s *store) save() {
 	if d == "" {
 		return
 	}
+	// The lock is held through the write so a clearAll cannot be followed by a stale file.
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !enabled.Load() {
+		return
+	}
 	b, _ := json.Marshal(s.st)
-	s.mu.Unlock()
 	if len(b) > maxSpool {
 		return
 	}
@@ -234,6 +263,14 @@ func (s *store) load() {
 
 // clearAll removes everything collected (the flag is off). first_run stays: it is a once-only mark.
 func clearAll() {
+	for { // records queued before "off" are discarded, not stored later
+		select {
+		case <-queue:
+			continue
+		default:
+		}
+		break
+	}
 	mem.take()
 	d := spoolDir()
 	if d == "" {
@@ -430,7 +467,11 @@ func (*module) Start(ctx context.Context, c *hostclient.Client) error {
 
 func run(ctx context.Context, c api, every time.Duration) {
 	mem.load()
-	defer mem.save()
+	defer func() {
+		if enabled.Load() {
+			mem.save()
+		}
+	}()
 	go func() {
 		for {
 			select {
@@ -472,7 +513,9 @@ func syncFlag(ctx context.Context, c api) {
 		return
 	}
 	on := cfg.DataCollection != nil && cfg.DataCollection.ImproveManar
-	enabled.Store(on)
+	if enabled.Swap(on) != on {
+		epoch.Add(1)
+	}
 	if !on {
 		clearAll()
 	}
@@ -504,14 +547,23 @@ func send(ctx context.Context, c api) error {
 	return err
 }
 
-// HostOf returns the host part of a URL or host:port for a domain sample ("" when unusable).
-func HostOf(raw string) string {
-	if !strings.Contains(raw, "://") {
-		raw = "//" + raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
+// SampleHost returns the host of a web address that may be sampled: an http(s) URL whose host
+// name has a dot and is not an IP address. Search queries and free text give "".
+func SampleHost(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
 		return ""
 	}
-	return u.Hostname()
+	if h := strings.ToLower(u.Hostname()); eligibleHost(h) {
+		return h
+	}
+	return ""
+}
+
+func eligibleHost(h string) bool {
+	if !strings.Contains(h, ".") || strings.ContainsAny(h, " /@?#:\t\n") {
+		return false
+	}
+	_, err := netip.ParseAddr(h)
+	return err != nil
 }
