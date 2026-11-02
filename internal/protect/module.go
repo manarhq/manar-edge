@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"gitlab.vax.sh/manar/manar-edge/internal/telemetry"
 	"io"
 	"log"
 	"net"
@@ -266,11 +267,13 @@ func relayHandler(b backend) http.Handler {
 		if sid := raw["session"]; sessionOK.MatchString(sid) {
 			caller += "|s:" + sid
 		}
+		t0 := time.Now()
 		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller)
 		if err != nil {
 			http.Error(w, "upstream", 502)
 			return
 		}
+		recordDecision(in.ToolID, in.ActionID, in.Resource, res.Decision, time.Since(t0))
 		json.NewEncoder(w).Encode(res)
 	})
 	// Undo AI file changes: the hook (running as the user) tells the service what it saved. The
@@ -359,4 +362,20 @@ func readUserFile(u discovery.User, path string) ([]byte, bool) {
 		return nil, false
 	}
 	return b, true
+}
+
+// recordDecision hands a WARDEN decision to telemetry (non-blocking; a no-op while it is off).
+func recordDecision(toolID, actionID, resource, decision string, took time.Duration) {
+	d := map[string]string{"ALLOW": "allow", "APPROVAL_REQUIRED": "ask", "DENY": "block"}[decision]
+	if d == "" {
+		return
+	}
+	kind, text := "", resource
+	switch actionID {
+	case "shell":
+		kind = "command"
+	case "webfetch":
+		kind, text = "domain", telemetry.HostOf(resource)
+	}
+	telemetry.Record("warden", strings.TrimPrefix(toolID, "host."), d, kind, text, took)
 }

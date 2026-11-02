@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"gitlab.vax.sh/manar/manar-edge/internal/telemetry"
 	"io"
 	"net"
 	"net/http"
@@ -105,7 +106,9 @@ func (p *Proxy) handle(c net.Conn) {
 	defer cancel()
 
 	port := dst.Port()
+	t0 := time.Now()
 	v, why := p.Policy.Decide(p.Tool, host)
+	recordDecision(p.Tool, host, v, time.Since(t0))
 	if v == Ask && kind == "other" && port == 22 {
 		if a, err := netip.ParseAddr(host); err == nil && p.Policy.AllowedAddr(p.Tool, a) {
 			v, why = Allow, "builtin"
@@ -427,5 +430,13 @@ func relayHTTP(c net.Conn, br *bufio.Reader, up net.Conn, host string) {
 		if err != nil || req.Close || resp.Close {
 			return
 		}
+	}
+}
+
+// recordDecision hands a JAIL check to telemetry (non-blocking; a no-op while it is off).
+func recordDecision(tool, host string, v Verdict, took time.Duration) {
+	d := map[Verdict]string{Allow: "allow", Ask: "ask", Deny: "block"}[v]
+	if d != "" {
+		telemetry.Record("jail", tool, d, "domain", host, took)
 	}
 }
