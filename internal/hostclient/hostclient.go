@@ -418,16 +418,28 @@ type MCPServer struct {
 	OutsideHome bool     `json:"outsideHome,omitempty"`
 }
 
-// Inventory reports the AI tools and their MCP servers found on this device. It is the whole list:
-// a tool or server left out is treated as gone. An older Manar ignores mcpServers.
-func (c *Client) Inventory(ctx context.Context, tools []Tool, mcp []MCPServer) error {
+// ModuleState is how one module of the device service is doing (ok, off or problem), sent with the
+// inventory so the console's home screen says what `manar-edge status` says.
+type ModuleState struct {
+	State  string `json:"state"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// Inventory reports the AI tools and their MCP servers found on this device, and the state of the
+// service's modules. It is the whole list: a tool or server left out is treated as gone. An older
+// Manar ignores mcpServers and modules; nil modules are not sent.
+func (c *Client) Inventory(ctx context.Context, tools []Tool, mcp []MCPServer, modules map[string]ModuleState) error {
 	if tools == nil {
 		tools = []Tool{}
 	}
 	if mcp == nil {
 		mcp = []MCPServer{}
 	}
-	return c.Do(ctx, http.MethodPost, "/inventory", map[string]any{"tools": tools, "mcpServers": mcp}, nil)
+	body := map[string]any{"tools": tools, "mcpServers": mcp}
+	if modules != nil {
+		body["modules"] = modules
+	}
+	return c.Do(ctx, http.MethodPost, "/inventory", body, nil)
 }
 
 // Authorize asks for a decision on an action of another AI tool (POST /host/v1/authorize).
