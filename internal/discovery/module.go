@@ -71,7 +71,7 @@ func init() { daemon.Register(&Module{}) }
 
 type api interface {
 	Config(ctx context.Context) (*hostclient.Config, error)
-	Inventory(ctx context.Context, tools []hostclient.Tool, mcp []hostclient.MCPServer) error
+	Inventory(ctx context.Context, tools []hostclient.Tool, mcp []hostclient.MCPServer, modules map[string]hostclient.ModuleState) error
 }
 
 // Module scans the device, lets protection catch up, and reports. A scan runs every Poll (so a
@@ -140,12 +140,14 @@ func (m *Module) run(ctx context.Context, c api) error {
 		}
 		daemon.SetTools(ts)
 		mcp := MCPServers(found, goos, currentUserReader())
+		mods := daemon.Modules()
 		b, _ := json.Marshal(struct {
 			T []hostclient.Tool
 			M []MCPServer
-		}{tools, mcp})
+			S map[string]hostclient.ModuleState
+		}{tools, mcp, mods})
 		if ctx.Err() == nil && (!bytes.Equal(b, last) || time.Since(lastAt) >= every) {
-			if err := c.Inventory(ctx, tools, mcp); err != nil {
+			if err := c.Inventory(ctx, tools, mcp, mods); err != nil {
 				log.Printf("manar-edge: discovery: inventory: %v", err)
 			} else {
 				last, lastAt = b, time.Now()

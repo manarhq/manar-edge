@@ -5,8 +5,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 // The device service publishes a small status file that any local user may read, so
@@ -61,6 +64,30 @@ func SetComponent(name string, c Component) {
 	cur.Components[name] = c
 	stMu.Unlock()
 	poke()
+}
+
+// Modules is the state of each supervised module ("module:<name>" components), by name, for the
+// inventory. The detail is cut to what Manar stores; the fix line stays on the device. Nil when no
+// module has reported yet, so Manar does not read an empty list as "every module missing".
+func Modules() map[string]hostclient.ModuleState {
+	stMu.Lock()
+	defer stMu.Unlock()
+	var out map[string]hostclient.ModuleState
+	for k, c := range cur.Components {
+		name, ok := strings.CutPrefix(k, "module:")
+		if !ok {
+			continue
+		}
+		if out == nil {
+			out = map[string]hostclient.ModuleState{}
+		}
+		d := c.Detail
+		if len(d) > 200 {
+			d = d[:200]
+		}
+		out[name] = hostclient.ModuleState{State: c.State, Detail: d}
+	}
+	return out
 }
 
 // SetTools records the AI tools found and how each is protected.

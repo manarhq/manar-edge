@@ -66,6 +66,7 @@ type fakeAPI struct {
 	mu   sync.Mutex
 	cfg  hostclient.Config
 	sent [][]hostclient.Tool
+	mods []map[string]hostclient.ModuleState
 }
 
 func (f *fakeAPI) Config(context.Context) (*hostclient.Config, error) {
@@ -74,10 +75,11 @@ func (f *fakeAPI) Config(context.Context) (*hostclient.Config, error) {
 	c := f.cfg
 	return &c, nil
 }
-func (f *fakeAPI) Inventory(_ context.Context, t []hostclient.Tool, _ []hostclient.MCPServer) error {
+func (f *fakeAPI) Inventory(_ context.Context, t []hostclient.Tool, _ []hostclient.MCPServer, m map[string]hostclient.ModuleState) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sent = append(f.sent, t)
+	f.mods = append(f.mods, m)
 	return nil
 }
 
@@ -105,6 +107,9 @@ func TestModuleReportsOnChangeNotEveryPoll(t *testing.T) {
 	}
 	if len(api.sent[0]) != 1 || len(api.sent[1]) != 2 || !api.sent[0][0].Protected {
 		t.Fatalf("%+v", api.sent)
+	}
+	if api.mods[0] != nil {
+		t.Fatalf("no module has reported, so none are sent: %+v", api.mods[0])
 	}
 }
 
