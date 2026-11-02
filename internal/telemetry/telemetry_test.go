@@ -220,7 +220,9 @@ func TestRunSendsAtStartThenStops(t *testing.T) {
 	setup(t)
 	a := &fakeAPI{cfg: flag(true)}
 	ctx, cancel := context.WithCancel(context.Background())
-	go run(ctx, a, time.Hour)
+	stopped := make(chan struct{})
+	go func() { run(ctx, a, time.Hour); close(stopped) }()
+	defer func() { cancel(); <-stopped }() // run saves on exit; wait before the temp dir goes
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		a.mu.Lock()
@@ -368,9 +370,16 @@ func TestMinimise(t *testing.T) {
 		"mysql -u root -pHunter2 db":                "mysql -u -p",
 		"/usr/bin/curl -H 'X: y' --data=secret url": "curl -H --data",
 		"AWS_KEY=zzz rm -rf /home/a/b":              "rm -r",
+		"git -C /x push --force origin main":        "git -C push --force",
 		"C:\\Tools\\Kubectl.exe delete pod x":       "kubectl delete",
-		"cd /srv && npm install left-pad | tee out": "cd ; npm install ; tee",
-		"python3.11 script.py --token abc":          "python3.11 --token",
+		"cd /srv && npm install left-pad | tee out": "<cmd> ; npm install ; <cmd>",
+		"python3 script.py --token abc":             "python3 --token",
+		"python3.11 script.py --token abc":          "<cmd>",
+		"./mytool --secret-flag=abc":                "<cmd>",
+		`echo "a; secretvalue"`:                     "<cmd> ; <cmd>",
+		`bash -c 'x; y'`:                            "bash -c ; <cmd>",
+		`echo "a && sk_live_abc" | cat`:             "<cmd> ; <cmd> ; cat",
+		`ls "x; --token=abc"`:                       "ls ; <cmd>",
 		"":                                          "",
 	} {
 		if got := Minimise(in); got != want {
@@ -409,9 +418,11 @@ func TestSampleScrubsCallerUser(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		caller = "sid:" + u.Uid
 	}
-	got := sampleText(record{kind: "command", text: u.Username + " -x", owner: caller})
-	if strings.Contains(got, u.Username) {
-		t.Errorf("caller name survived: %q", got)
+	for _, c := range []string{caller, caller + "|s:abc123"} { // the relay may append a session id
+		got := scrubUser("owner "+u.Username+" home "+u.HomeDir+"/x", c)
+		if strings.Contains(got, u.Username) || (len(u.HomeDir) > 1 && strings.Contains(got, u.HomeDir)) {
+			t.Errorf("caller %q: name or home survived: %q", c, got)
+		}
 	}
 }
 
