@@ -16,8 +16,8 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
-	"gitlab.vax.sh/manar/manar-edge/internal/protect"
+	"github.com/manarhq/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/protect"
 )
 
 // storeTool is the key JAIL's settings edits are backed up under in the protect store.

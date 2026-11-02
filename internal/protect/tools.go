@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/discovery"
 )
 
 // Role says what a planned edit contributes to a tool's protection.

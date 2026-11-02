@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 func fakeHome(t *testing.T, dirs ...string) User {

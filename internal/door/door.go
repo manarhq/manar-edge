@@ -26,9 +26,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/pause"
-	"gitlab.vax.sh/manar/manar-edge/internal/ports"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/pause"
+	"github.com/manarhq/manar-edge/internal/ports"
 )
 
 // Listen is where DOOR listens. Protect routes tool base URLs here.

@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
+	"github.com/manarhq/manar-edge/internal/secrets/host"
 )
 
 // PermEvent is one open of a watched file that waits for our answer.

@@ -15,8 +15,8 @@ import (
 	"sync"
 	"testing"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/pause"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/pause"
 )
 
 type fakeAPI struct {

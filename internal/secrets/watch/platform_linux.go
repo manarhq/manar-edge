@@ -8,7 +8,7 @@ import (
 	"log"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
+	"github.com/manarhq/manar-edge/internal/secrets/host"
 )
 
 func cleanupPlatform(context.Context) error { return nil } // the marks go with the process

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+	"github.com/manarhq/manar-edge/internal/secrets/vault"
 )
 
 func TestModeFromFeaturesAndBlocks(t *testing.T) {

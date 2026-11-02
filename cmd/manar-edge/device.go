@@ -16,11 +16,11 @@ import (
 	"syscall"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/jail"
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
-	"gitlab.vax.sh/manar/manar-edge/internal/warden"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/jail"
+	"github.com/manarhq/manar-edge/internal/secrets/vault"
+	"github.com/manarhq/manar-edge/internal/warden"
 )
 
 // The one-liner path for personal devices (manar-api GET /i/<code>): `install --code` enrols

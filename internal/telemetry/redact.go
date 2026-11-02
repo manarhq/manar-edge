@@ -11,7 +11,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/door"
+	"github.com/manarhq/manar-edge/internal/door"
 )
 
 // maxSample is the longest sample after redaction (design spec section 1).

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"gitlab.vax.sh/manar/manar-edge/internal/telemetry"
+	"github.com/manarhq/manar-edge/internal/telemetry"
 	"io"
 	"log"
 	"net"
@@ -14,13 +14,13 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
-	"gitlab.vax.sh/manar/manar-edge/internal/door"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
-	"gitlab.vax.sh/manar/manar-edge/internal/pause"
-	"gitlab.vax.sh/manar/manar-edge/internal/ports"
-	"gitlab.vax.sh/manar/manar-edge/internal/undo"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/door"
+	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/pause"
+	"github.com/manarhq/manar-edge/internal/ports"
+	"github.com/manarhq/manar-edge/internal/undo"
 )
 
 // GatewayURL is the local LLM gateway base URL; set by the command package.

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/daemon"
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/daemon"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 var t0 = time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)

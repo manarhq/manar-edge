@@ -11,7 +11,7 @@ import (
 	"strings"
 	"unicode/utf16"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/ports"
+	"github.com/manarhq/manar-edge/internal/ports"
 )
 
 // overlayTargets returns the overlay endpoints a jailed agent may reach: Manar's relay and the

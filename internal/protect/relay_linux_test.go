@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 type fakeBackend struct {

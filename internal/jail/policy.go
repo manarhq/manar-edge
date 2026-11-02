@@ -13,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/gateway"
+	"github.com/manarhq/manar-edge/internal/gateway"
 )
 
 // Verdict is what the policy says about one site for one tool.

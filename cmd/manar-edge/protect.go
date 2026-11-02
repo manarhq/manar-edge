@@ -9,8 +9,8 @@ import (
 	"runtime"
 	"time"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/discovery"
-	"gitlab.vax.sh/manar/manar-edge/internal/protect"
+	"github.com/manarhq/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/protect"
 )
 
 // cmdHookTool is the hook installed in Cursor, Windsurf, Gemini CLI, Codex CLI and Copilot CLI.

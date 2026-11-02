@@ -8,12 +8,12 @@ import (
 	"os"
 	"strings"
 
-	"gitlab.vax.sh/manar/manar-edge/internal/door"
-	"gitlab.vax.sh/manar/manar-edge/internal/protect"
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
-	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
-	"gitlab.vax.sh/manar/manar-edge/internal/telemetry"
-	"gitlab.vax.sh/manar/manar-edge/internal/undo"
+	"github.com/manarhq/manar-edge/internal/door"
+	"github.com/manarhq/manar-edge/internal/protect"
+	"github.com/manarhq/manar-edge/internal/secrets/host"
+	"github.com/manarhq/manar-edge/internal/secrets/vault"
+	"github.com/manarhq/manar-edge/internal/telemetry"
+	"github.com/manarhq/manar-edge/internal/undo"
 )
 
 var version = "dev"
