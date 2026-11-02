@@ -15,6 +15,7 @@ type scripted struct {
 	ask      string // JSON reply to /jail/ask
 	statuses []string
 	calls    []string
+	lastBody map[string]any
 	err      error
 }
 
@@ -35,7 +36,9 @@ func (s *scripted) Do(_ context.Context, method, path string, in, out any) error
 		}
 		return json.Unmarshal([]byte(r), out)
 	}
-	return nil // the withdraw
+	b, _ := json.Marshal(in) // the withdraw
+	_ = json.Unmarshal(b, &s.lastBody)
+	return nil
 }
 
 func TestAskerAnswers(t *testing.T) {
@@ -52,6 +55,7 @@ func TestAskerAnswers(t *testing.T) {
 		{"always", `{"decision":"ask","id":"a1"}`, []string{`{"status":"APPROVED","decision":"approve_always"}`}, Result{Allow: true, Remember: -1}},
 		{"denied", `{"decision":"ask","id":"a1"}`, []string{`{"status":"DENIED","decision":"deny"}`}, Result{Reason: "denied"}},
 		{"expired", `{"decision":"ask","id":"a1"}`, []string{`{"status":"EXPIRED"}`}, Result{Reason: "denied_no_answer"}},
+		{"revoked", `{"decision":"ask","id":"a1"}`, []string{`{"status":"PENDING"}`, `{"status":"REVOKED","decision":"approve_once"}`}, Result{Reason: "denied"}},
 		{"approved without a known decision is not consent", `{"decision":"ask","id":"a1"}`, []string{`{"status":"APPROVED","decision":"surprise"}`}, Result{Reason: "denied"}},
 	}
 	for _, c := range cases {
@@ -89,5 +93,8 @@ func TestAskerWithdrawsAfterTheWait(t *testing.T) {
 	defer s.mu.Unlock()
 	if last := s.calls[len(s.calls)-1]; last != "POST /approvals/a1/decide" {
 		t.Fatalf("approval not withdrawn: %v", s.calls)
+	}
+	if w, _ := s.lastBody["withdraw"].(bool); !w || s.lastBody["decision"] != "deny" {
+		t.Fatalf("the withdrawal must say it is one, not a person's deny: %v", s.lastBody)
 	}
 }

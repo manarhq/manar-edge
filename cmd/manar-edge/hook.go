@@ -175,6 +175,8 @@ func (h *hookClient) waitApproval(ctx context.Context, id string) (bool, string)
 			return false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"
 		case "EXPIRED":
 			return false, "Manar denied: no answer"
+		case "REVOKED":
+			return false, "Manar denied: approval revoked (a person withdrew it in the Manar console)"
 		default:
 			return false, "Manar: approval " + id + " is " + ap.Status
 		}

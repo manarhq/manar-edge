@@ -78,6 +78,8 @@ func (a *APIAsker) Ask(ctx context.Context, tool, site string) (Result, error) {
 				return Result{Reason: "denied"}, nil
 			case "EXPIRED":
 				return Result{Reason: "denied_no_answer"}, nil
+			case "REVOKED": // a person withdrew the approval before this device read it
+				return Result{Reason: "denied"}, nil
 			}
 		}
 		select {
@@ -90,9 +92,10 @@ func (a *APIAsker) Ask(ctx context.Context, tool, site string) (Result, error) {
 }
 
 // withdraw closes the prompt after the wait ran out so a late tap cannot allow a site nobody is
-// waiting for any more. Best effort: the approval also expires on its own.
+// waiting for any more. Best effort: the approval also expires on its own. `withdraw` tells the API
+// nobody denied it: it is recorded as "no answer", not as the owner's deny.
 func (a *APIAsker) withdraw(id string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = a.API.Do(ctx, http.MethodPost, "/approvals/"+url.PathEscape(id)+"/decide", map[string]string{"decision": "deny"}, nil)
+	_ = a.API.Do(ctx, http.MethodPost, "/approvals/"+url.PathEscape(id)+"/decide", map[string]any{"decision": "deny", "withdraw": true}, nil)
 }

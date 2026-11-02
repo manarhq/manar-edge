@@ -255,6 +255,8 @@ func (r *Relay) wait(ctx context.Context, id string) Verdict {
 		case "PENDING":
 		case "EXPIRED":
 			return Verdict{false, "Manar denied: no answer"}
+		case "REVOKED":
+			return Verdict{false, "Manar denied: approval revoked (a person withdrew it in the Manar console)"}
 		case "PAUSED":
 			return Verdict{false, "Manar denied: paused (AI is paused for this workspace; resume it in the Manar console)"}
 		default:
