@@ -7,12 +7,16 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"runtime/debug"
 	"sync"
 	"time"
 
 	"gitlab.vax.sh/manar/manar-edge/internal/hostclient"
 	"gitlab.vax.sh/manar/manar-edge/internal/pause"
 )
+
+// OnPanic, when set, is told about a module panic (the value and the stack). telemetry sets it.
+var OnPanic func(v any, stack []byte)
 
 // Module is one feature of the device service. Start blocks until ctx is done; an error other
 // than context cancellation is logged and Start is called again after a pause.
@@ -102,6 +106,9 @@ func supervise(ctx context.Context, m Module, c *hostclient.Client) {
 func safeStart(ctx context.Context, m Module, c *hostclient.Client) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			if OnPanic != nil {
+				OnPanic(r, debug.Stack())
+			}
 			err = fmt.Errorf("panic: %v", r)
 		}
 	}()

@@ -12,6 +12,7 @@ import (
 	"gitlab.vax.sh/manar/manar-edge/internal/protect"
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/host"
 	"gitlab.vax.sh/manar/manar-edge/internal/secrets/vault"
+	"gitlab.vax.sh/manar/manar-edge/internal/telemetry"
 	"gitlab.vax.sh/manar/manar-edge/internal/undo"
 )
 
@@ -45,6 +46,7 @@ const usage = `usage:
 Global: --state-dir D before the subcommand (default ` + defaultStateBase + `).`
 
 func main() {
+	defer telemetry.CrashGuard()
 	args := os.Args[1:]
 	base := defaultStateBase
 	// A --state-dir before the subcommand applies to every subcommand.
@@ -57,6 +59,7 @@ func main() {
 		os.Exit(2)
 	}
 	cmd, rest := args[0], args[1:]
+	telemetry.Configure(base, version)
 	protect.Configure(base)
 	door.Configure(base)
 	undo.Configure(base, exeForHelpers())

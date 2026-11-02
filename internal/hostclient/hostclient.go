@@ -278,6 +278,15 @@ type Config struct {
 	Door *DoorSettings `json:"door,omitempty"`
 	// Jail is the egress filter for protected AI tools (jail track).
 	Jail JailConfig `json:"jail"`
+	// DataCollection is the effective product-improvement-data choice of the device's owner.
+	// Nil (an API that does not send it) means off.
+	DataCollection *DataCollection `json:"dataCollection,omitempty"`
+}
+
+// DataCollection is the "dataCollection" part of GET /host/v1/config.
+type DataCollection struct {
+	ImproveManar bool `json:"improveManar"`
+	AITraining   bool `json:"aiTraining"`
 }
 
 // DoorSettings is the "door" part of GET /host/v1/config.
