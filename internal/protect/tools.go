@@ -35,13 +35,13 @@ type Ctx struct {
 }
 
 // Keys are the tool keys protect knows; the host tool id is "host." + key.
-var Keys = []string{"cursor", "windsurf", "gemini-cli", "codex-cli", "copilot-cli", "vscode-copilot", "claude-desktop"}
+var Keys = []string{"claude-code", "cursor", "windsurf", "gemini-cli", "codex-cli", "copilot-cli", "vscode-copilot", "claude-desktop"}
 
 // Budget is how long a hook may wait for a person to decide, below the tool's own hook timeout.
 // Tools whose timeout we set (Cursor, Gemini, Copilot) get the long one.
 func Budget(key string) (seconds int) {
 	switch key {
-	case "cursor", "gemini-cli", "copilot-cli":
+	case "claude-code", "cursor", "gemini-cli", "copilot-cli":
 		return 590
 	}
 	return 25
@@ -52,7 +52,7 @@ func hookCommand(exe, key, event string) string {
 }
 
 // Plan lists the edits that protect one tool for one user. Tools Manar can only see (ChatGPT
-// desktop) and Claude Code (its own installer) have none.
+// desktop) have none.
 func Plan(key string, u discovery.User, c Ctx) []Item {
 	goos := c.GOOS
 	if goos == "" {
@@ -73,6 +73,14 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 		})}, RoleMCP}
 	}
 	switch key {
+	case "claude-code":
+		// The person's own settings, like Gemini CLI. A deny is exit 2 with the reason on stderr,
+		// which Claude Code shows the model; the timeout (seconds) leaves room for an approval.
+		return []Item{hook(filepath.Join(h, ".claude", "settings.json"), RoleHook, func(r map[string]any) error {
+			return setNestedHook(r, "PreToolUse", map[string]any{"matcher": "*", "hooks": []any{map[string]any{
+				"type": "command", "command": hookCommand(c.Exe, key, "tool"), "timeout": json.Number("600"),
+			}}})
+		})}
 	case "cursor":
 		cursorHook := func(event, arg string) func(map[string]any) error {
 			return func(r map[string]any) error {

@@ -1,0 +1,330 @@
+{
+  "_comment": "The device <-> manar-api contract. One file, byte-identical in manarhq/manar-edge (testdata/contract/host-contract.json) and manarhq/manar-api (src/contract/host-contract.json); both test suites read it and CI checks the copies match. Change both repos together.",
+  "events": {
+    "_comment": "POST /host/v1/events bodies. edge: what the current device sends; legacy: what manar-edge 0.1.1 sends (empty strings for missing fields), which manar-api still takes.",
+    "edge": {
+      "events": [
+        {
+          "type": "secret.touched",
+          "toolId": "host.claude-code",
+          "process": "cat",
+          "pathClass": "aws",
+          "maskedPath": "~/.aws/credentials",
+          "blocked": true,
+          "at": "2026-11-02T21:01:51.329Z"
+        },
+        {
+          "type": "secret.touched",
+          "toolId": "host.vscode-copilot",
+          "process": "docker",
+          "pathClass": "docker",
+          "maskedPath": "~/.docker/config.json",
+          "blocked": false,
+          "at": "2026-11-02T21:01:52Z"
+        },
+        {
+          "type": "secret.watch.available",
+          "blocked": false,
+          "at": "2026-11-02T21:01:53Z"
+        },
+        {
+          "type": "secret.vault.denied",
+          "toolId": "host.claude-code",
+          "process": "aws",
+          "pathClass": "aws",
+          "blocked": true,
+          "at": "2026-11-02T21:01:54Z"
+        }
+      ]
+    },
+    "legacy": {
+      "events": [
+        {
+          "type": "secret.watch.available",
+          "toolId": "",
+          "process": "",
+          "pathClass": "",
+          "maskedPath": "",
+          "blocked": false,
+          "at": "2026-11-02T21:57:37Z"
+        },
+        {
+          "type": "secret.touched",
+          "toolId": "host.claude-code",
+          "process": "cat",
+          "pathClass": "github",
+          "maskedPath": "~/.config/gh/hosts.yml",
+          "blocked": false,
+          "at": "2026-11-02T21:57:38Z"
+        }
+      ]
+    }
+  },
+  "authorize": {
+    "_comment": "Claude Code PreToolUse hook input -> the POST /host/v1/authorize body the device sends (the relay adds the caller; the session id rides on it).",
+    "cases": [
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "git status"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "shell",
+          "resource": "git status",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Bash",
+          "tool_input": {
+            "command": "export API_TOKEN=tok-123456789 && npm publish"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "shell",
+          "resource": "export API_TOKEN=tok-123456789 && npm publish",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Read",
+          "tool_input": {
+            "file_path": "/home/sam/app/src/main.go"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "read",
+          "resource": "/home/sam/app/src/main.go",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Edit",
+          "tool_input": {
+            "file_path": "/home/sam/app/README.md",
+            "old_string": "a",
+            "new_string": "b"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "edit",
+          "resource": "/home/sam/app/README.md",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Write",
+          "tool_input": {
+            "file_path": "/home/sam/app/notes.txt",
+            "content": "x"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "edit",
+          "resource": "/home/sam/app/notes.txt",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Glob",
+          "tool_input": {
+            "pattern": "**/*.ts"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "read",
+          "resource": "**/*.ts",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Grep",
+          "tool_input": {
+            "pattern": "TODO",
+            "path": "/home/sam/app"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "read",
+          "resource": "/home/sam/app",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "WebFetch",
+          "tool_input": {
+            "url": "https://example.com/docs",
+            "prompt": "summarise"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "webfetch",
+          "resource": "https://example.com/docs",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "mcp__github__create_issue",
+          "tool_input": {
+            "title": "x"
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "mcp",
+          "resource": "github/create_issue",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "TodoWrite",
+          "tool_input": {
+            "todos": []
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "mcp",
+          "resource": "TodoWrite",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      },
+      {
+        "tool": "claude-code",
+        "event": "tool",
+        "input": {
+          "session_id": "9f1c2d3e-0000-4a5b-8c7d-112233445566",
+          "tool_name": "Task",
+          "tool_input": {
+            "description": "look around",
+            "prompt": "..."
+          }
+        },
+        "body": {
+          "toolId": "host.claude-code",
+          "actionId": "mcp",
+          "resource": "Task",
+          "caller": "uid:1000|s:9f1c2d3e-0000-4a5b-8c7d-112233445566"
+        }
+      }
+    ]
+  },
+  "redact": {
+    "_comment": "Commands as stored for the Sessions view: the edge's telemetry redaction without the machine's own user and host names (manar-edge internal/telemetry redactPortable, manar-api src/contract/redact.ts).",
+    "cases": [
+      {
+        "in": "ls -la /home/vax/projects/manar",
+        "out": "ls -la ~/projects/manar"
+      },
+      {
+        "in": "export API_TOKEN=tok-123456789 && npm publish",
+        "out": "export API_TOKEN=<redacted> && npm publish"
+      },
+      {
+        "in": "curl -H \"Authorization: Bearer a1B2c3D4e5F6gH7i\" https://api.example.com/v1/items?key=a1B2c3D4e5F6#frag",
+        "out": "curl -H \"Authorization: <redacted> <redacted>\" https://api.example.com/v1/items"
+      },
+      {
+        "in": "mysql -u root --password=zZ9yY8xX7wW6 prod",
+        "out": "mysql -u root --password=<redacted> prod"
+      },
+      {
+        "in": "git clone https://deploy:Xk9mQ2vLp8zR@git.example.com/team/repo.git",
+        "out": "git clone https://git.example.com/team/repo.git"
+      },
+      {
+        "in": "ssh admin@10.20.30.40 'uptime'",
+        "out": "ssh admin@<ip> 'uptime'"
+      },
+      {
+        "in": "aws s3 cp C:\\Users\\Sam\\report.pdf s3://bucket/",
+        "out": "aws s3 cp ~\\report.pdf s3://bucket/"
+      },
+      {
+        "in": "echo dGhpcyBpcyBhIHZlcnkgbG9uZyByYW5kb20gc3RyaW5nIQ9xZ2 | base64 -d",
+        "out": "echo <redacted> | base64 -d"
+      },
+      {
+        "in": "PGPASSWORD=a1B2c3D4e5F6 psql -h db.internal",
+        "out": "PGPASSWORD=<redacted> psql -h db.internal"
+      },
+      {
+        "in": "npm install @scope/pkg@1.2.3 --registry https://registry.npmjs.org/@scope/",
+        "out": "npm install @scope/<email> --registry https://registry.npmjs.org/@scope/"
+      },
+      {
+        "in": "ping -6 fe80::1ff:fe23:4567:890a",
+        "out": "ping -6 <ip>"
+      },
+      {
+        "in": "go test ./... -run TestX -count=1",
+        "out": "go test ./... -run TestX -count=1"
+      },
+      {
+        "in": "git push --force origin main",
+        "out": "git push --force origin main"
+      },
+      {
+        "in": "printf 'db_password=\"Xk9#mQ2vLp8zR\"' >> .env",
+        "out": "printf 'db_password=<redacted>' >> .env"
+      },
+      {
+        "in": "mail -s hi sam@example.com < /Users/sam/notes.txt",
+        "out": "mail -s hi <email> < ~/notes.txt"
+      },
+      {
+        "in": "rm -rf /home/sam/.cache/pip /tmp/build-1234",
+        "out": "rm -rf ~/.cache/pip /tmp/build-1234"
+      }
+    ]
+  }
+}

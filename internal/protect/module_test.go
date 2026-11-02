@@ -57,6 +57,41 @@ func TestReconcileFollowsApprovalAndTheOwnersSwitch(t *testing.T) {
 	}
 }
 
+// Claude Code follows the console's switch like every other tool: a PreToolUse hook in the
+// person's own settings, kept alongside what is already there, and taken out when switched off.
+// Agent mode (install-claude-code wrote Manar's hook into the managed settings) wins and the
+// person's settings are left alone.
+func TestReconcileProtectsClaudeCodeThroughTheUsersSettings(t *testing.T) {
+	root := t.TempDir()
+	Configure(filepath.Join(root, "state"))
+	defer func(p string) { ClaudeSettingsPath = p }(ClaudeSettingsPath)
+	ClaudeSettingsPath = filepath.Join(root, "etc", "managed-settings.json")
+	u := discovery.User{Name: "sam", Home: filepath.Join(root, "home"), UID: -1, GID: -1}
+	settings := filepath.Join(u.Home, ".claude", "settings.json")
+	orig := `{"model":"opus","hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"mine.sh"}]}]}}`
+	write(t, settings, orig)
+	found := []discovery.Found{{Spec: discovery.Spec{Key: "claude-code", ID: "host.claude-code", Name: "Claude Code"}, Users: []discovery.User{u}}}
+
+	st := reconcile(context.Background(), found, &hostclient.Config{Status: "APPROVED"})
+	got := read(t, settings)
+	if s := st["host.claude-code"]; !s.Protected || s.Mode != "hook" {
+		t.Fatalf("Claude Code not protected: %+v", s)
+	}
+	for _, want := range []string{`hook-tool claude-code tool"`, `"timeout": 600`, `"matcher": "*"`, `"mine.sh"`, `"model": "opus"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %s:\n%s", want, got)
+		}
+	}
+	off := &hostclient.Config{Status: "APPROVED", Tools: hostclient.ToolInstructions{Unprotect: []string{"host.claude-code"}}}
+	if reconcile(context.Background(), found, off)["host.claude-code"].Protected || read(t, settings) != orig {
+		t.Fatalf("switching Claude Code off did not restore the settings:\n%s", read(t, settings))
+	}
+	write(t, ClaudeSettingsPath, `{"hooks":{"PreToolUse":[{"matcher":"*","hooks":[{"type":"command","command":"/usr/local/bin/manar-edge","args":["hook","claude-code","a1"]}]}]}}`)
+	if s := reconcile(context.Background(), found, &hostclient.Config{Status: "APPROVED"})["host.claude-code"]; !s.Protected || read(t, settings) != orig {
+		t.Fatalf("agent mode: %+v\n%s", s, read(t, settings))
+	}
+}
+
 func TestSessionID(t *testing.T) {
 	for in, want := range map[string]string{
 		`{"session_id":"abc-123"}`:        "abc-123",

@@ -43,7 +43,7 @@ func TestRelayOnlyForwardsKnownToolsAndRecordsTheCaller(t *testing.T) {
 		t.Fatalf("caller %q: the kernel's answer must be recorded", b.caller)
 	}
 	// Tools Manar does not wrap, and empty fields, never reach Manar.
-	for _, tool := range []string{"claude-code", "nope"} {
+	for _, tool := range []string{"chatgpt-desktop", "nope"} {
 		if v := r.Decide(context.Background(), tool, "shell", "ls", 5e9); v.Allow {
 			t.Errorf("allowed unknown tool %s", tool)
 		}

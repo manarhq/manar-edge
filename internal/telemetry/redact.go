@@ -41,7 +41,19 @@ var (
 
 // Redact removes what must never leave the device from a command or domain sample, in the order
 // of design spec section 1, and cuts the result to 512 characters.
-func Redact(s string) string { return cut(scrubPaths(redactSecrets(s)), maxSample) }
+func Redact(s string) string { return cut(scrubMachine(redactPortable(s)), maxSample) }
+
+// redactPortable is the part of Redact that does not depend on this machine (its user and host
+// names). manar-api applies the same to every command it stores for the Sessions view
+// (src/contract/redact.ts); testdata/contract/host-contract.json pins both to the same answers.
+func redactPortable(s string) string { return scrubHomes(redactSecrets(s)) }
+
+// scrubPaths: home directories to ~, then the OS user name and the host name.
+func scrubPaths(s string) string { return scrubMachine(scrubHomes(s)) }
+
+func scrubHomes(s string) string {
+	return reHomeWin.ReplaceAllString(reHomeUnix.ReplaceAllString(s, "~"), "~")
+}
 
 func cut(s string, n int) string {
 	if utf8.RuneCountInString(s) <= n {
@@ -147,10 +159,9 @@ func entropy(v string) float64 {
 	return h
 }
 
-// scrubPaths: home directories to ~, then the OS user name and the host name.
-func scrubPaths(s string) string {
-	s = reHomeUnix.ReplaceAllString(s, "~")
-	s = reHomeWin.ReplaceAllString(s, "~")
+// scrubMachine: this machine's home directory, user name and host name (after redactPortable,
+// which already turned /home/<user> and C:\Users\<user> into ~).
+func scrubMachine(s string) string {
 	if h, err := os.UserHomeDir(); err == nil && len(h) > 1 {
 		s = strings.ReplaceAll(s, h, "~")
 	}
