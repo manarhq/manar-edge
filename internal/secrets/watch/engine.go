@@ -40,13 +40,15 @@ type Source interface {
 }
 
 // Event is what is reported to Manar (POST /host/v1/events). The path has the home directory
-// masked.
+// masked. Empty fields are left out: manar-api takes a missing toolId or pathClass, never an empty
+// one (the watcher's available/unavailable notices have neither). The shape is pinned by
+// testdata/contract/host-contract.json, which manar-api checks too.
 type Event struct {
 	Type       string    `json:"type"`
-	ToolID     string    `json:"toolId"`
-	Process    string    `json:"process"`
-	PathClass  string    `json:"pathClass"`
-	MaskedPath string    `json:"maskedPath"`
+	ToolID     string    `json:"toolId,omitempty"`
+	Process    string    `json:"process,omitempty"`
+	PathClass  string    `json:"pathClass,omitempty"`
+	MaskedPath string    `json:"maskedPath,omitempty"`
 	Blocked    bool      `json:"blocked"`
 	At         time.Time `json:"at"`
 }

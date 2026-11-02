@@ -26,8 +26,10 @@ import (
 // GatewayURL is the local LLM gateway base URL; set by the command package.
 var GatewayURL = ports.DoorURL
 
-// ClaudeSettingsPath is the managed Claude Code settings file; set by the command package.
-// Claude Code is protected by `install-claude-code`; this only reads whether that is in place.
+// ClaudeSettingsPath is the managed Claude Code settings file; set by the command package. When
+// `install-claude-code` put Manar's hook there (agent mode), that is what protects Claude Code and
+// the person's own settings are left alone; otherwise Claude Code is protected like every other
+// tool, with a hook in ~/.claude/settings.json.
 var ClaudeSettingsPath string
 
 var (
@@ -108,8 +110,10 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 			continue
 		}
 		if f.Key == "claude-code" {
-			states[f.ID] = claudeCodeState()
-			continue
+			if s := claudeCodeState(); s.Protected {
+				states[f.ID] = s
+				continue
+			}
 		}
 		known := false
 		for _, k := range Keys {

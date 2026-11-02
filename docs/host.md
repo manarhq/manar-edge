@@ -25,7 +25,18 @@ when the current location does not qualify).
 
 ## Claude Code
 
-`manar-edge install-claude-code <agent>` merges this into the managed settings
+On an enrolled device Claude Code is protected like the other tools: once the owner approves the
+device, and while its switch in the console (AI tools) is on, the device service adds a
+`PreToolUse` hook (`matcher: "*"`, `manar-edge hook-tool claude-code tool`, `timeout: 600`) to each
+person's `~/.claude/settings.json`, keeps a backup, and takes it out again when the switch is
+turned off or the device is removed. Every tool call then goes to `POST /host/v1/authorize` and
+shows in the console's Sessions view, with the command redacted (see
+`testdata/contract/host-contract.json`). A person can remove a hook from their own settings, so
+this is the honest "hook" level, not a lock.
+
+For a locked-down agent account (agent mode), `manar-edge install-claude-code <agent>` merges this
+into the managed settings instead; when that hook is present the device leaves the person's own
+settings alone
 (`/etc/claude-code/managed-settings.json`; Windows `C:\Program Files\ClaudeCode\managed-settings.json`):
 
 | Key | Value | Why |

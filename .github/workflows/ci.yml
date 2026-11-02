@@ -43,6 +43,20 @@ jobs:
           go-version: '1.26.10' # same as the GitLab image; go.mod's 1.26.8 has stdlib CVEs
       - run: go test -race ./...
 
+  # testdata/contract/host-contract.json is shared with manar-api (src/contract/host-contract.json):
+  # both test suites read it, so the copies must stay byte-identical.
+  contract:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          code="$(curl -sS -o api.json -w '%{http_code}' https://raw.githubusercontent.com/manarhq/manar-api/main/src/contract/host-contract.json)"
+          if [ "$code" = 404 ]; then echo "manar-api has no copy yet"; exit 0; fi
+          test "$code" = 200
+          cmp testdata/contract/host-contract.json api.json || { echo "host-contract.json differs from manar-api main: change both repos together"; exit 1; }
+
   govulncheck:
     runs-on: ${{ github.event.repository.private && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
     steps:
