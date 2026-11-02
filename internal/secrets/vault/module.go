@@ -217,3 +217,6 @@ func (a consoleApprover) Ask(ctx context.Context, r Request) (Decision, error) {
 		}
 	}
 }
+
+// Unprotect puts vaulted secrets back when the device is removed from its workspace.
+func (m *Module) Unprotect(ctx context.Context) error { return m.Cleanup(ctx) }

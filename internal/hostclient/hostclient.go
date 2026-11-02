@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -34,6 +35,8 @@ const (
 	fileCert = "host.cert.pem"
 	fileCA   = "host-ca.pem"
 	fileInfo = "host.json"
+	// fileRemoved exists while the workspace has removed this device (see MarkRemoved).
+	fileRemoved = "removed"
 
 	maxBody = 1 << 20
 )
@@ -155,6 +158,10 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	// A fresh registration is a new start: protection may resume.
+	if err := ClearRemoved(in.StateDir); err != nil {
+		return nil, err
+	}
 	for _, f := range []struct {
 		name string
 		data []byte
@@ -177,6 +184,9 @@ type Client struct {
 	base string
 	// stateDir is where the device keeps its files (pause flag, WARDEN settings).
 	stateDir string
+
+	removedOnce sync.Once
+	removed     chan struct{}
 }
 
 // New loads the host files from stateDir and builds the mTLS client. It fails when the device
@@ -210,12 +220,17 @@ func New(stateDir string) (*Client, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("host-ca.pem has no certificate")
 	}
-	return &Client{Info: &info, base: base.String(), stateDir: stateDir, http: &http.Client{
+	return &Client{Info: &info, base: base.String(), stateDir: stateDir, removed: make(chan struct{}), http: &http.Client{
 		Timeout: 30 * time.Second,
 		Transport: &http.Transport{TLSClientConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert}, RootCAs: roots, MinVersion: tls.VersionTLS13,
 		}},
 	}}, nil
+}
+
+// NewForTest builds a client for an already running server, with no host files. Tests only.
+func NewForTest(stateDir, baseURL string, hc *http.Client) *Client {
+	return &Client{Info: &Info{}, http: hc, base: baseURL, stateDir: stateDir, removed: make(chan struct{})}
 }
 
 // StateDir is the state directory this client was loaded from.
@@ -246,7 +261,11 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, maxBody))
 	if res.StatusCode/100 != 2 {
-		return &StatusError{Code: res.StatusCode, Message: message(b)}
+		se := &StatusError{Code: res.StatusCode, Message: message(b), APICode: apiCode(b)}
+		if se.Removed() && c.removed != nil {
+			c.removedOnce.Do(func() { close(c.removed) })
+		}
+		return se
 	}
 	if out == nil || len(b) == 0 {
 		return nil
@@ -258,6 +277,55 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 type StatusError struct {
 	Code    int
 	Message string
+	APICode string // the "code" field of the JSON error body, if any
+}
+
+// Removed is true only for HTTP 410 with code "device_removed": the workspace removed this
+// device. No other status (401, 403, 5xx, a 410 without the code) counts.
+func (e *StatusError) Removed() bool {
+	return e.Code == http.StatusGone && e.APICode == "device_removed"
+}
+
+// IsRemoved reports whether err is the "device removed from the workspace" reply.
+func IsRemoved(err error) bool {
+	var se *StatusError
+	return errors.As(err, &se) && se.Removed()
+}
+
+// Removed is closed the first time a call on this client gets the "device removed" reply.
+func (c *Client) Removed() <-chan struct{} { return c.removed }
+
+// MarkRemoved records on disk that the workspace removed this device, so a restart or reboot
+// does not resume protection. Enrol (and ClearRemoved) undo it.
+func MarkRemoved(stateDir string) error {
+	dir := Dir(stateDir)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return writePrivate(filepath.Join(dir, fileRemoved), []byte(time.Now().UTC().Format(time.RFC3339)+"\n"))
+}
+
+// IsMarkedRemoved reports whether MarkRemoved was called and not cleared since.
+func IsMarkedRemoved(stateDir string) bool {
+	_, err := os.Stat(filepath.Join(Dir(stateDir), fileRemoved))
+	return err == nil
+}
+
+// ClearRemoved forgets a removal; a fresh enrolment calls it.
+func ClearRemoved(stateDir string) error {
+	err := os.Remove(filepath.Join(Dir(stateDir), fileRemoved))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
+}
+
+func apiCode(b []byte) string {
+	var m struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(b, &m)
+	return m.Code
 }
 
 func (e *StatusError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.Code, e.Message) }

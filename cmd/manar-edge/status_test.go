@@ -123,3 +123,20 @@ func TestOutputAndJSON(t *testing.T) {
 		t.Fatal("dashes in user text")
 	}
 }
+
+func TestRemovedDeviceSaysSoAndOffersReinstall(t *testing.T) {
+	snap := healthy()
+	snap.Removed, snap.Status = true, "REMOVED"
+	p := probes(snap, nil, os.ErrPermission, "active", true)
+	r := buildStatus(p)
+	if r.OK || r.Enrolment["state"] != "removed from workspace" || len(r.Problems) != 1 ||
+		!strings.Contains(r.Problems[0].Fix, "Add device") {
+		t.Fatalf("%+v", r)
+	}
+	var b bytes.Buffer
+	printStatusReport(r, p, &b)
+	if !strings.Contains(b.String(), "removed from workspace") || strings.Contains(b.String(), "protected") ||
+		strings.ContainsAny(b.String(), "–—") {
+		t.Fatalf("%s", b.String())
+	}
+}

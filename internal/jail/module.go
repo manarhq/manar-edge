@@ -198,3 +198,7 @@ func joinErrs(errs []error) error {
 	}
 	return fmt.Errorf("%v", errs)
 }
+
+// Unprotect is a device removed from its workspace: give the tools their network back. The
+// module stays installed and does nothing more until the device enrols again.
+func (m *module) Unprotect(ctx context.Context) error { return m.Cleanup(ctx) }

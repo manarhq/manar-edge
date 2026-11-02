@@ -382,3 +382,6 @@ func recordDecision(toolID, actionID, resource, decision, caller string, took ti
 	}
 	telemetry.Record("warden", strings.TrimPrefix(toolID, "host."), d, kind, text, caller, took)
 }
+
+// Unprotect restores every tool's settings when the device is removed from its workspace.
+func (m *relayModule) Unprotect(ctx context.Context) error { return m.Cleanup(ctx) }
