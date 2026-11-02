@@ -23,6 +23,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 // Key-less enrolment of a domain-joined Windows machine (manar-api docs/hosts.md, "Key-less
@@ -233,6 +235,9 @@ func cmdHostEnrol(base string, args []string, p hostPlatform, out io.Writer) err
 		"tenantSlug": *tenant, "machineId": id, "hostId": resp.HostID, "status": resp.Status,
 		"keyType": hostKeyType, "enrolledAt": time.Now().UTC().Format(time.RFC3339),
 	}, "", "  ")
+	if err := hostclient.ClearRemoved(base); err != nil {
+		return err
+	}
 	for _, f := range []struct {
 		name string
 		data []byte

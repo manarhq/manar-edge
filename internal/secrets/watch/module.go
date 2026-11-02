@@ -148,3 +148,6 @@ func loadMode() Mode {
 	}
 	return ModeAlert
 }
+
+// Unprotect undoes the watcher's machine changes when the device is removed from its workspace.
+func (m *Module) Unprotect(ctx context.Context) error { return m.Cleanup(ctx) }

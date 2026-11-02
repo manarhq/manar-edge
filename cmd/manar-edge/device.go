@@ -249,6 +249,9 @@ func serveDevice(ctx context.Context, base string) error {
 		return err
 	}
 	warden.SetStateDir(base)
+	// Steps for a device the workspace removed. The undo copies and the program itself stay.
+	daemon.RegisterOnRemoved("claude-code-policy", func(context.Context) error { return uninstallClaudeCode() })
+	daemon.RegisterOnRemoved("warden", func(context.Context) error { return warden.Remove(base) })
 	return daemon.Run(ctx, c)
 }
 

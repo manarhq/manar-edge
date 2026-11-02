@@ -294,6 +294,39 @@ Sidecar `manar-edge gateway-sidecar` (same local gateway on 127.0.0.1:8480 in th
 NetworkPolicy allowing only the sidecar's egress to manar-api:3443 and the in-cluster egress proxy;
 remote clusters run the WireGuard gateway path. Chart snippet in manar-edge `deploy/`.
 
+## 9. Device removed from the workspace (personal and fleet devices)
+
+When a workspace removes a device, manar-api revokes its host certificate and keeps the record as
+`REMOVED`. Any `/host/v1/*` request from that device then gets:
+
+```
+HTTP 410  {"statusCode":410,"code":"device_removed","message":"This device was removed from the workspace"}
+```
+
+manar-edge treats a reply as removal only when the status is 410 AND `code` is `device_removed`.
+401, 403, 5xx, timeouts, network and TLS errors, and a 410 without that code do not: they keep the
+current behaviour.
+
+On the first such reply (any host call: the config check-in, the hook relay, and so on):
+
+1. The removed state is saved in `<state dir>/host/removed`, before anything else, so a restart or
+   reboot does not resume protection even if the steps below were cut short.
+2. The service stops every module (JAIL, hooks relay, secrets watcher, DOOR, WARDEN, discovery).
+3. It then gives the user back what protection changed: the JAIL rules (nftables on Linux, WFP
+   filters on Windows, same path as `jail-restore`), the tool settings and hooks Manar wrote, vaulted
+   secrets, the Claude Code managed policy (only the entries Manar wrote) and the WARDEN prompt
+   autostart. The undo copies are kept.
+4. The status file gets `"removed": true` and `manar-edge status` shows "removed from workspace"
+   with the fix "run the install command again". The service makes no further API calls.
+5. Nothing is uninstalled: the program and the service stay. Starting the service while the
+   removed state exists repeats step 3 (it is safe to repeat) and then idles.
+
+Re-enrolling (`install --code`, or `enrol` with the AD CS certificate) registers with a fresh key
+and certificate and deletes `host/removed`; the install restarts the service, which then runs
+normally. Within 30 days the server returns the same device record for the same machine. A
+service that is already idling also notices the cleared state and exits so the service manager
+restarts it.
+
 ## Out of scope now
 
 TLS inspection; laptops; IPv6 in the overlay; detection of unmanaged LLM traffic (layer 3).

@@ -9,6 +9,7 @@ import (
 	"log"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/manarhq/manar-edge/internal/hostclient"
@@ -32,9 +33,10 @@ type Cleaner interface {
 }
 
 var (
-	mu       sync.Mutex
-	modules  []Module
-	cleanups []namedCleanup
+	mu        sync.Mutex
+	modules   []Module
+	cleanups  []namedCleanup
+	onRemoved []namedCleanup
 
 	// retryPause is a variable so tests can shorten it.
 	retryPause = 30 * time.Second
@@ -60,9 +62,66 @@ func RegisterCleanup(name string, fn func(ctx context.Context) error) {
 	cleanups = append(cleanups, namedCleanup{name, fn})
 }
 
+// Unprotector is optional on a Module: Unprotect gives the user back whatever protection locked
+// (network rules, tool settings, vaulted secrets) when the workspace removed the device. The
+// module stays installed; Unprotect must be safe to repeat.
+type Unprotector interface {
+	Unprotect(ctx context.Context) error
+}
+
+// RegisterOnRemoved adds a step that runs when the workspace removed the device, for code that
+// has no Module.
+func RegisterOnRemoved(name string, fn func(ctx context.Context) error) {
+	mu.Lock()
+	defer mu.Unlock()
+	onRemoved = append(onRemoved, namedCleanup{name, fn})
+}
+
+// ErrReenrolled is returned by Run when a removed device enrolled again: the service manager
+// restarts the service, which then loads the new certificate.
+var ErrReenrolled = errors.New("device enrolled again")
+
+// removedPoll is how often a removed device looks for a fresh enrolment (a variable for tests).
+var removedPoll = 30 * time.Second
+
 // Run starts every registered module and a heartbeat, then waits for ctx. One failing module
-// never stops the others.
+// never stops the others. When the workspace removes the device (HTTP 410 device_removed on any
+// host call), or the device is already marked removed, the modules stop, the removal steps run
+// and Run only waits for a new enrolment or ctx: the service stays installed.
 func Run(ctx context.Context, c *hostclient.Client) error {
+	removed := c != nil && c.StateDir() != "" && hostclient.IsMarkedRemoved(c.StateDir())
+	if !removed {
+		removed = runModules(ctx, c)
+	}
+	if !removed || ctx.Err() != nil {
+		return nil
+	}
+	// Idempotent: also covers a restart after a crash in the middle of the first teardown.
+	unprotect(ctx)
+	return idleRemoved(ctx, c)
+}
+
+func runModules(parent context.Context, c *hostclient.Client) bool {
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	var removed atomic.Bool
+	if c != nil && c.Removed() != nil {
+		go func() {
+			select {
+			case <-c.Removed():
+				// Saved first, so a crash during teardown still leaves the device removed.
+				if c.StateDir() != "" {
+					if err := hostclient.MarkRemoved(c.StateDir()); err != nil {
+						log.Printf("manar-edge: saving the removed state: %v", err)
+					}
+				}
+				log.Printf("manar-edge: this device was removed from the workspace: stopping protection")
+				removed.Store(true)
+				cancel()
+			case <-ctx.Done():
+			}
+		}()
+	}
 	mu.Lock()
 	ms := append([]Module{heartbeat{}}, modules...)
 	mu.Unlock()
@@ -82,7 +141,52 @@ func Run(ctx context.Context, c *hostclient.Client) error {
 		}()
 	}
 	wg.Wait()
-	return nil
+	return removed.Load()
+}
+
+// unprotect runs every removal step and shows the removed state in the status file. A failing
+// step is logged; the others still run.
+func unprotect(ctx context.Context) {
+	mu.Lock()
+	ms := append([]Module(nil), modules...)
+	hs := append([]namedCleanup(nil), onRemoved...)
+	mu.Unlock()
+	for _, m := range ms {
+		if u, ok := m.(Unprotector); ok {
+			if err := safeCleanup(ctx, u.Unprotect); err != nil {
+				log.Printf("manar-edge: removed device: %s: %v", m.Name(), err)
+			}
+		}
+	}
+	for _, h := range hs {
+		if err := safeCleanup(ctx, h.fn); err != nil {
+			log.Printf("manar-edge: removed device: %s: %v", h.name, err)
+		}
+	}
+}
+
+// idleRemoved keeps the status file (it says "removed") and waits for ctx, or for the removed
+// state to be cleared by a new enrolment. It makes no API calls.
+func idleRemoved(ctx context.Context, c *hostclient.Client) error {
+	setRemoved()
+	if c != nil && c.Info != nil {
+		SetIdentity(c.Info.HostID, c.Info.TenantSlug)
+	}
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() { statusWriter(done); close(stopped) }()
+	defer func() { close(done); <-stopped }()
+	t := time.NewTicker(removedPoll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-t.C:
+			if c != nil && c.StateDir() != "" && !hostclient.IsMarkedRemoved(c.StateDir()) {
+				return ErrReenrolled
+			}
+		}
+	}
 }
 
 func supervise(ctx context.Context, m Module, c *hostclient.Client) {

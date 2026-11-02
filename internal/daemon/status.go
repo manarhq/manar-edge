@@ -30,10 +30,12 @@ type ToolStatus struct {
 
 // Snapshot is the status file.
 type Snapshot struct {
-	UpdatedAt   time.Time            `json:"updatedAt"`
-	HostID      string               `json:"hostId,omitempty"`
-	TenantSlug  string               `json:"tenantSlug,omitempty"`
-	Status      string               `json:"status,omitempty"` // PENDING, APPROVED, ...
+	UpdatedAt  time.Time `json:"updatedAt"`
+	HostID     string    `json:"hostId,omitempty"`
+	TenantSlug string    `json:"tenantSlug,omitempty"`
+	Status     string    `json:"status,omitempty"` // PENDING, APPROVED, ...
+	// Removed is set once the workspace removed this device: protection is off until it enrols again.
+	Removed     bool                 `json:"removed,omitempty"`
 	StartMode   string               `json:"startMode,omitempty"`
 	Features    []string             `json:"features,omitempty"`
 	LastSyncAt  *time.Time           `json:"lastSyncAt,omitempty"`
@@ -92,6 +94,17 @@ func recordSync(hostID, status, mode string, features []string, err error) {
 func SetIdentity(hostID, tenantSlug string) {
 	stMu.Lock()
 	cur.HostID, cur.TenantSlug = hostID, tenantSlug
+	stMu.Unlock()
+	poke()
+}
+
+// setRemoved records that the workspace removed this device. The device keeps no tool or part
+// state of its own: everything is off.
+func setRemoved() {
+	stMu.Lock()
+	cur.Removed, cur.Status, cur.Features, cur.LastError = true, "REMOVED", nil, ""
+	cur.Tools, cur.ToolsSeenAt = nil, nil
+	cur.Components = map[string]Component{}
 	stMu.Unlock()
 	poke()
 }

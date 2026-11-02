@@ -100,6 +100,9 @@ func TestEnrolStoresHostFilesAndClientCallsConfig(t *testing.T) {
 	url := strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
 	httpc := &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 	dir := t.TempDir()
+	if err := MarkRemoved(dir); err != nil { // a removed device that enrols again is live again
+		t.Fatal(err)
+	}
 	info, err := Enrol(context.Background(), EnrolInput{
 		StateDir: dir, APIURL: url, HostURL: url, InstallKey: goodKey,
 		MachineID: "m-1", Hostname: "laptop", OS: "linux", HTTP: httpc,
@@ -118,6 +121,9 @@ func TestEnrolStoresHostFilesAndClientCallsConfig(t *testing.T) {
 	}
 	if st, err := os.Stat(filepath.Join(Dir(dir), fileKey)); err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("key file: %v %v", st, err)
+	}
+	if IsMarkedRemoved(dir) {
+		t.Fatal("enrolling did not clear the removed state")
 	}
 	c, err := New(dir)
 	if err != nil {
@@ -228,5 +234,75 @@ func TestEnrolRejectsBadInput(t *testing.T) {
 func TestNewFailsWhenNotEnrolled(t *testing.T) {
 	if _, err := New(t.TempDir()); err == nil {
 		t.Fatal("want an error")
+	}
+}
+
+func removedClient(t *testing.T, status int, body string) *Client {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	return &Client{Info: &Info{}, http: srv.Client(), base: srv.URL, stateDir: t.TempDir(), removed: make(chan struct{})}
+}
+
+func TestOnly410WithTheDeviceRemovedCodeCountsAsRemoval(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   bool
+	}{
+		{"removed", 410, `{"statusCode":410,"code":"device_removed","message":"This device was removed from the workspace"}`, true},
+		{"410 without code", 410, `{"statusCode":410,"message":"gone"}`, false},
+		{"410 other code", 410, `{"code":"something_else"}`, false},
+		{"410 not json", 410, `gone`, false},
+		{"401", 401, `{"code":"device_removed"}`, false},
+		{"403", 403, `{"code":"device_removed"}`, false},
+		{"500", 500, `{"code":"device_removed"}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := removedClient(t, tc.status, tc.body)
+			_, err := c.Config(context.Background())
+			if err == nil || IsRemoved(err) != tc.want {
+				t.Fatalf("err = %v, IsRemoved = %v, want %v", err, IsRemoved(err), tc.want)
+			}
+			select {
+			case <-c.Removed():
+				if !tc.want {
+					t.Fatal("Removed channel closed")
+				}
+			default:
+				if tc.want {
+					t.Fatal("Removed channel not closed")
+				}
+			}
+		})
+	}
+}
+
+func TestNetworkErrorIsNotRemoval(t *testing.T) {
+	c := removedClient(t, 200, `{}`)
+	c.base = "http://127.0.0.1:1"
+	if _, err := c.Config(context.Background()); err == nil || IsRemoved(err) {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestRemovedMarkSurvivesAndEnrolClearsIt(t *testing.T) {
+	dir := t.TempDir()
+	if IsMarkedRemoved(dir) {
+		t.Fatal("marked before anything")
+	}
+	if err := MarkRemoved(dir); err != nil || !IsMarkedRemoved(dir) {
+		t.Fatalf("mark: %v", err)
+	}
+	if err := ClearRemoved(dir); err != nil || IsMarkedRemoved(dir) {
+		t.Fatalf("clear: %v", err)
+	}
+	if err := ClearRemoved(dir); err != nil {
+		t.Fatalf("clearing twice: %v", err)
 	}
 }

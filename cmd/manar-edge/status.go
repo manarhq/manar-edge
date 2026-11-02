@@ -24,6 +24,8 @@ import (
 
 const staleAfter = 5 * time.Minute
 
+const removedState = "removed from workspace"
+
 // componentOrder is the order of the product parts in the output.
 var componentOrder = []struct{ key, label string }{
 	{"door", "DOOR (AI traffic check)"},
@@ -109,6 +111,13 @@ func buildStatus(p statusProbes) statusReport {
 		add("This computer is not connected to Manar.", "Open the console, choose Add device, and run the install command it shows.")
 	default:
 		r.Enrolment["state"] = "unknown"
+	}
+	if snap != nil && snap.Removed {
+		r.Enrolment["state"] = removedState
+		delete(r.Enrolment, "detail")
+		add("This computer was removed from its workspace, so Manar protection is off.",
+			"Open the console, choose Add device, and run the install command to connect it again.")
+		return r
 	}
 	if snap != nil && snap.Status != "" {
 		r.Enrolment["approval"] = snap.Status
@@ -215,6 +224,10 @@ func printStatusReport(r statusReport, p statusProbes, out io.Writer) {
 	}
 	fmt.Fprintf(out, "Enrolment    %s\n", enrol)
 	fmt.Fprintf(out, "Service      %s\n", r.Service)
+	if r.Enrolment["state"] == removedState {
+		printProblems(r, out)
+		return
+	}
 	if r.LastSync != nil {
 		fmt.Fprintf(out, "Last sync    %s ago\n", humanAge(p.now().Sub(*r.LastSync)))
 	} else if r.Enrolment["state"] != "not enrolled" {
@@ -246,6 +259,10 @@ func printStatusReport(r statusReport, p statusProbes, out io.Writer) {
 		fmt.Fprintln(out, "\nAll good.")
 		return
 	}
+	printProblems(r, out)
+}
+
+func printProblems(r statusReport, out io.Writer) {
 	fmt.Fprintf(out, "\n%d thing(s) to fix:\n", len(r.Problems))
 	for _, pr := range r.Problems {
 		fmt.Fprintf(out, "  - %s\n    Fix: %s\n", pr.What, pr.Fix)
