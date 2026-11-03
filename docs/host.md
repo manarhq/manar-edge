@@ -54,7 +54,8 @@ This is the honest "hook" level, not a lock. What Manar does about it:
 - A shell command is refused when it names one of those files, names `CLAUDE_CONFIG_DIR` or
   `disableAllHooks`, runs `claude --settings`, or names a tool's settings folder next to something
   that writes or removes files (file commands, redirection, `tee`, `dd`, `sed -i`, `awk`, or an
-  interpreter such as python, node or perl). This check is best effort, not a security boundary:
+  interpreter such as python, node or perl), or names such a folder together with a `..` path
+  element. This check is best effort, not a security boundary:
   it reads the command's text, so a command that builds the name at run time (variables,
   encodings, a script written first and run later) is not caught. Cursor has no edit hook, so
   Cursor's own file edits are not checked.

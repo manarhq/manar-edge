@@ -40,7 +40,12 @@ var (
 	// and interpreters or tools that write files themselves.
 	changeVerb  = regexp.MustCompile(`(^|[\s;&|(])(rm|rmdir|mv|cp|ln|unlink|install|rsync|tar|unzip|truncate|touch|tee|dd|awk|gawk|python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|del|erase|rd|move|ren|rename|xcopy|robocopy|mklink|remove-item|move-item|rename-item|copy-item|new-item|set-content|add-content|out-file)(\s|$)|\bsed\s+(-[a-z]*\s+)*-[a-z]*i|>`)
 	claudeFlags = regexp.MustCompile(`\bclaude(\.exe)?\b[^;&|]*\s--settings\b`)
-	dotDot      = regexp.MustCompile("(^|/)[^/\\s\"'=;&|<>()$`]+/\\.\\./")
+	// Any mention of a tool's settings folder, and a '..' path element: together they are refused
+	// whatever the shell would make of the rest, because collapsing '..' in text cannot follow
+	// what variables or command substitution expand to.
+	toolFolder = regexp.MustCompile(`\.(claude|cursor|gemini|codex|copilot|windsurf|codeium)\b`)
+	parentElem = regexp.MustCompile(`/\.\.(/|\s|$|["';&|)<>` + "`" + `])`)
+	dotDot     = regexp.MustCompile("(^|/)[^/\\s\"'=;&|<>()$`]+/\\.\\./")
 )
 
 // canonical lower-cases p, uses '/', drops Windows stream suffixes (name:stream, name::$DATA) and
@@ -151,6 +156,9 @@ func GuardedCommand(cmd string) bool {
 		norm = strings.ReplaceAll(norm, "//", "/")
 		norm = strings.ReplaceAll(norm, "/./", "/")
 		norm = dotDot.ReplaceAllString(norm, "$1")
+	}
+	if toolFolder.MatchString(raw) && parentElem.MatchString(raw) {
+		return true
 	}
 	// Normalising removes text, so the raw command is checked too: a match in either refuses.
 	return guardedText1(raw) || guardedText1(norm)

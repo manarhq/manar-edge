@@ -253,3 +253,23 @@ func TestShellNormalisingCannotHideAName(t *testing.T) {
 		}
 	}
 }
+
+func TestShellParentElementNextToAToolFolder(t *testing.T) {
+	for _, c := range []string{
+		`echo x > $var/../.claude/settings.json`,
+		`echo x > a$b/../.claude/settings.json`,
+		"echo x > `pwd`/../.claude/settings.json",
+		"cp y \"$(dirname x)\"/../.cursor/hooks.json",
+		`cd .gemini && cd x/..`,
+		`cat .codex/x ../y/..`,
+	} {
+		if !GuardedCommand(c) {
+			t.Errorf("GuardedCommand(%q) = false", c)
+		}
+	}
+	for _, c := range []string{`cd ../app && git status`, `ls .claude`, `cat ../README.md`} {
+		if GuardedCommand(c) {
+			t.Errorf("GuardedCommand(%q) = true", c)
+		}
+	}
+}
