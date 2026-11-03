@@ -32,10 +32,13 @@ func TestGuardShortNamesAndStreams(t *testing.T) {
 		t.Skip("8.3 names are off on this volume")
 	}
 	for _, p := range []string{
-		filepath.Join(s, "settings.json"),                // the folder by its short name, a new file
-		short(filepath.Join(cfg, "settings.local.json")), // the file by its short name
-		filepath.Join(cfg, "settings.json::$DATA"),       // the main stream
-		filepath.Join(s, "settings.json. "),              // trailing dot and space
+		filepath.Join(s, "settings.json"),                  // the folder by its short name, a new file
+		short(filepath.Join(cfg, "settings.local.json")),   // the file by its short name
+		filepath.Join(cfg, "settings.json::$DATA"),         // the main stream
+		filepath.Join(s, "settings.json. "),                // trailing dot and space
+		cfg + ". " + `\settings.json`,                      // the folder with a trailing dot and space
+		filepath.Join(dir, "missing", "CLAUD~1", "x.json"), // a short name after a missing part
+		filepath.Join(dir, "a", "..."),                     // dots only
 	} {
 		if !guardedTarget(p, dir) {
 			t.Errorf("guardedTarget(%q) = false", p)

@@ -51,8 +51,14 @@ This is the honest "hook" level, not a lock. What Manar does about it:
   repeated separators. Each path is checked as text (with `..` applied to the text, as Windows does)
   and as its real target: resolved one element at a time with links followed before `..` is
   applied (as Linux does), 8.3 short names expanded, and any part that does not exist yet appended.
-  It fails closed: a path that cannot be resolved (a broken or looping link, an unreadable folder)
-  is refused. An ordinary relative edit such as `../README.md` is not.
+  A link's target is walked the same way from where the link is, so its `..` is applied after the
+  links before it. After a part that does not exist yet only plain new names may follow (no `..`,
+  no `~` short name on Windows), and an element made only of dots and spaces other than `.` and
+  `..` is refused. It fails closed: a path that cannot be resolved (a broken or looping link, an
+  unreadable folder, no absolute folder to start from), or a call that cannot be classified, is
+  refused. An ordinary relative edit such as `../README.md` is not. String arguments under keys
+  Manar does not know as paths are checked by their text, and the MCP wrapper checks a call's
+  `arguments` the same way before asking Manar.
 - A shell command is refused when it names one of those files, names `CLAUDE_CONFIG_DIR` or
   `disableAllHooks`, runs `claude --settings`, or names a tool's settings folder next to something
   that writes or removes files (file commands, redirection, `tee`, `dd`, `sed -i`, `awk`, or an

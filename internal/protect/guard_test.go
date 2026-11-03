@@ -1,6 +1,7 @@
 package protect
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,6 +232,10 @@ func TestGuardResolvesTheRealTarget(t *testing.T) {
 		"a/../.claude/settings.json",    // '..' in a path that does not exist
 		"rel/.claude/settings.local.json",
 		"../app/.claude/settings.json",
+		"new/folder/../file.txt", // '..' after a part that does not exist
+		"missing/../../app/x.txt",
+		"sub/.../x.txt", // dots and spaces only: another name on Windows
+		"a/. ./b.txt",
 	} {
 		if !guardedTarget(p, dir) {
 			t.Errorf("guardedTarget(%q) = false", p)
@@ -240,8 +245,8 @@ func TestGuardResolvesTheRealTarget(t *testing.T) {
 		"../README.md",
 		"../deep/x/notes.txt",
 		"link/../README.md",
-		"new/folder/../file.txt",
 		"src/main.go",
+		"new/folder/file.txt",
 		filepath.Join(root, "deep", "x", "a.txt"),
 	} {
 		if guardedTarget(p, dir) {
@@ -291,5 +296,69 @@ func TestShellParentElementNextToAToolFolder(t *testing.T) {
 		if GuardedCommand(c) {
 			t.Errorf("GuardedCommand(%q) = true", c)
 		}
+	}
+}
+
+func TestRelativeLinkTargetsAreWalkedNotCleaned(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "app")
+	for _, d := range []string{dir, filepath.Join(root, "deep", "x"), filepath.Join(root, "deep", ".claude")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// sub -> deep/x; deep/cfg -> deep/.claude; rel -> "sub/../cfg".
+	// As text, rel is app/cfg (does not exist, harmless); on disk it is deep/.claude.
+	if err := os.Symlink(filepath.Join(root, "deep", "x"), filepath.Join(dir, "sub")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "deep", ".claude"), filepath.Join(root, "deep", "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sub/../cfg", filepath.Join(dir, "rel")); err != nil {
+		t.Fatal(err)
+	}
+	if !guardedTarget("rel/settings.json", dir) {
+		t.Fatal("a relative link target was cleaned as text before its own links were followed")
+	}
+	if guardedTarget("rel/../deep/x/ok.txt", dir) {
+		t.Error("an ordinary path through the same link was refused")
+	}
+}
+
+func TestEveryArgumentAndEveryErrorIsChecked(t *testing.T) {
+	// A file under a key Manar does not know as a path.
+	if guardIn(t, "codex-cli", "tool", `{"tool_name":"mcp__x__copy","tool_input":{"output_file":"/home/sam/app/.claude/settings.json"}}`) != GuardReason {
+		t.Error("an unknown argument naming a settings file was not refused")
+	}
+	// What cannot be classified is refused, not passed on.
+	if guardIn(t, "codex-cli", "tool", `not json`) == "" || guardIn(t, "codex-cli", "tool", `{"tool_input":{}}`) == "" {
+		t.Error("an input that cannot be checked was not refused")
+	}
+	// A relative target with no absolute folder to start from cannot be judged.
+	if !guardedTarget("x.txt", "relative/cwd") {
+		t.Error("a relative working folder was trusted")
+	}
+}
+
+func TestMCPWrapperChecksArguments(t *testing.T) {
+	asked := 0
+	allow := func(context.Context, string, string) Verdict { asked++; return Verdict{true, ""} }
+	for _, l := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"/home/sam/app/.claude/settings.json","content":"{}"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"move","arguments":{"source":"a","destination":".cursor/hooks.json"}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"x","arguments":"not an object"}}`,
+	} {
+		f, r := screen([]byte(l), "fs", allow)
+		if f != nil || len(r) != 1 || !strings.Contains(string(r[0]), "may not change AI tool hook") {
+			t.Errorf("%s: forwarded %s, replies %s", l, f, r)
+		}
+	}
+	if asked != 0 {
+		t.Fatalf("Manar was asked about a guarded call %d times", asked)
+	}
+	l := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"/home/sam/app/README.md"}}}`
+	if f, _ := screen([]byte(l), "fs", allow); f == nil || asked != 1 {
+		t.Error("an ordinary MCP write was not passed on")
 	}
 }

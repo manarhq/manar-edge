@@ -116,6 +116,8 @@ type rpcMsg struct {
 	ID     json.RawMessage
 	Method string
 	Name   string // params.name of a tools/call
+	// Guarded: the call's arguments name a hook or settings file (guard.go), or cannot be read.
+	Guarded bool
 	// Canon is the message re-encoded from what the wrapper parsed. It is what reaches the server,
 	// never the original line, so the server reads exactly the keys the decision was made on.
 	Canon []byte
@@ -153,6 +155,10 @@ func parseRPC(b []byte) (rpcMsg, error) {
 		}
 		if n, ok := p["name"]; ok {
 			_ = json.Unmarshal(n, &m.Name) // not a string: no name, which is a deny
+		}
+		if a, ok := p["arguments"]; ok {
+			var args map[string]any
+			m.Guarded = json.Unmarshal(a, &args) != nil || guardedArgs(args, "")
 		}
 		if o["params"], err = encode(p); err != nil {
 			return m, err
@@ -261,7 +267,9 @@ func screen(line []byte, server string, decide Decider) (forward []byte, replies
 		return m.Canon, nil
 	}
 	v := Verdict{false, "Manar: this MCP call has no tool name"}
-	if m.Name != "" {
+	if m.Guarded {
+		v = Verdict{false, GuardReason}
+	} else if m.Name != "" {
 		v = decide(context.Background(), "mcp", server+"/"+m.Name)
 	}
 	if v.Allow {
