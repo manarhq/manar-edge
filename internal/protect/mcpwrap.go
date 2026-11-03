@@ -73,11 +73,15 @@ func RunMCPWrap(key, server string, argv []string, in io.Reader, out, errw io.Wr
 			continue
 		}
 		if !needsDecision(line) {
-			if !validRPC(line) {
-				write(parseError)
-				continue
+			// No decision to wait for: screen it inline, so order is kept. It still forwards only
+			// the canonical form.
+			forward, replies := screen(line, server, decide)
+			for _, r := range replies {
+				write(r)
 			}
-			send(line)
+			if forward != nil {
+				send(forward)
+			}
 			continue
 		}
 		wg.Add(1)
@@ -107,20 +111,30 @@ func RunMCPWrap(key, server string, argv []string, in io.Reader, out, errw io.Wr
 	return 0
 }
 
-// rpcMsg is the part of a JSON-RPC message the wrapper decides on.
+// rpcMsg is the part of a JSON-RPC message the wrapper decides on, and the bytes it forwards.
 type rpcMsg struct {
 	ID     json.RawMessage
 	Method string
 	Name   string // params.name of a tools/call
+	// Canon is the message re-encoded from what the wrapper parsed. It is what reaches the server,
+	// never the original line, so the server reads exactly the keys the decision was made on.
+	Canon []byte
 }
 
-// parseRPC reads one JSON-RPC object as the server will: keys match exactly, and a message with
-// a duplicate key, or two keys that differ only in case, is refused. Servers disagree on which
-// copy of a duplicate wins (and Go's decoder would match "Method" for "method"), so a message the
-// wrapper and the server could read differently is never passed on.
+// JSON-RPC members the decision depends on. A key that folds to one of them but is not spelled
+// exactly so ("Method", "METHOD", a Kelvin sign for k) is refused: a case-insensitive decoder on
+// the server side (Go's encoding/json, for one) would read it as the member.
+var (
+	rpcMembers    = []string{"jsonrpc", "id", "method", "params"}
+	paramsMembers = []string{"name", "arguments"}
+)
+
+// parseRPC reads one JSON-RPC object as strictly as any server could read it: keys match
+// exactly, and duplicate keys, keys equal under Unicode case folding, and look-alikes of the
+// members above are refused, at the top level and in a tools/call's params.
 func parseRPC(b []byte) (rpcMsg, error) {
 	var m rpcMsg
-	o, err := strictObject(b)
+	o, err := strictObject(b, rpcMembers)
 	if err != nil {
 		return m, err
 	}
@@ -128,37 +142,70 @@ func parseRPC(b []byte) (rpcMsg, error) {
 	if raw, ok := o["method"]; ok && json.Unmarshal(raw, &m.Method) != nil {
 		return m, errors.New("method is not a string")
 	}
-	if raw, ok := o["params"]; ok && m.Method == "tools/call" {
-		p, err := strictObject(raw)
+	if m.Method == "tools/call" {
+		raw, ok := o["params"]
+		if !ok {
+			return m, errors.New("tools/call without params")
+		}
+		p, err := strictObject(raw, paramsMembers)
 		if err != nil {
 			return m, err
 		}
 		if n, ok := p["name"]; ok {
 			_ = json.Unmarshal(n, &m.Name) // not a string: no name, which is a deny
 		}
+		if o["params"], err = encode(p); err != nil {
+			return m, err
+		}
 	}
-	return m, nil
+	m.Canon, err = encode(o)
+	return m, err
 }
 
-// strictObject decodes a JSON object, refusing duplicate and case-variant keys, and anything after it.
-func strictObject(b []byte) (map[string]json.RawMessage, error) {
+// encode writes v as compact JSON without HTML escaping (the bytes stay what the client sent).
+func encode(v any) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+// maxKeys bounds one JSON-RPC object level (keys are compared pairwise).
+const maxKeys = 64
+
+// strictObject decodes one JSON object, refusing: two keys equal under Unicode simple case folding
+// (exact duplicates included), a key that folds to one of members without being spelled exactly
+// so, more than maxKeys keys, and anything after the object.
+func strictObject(b []byte, members []string) (map[string]json.RawMessage, error) {
 	dec := json.NewDecoder(bytes.NewReader(b))
 	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
 		return nil, errors.New("not a JSON object")
 	}
 	out := map[string]json.RawMessage{}
-	seen := map[string]bool{}
+	var keys []string
 	for dec.More() {
 		t, err := dec.Token()
 		k, ok := t.(string)
 		if err != nil || !ok {
 			return nil, errors.New("bad key")
 		}
-		lk := strings.ToLower(k)
-		if seen[lk] {
-			return nil, errors.New("duplicate key " + strconv.Quote(k))
+		if len(keys) == maxKeys {
+			return nil, errors.New("too many keys")
 		}
-		seen[lk] = true
+		for _, seen := range keys {
+			if strings.EqualFold(seen, k) {
+				return nil, errors.New("duplicate key " + strconv.Quote(k))
+			}
+		}
+		for _, mem := range members {
+			if strings.EqualFold(mem, k) && mem != k {
+				return nil, errors.New("look-alike key " + strconv.Quote(k))
+			}
+		}
+		keys = append(keys, k)
 		var v json.RawMessage
 		if err := dec.Decode(&v); err != nil {
 			return nil, err
@@ -202,7 +249,7 @@ func screen(line []byte, server string, decide Decider) (forward []byte, replies
 			replies = append(replies, b)
 		}
 		if len(keep) > 0 {
-			forward, _ = json.Marshal(keep)
+			forward, _ = encode(keep)
 		}
 		return forward, replies
 	}
@@ -211,14 +258,14 @@ func screen(line []byte, server string, decide Decider) (forward []byte, replies
 		return nil, [][]byte{parseError}
 	}
 	if m.Method != "tools/call" {
-		return line, nil
+		return m.Canon, nil
 	}
 	v := Verdict{false, "Manar: this MCP call has no tool name"}
 	if m.Name != "" {
 		v = decide(context.Background(), "mcp", server+"/"+m.Name)
 	}
 	if v.Allow {
-		return line, nil
+		return m.Canon, nil
 	}
 	if len(m.ID) == 0 {
 		return nil, nil // a notification cannot be answered
@@ -253,18 +300,4 @@ func needsDecision(line []byte) bool {
 	}
 	m, err := parseRPC(t)
 	return err != nil || m.Method == "tools/call" // screen answers a refused message
-}
-
-// validRPC is true when line is a JSON object or array.
-func validRPC(line []byte) bool {
-	t := bytes.TrimSpace(line)
-	var v any
-	if json.Unmarshal(t, &v) != nil {
-		return false
-	}
-	switch v.(type) {
-	case map[string]any, []any:
-		return true
-	}
-	return false
 }
