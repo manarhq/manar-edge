@@ -309,6 +309,10 @@ func relayHandler(b backend) http.Handler {
 	// A hook (running as the user) refused an AI tool's change to a hook or settings file. The
 	// service reports it; the kind is fixed here, the hook only names the tool and the file.
 	mux.HandleFunc("POST /v1/tamper", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		var in struct {
 			ToolID string `json:"toolId"`
 			Action string `json:"action"`

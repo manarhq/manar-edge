@@ -2,6 +2,8 @@ package protect
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -108,5 +110,31 @@ func TestRelayRefusesAccountsWithoutProtectedTools(t *testing.T) {
 		if callerAllowed(c) != want {
 			t.Errorf("callerAllowed(%q) != %v", c, want)
 		}
+	}
+}
+
+func TestTamperReportOnlyFromProtectedAccounts(t *testing.T) {
+	got := captureTamper(t)
+	old := protectedUID
+	defer func() { protectedUID = old }()
+	h := relayHandler(&fakeBackend{})
+	post := func(caller, body string) int {
+		req := httptest.NewRequest(http.MethodPost, "/v1/tamper", strings.NewReader(body))
+		req = req.WithContext(context.WithValue(req.Context(), callerKey{}, caller))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+	body := `{"toolId":"host.claude-code","action":"edit","path":"/home/sam/app/.claude/settings.json"}`
+	protectedUID = func(string) bool { return false }
+	if c := post("uid:1000", body); c != http.StatusForbidden || len(*got) != 0 {
+		t.Fatalf("an account without protected tools reported: %d %v", c, *got)
+	}
+	protectedUID = func(string) bool { return true }
+	if c := post("uid:1000", `{"toolId":"host.nope","action":"edit"}`); c != 400 {
+		t.Fatalf("unknown tool: %d", c)
+	}
+	if c := post("uid:1000", body); c != 200 || len(*got) != 1 || (*got)[0]["type"] != TamperSettingsWrite || (*got)[0]["blocked"] != true {
+		t.Fatalf("report: %d %v", c, *got)
 	}
 }
