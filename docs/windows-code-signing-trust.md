@@ -109,8 +109,9 @@ transparency log. The trust comes from the key fingerprint you compared.
 
 - **Renewal:** Fixio sends the next `.cer` and its thumbprint at least 90 days before the current
   one expires. Deploy it alongside the old one; remove the old one after it expires.
-- **Expiry:** releases are signed without a timestamp. When a certificate expires, Windows stops
-  accepting binaries signed with it. Update the edge to a release signed with the current certificate
-  before then.
+- **Expiry:** each signature carries an RFC 3161 timestamp from DigiCert's public timestamp
+  authority (`http://timestamp.digicert.com`). A binary signed while the certificate was valid
+  therefore stays valid after the certificate expires. New releases are signed with the current
+  certificate.
 - **Removal:** delete the Intune profiles or the GPO entries. For a single device, run
   `Get-ChildItem Cert:\LocalMachine\Root, Cert:\LocalMachine\TrustedPublisher | Where-Object Thumbprint -eq '<THUMBPRINT>' | Remove-Item`.

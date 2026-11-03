@@ -7,7 +7,8 @@
 #   - SHA256SUMS is signed with the manar-edge cosign key, cosign-edge (SHA256SUMS.sigstore.json).
 # The sign job runs in the environment release-signing, which admits only v* tags (and v* tags
 # can only be created by admins, ruleset "release tags"). It gets an Azure token through GitHub OIDC
-# federation: no stored secret. Until the repo variable SIGNING_VAULT exists, releases are
+# federation: no stored secret. The SHA256SUMS signature needs no timestamp: it is verified against a
+# pinned public key, not a certificate that expires. Until the repo variable SIGNING_VAULT exists, releases are
 # published unsigned, as before. Once it exists, any signing failure stops the release.
 name: release
 
@@ -65,7 +66,10 @@ jobs:
       AZURE_CLIENT_ID: ${{ vars.AUTHENTICODE_SIGNER_CLIENT_ID }} # signer-authenticode: this environment only
       VAULT: ${{ vars.SIGNING_VAULT }}
       CERT: manar-code-signing
-      TSA: ${{ vars.SIGN_TSA_URL }} # empty: no timestamp (Azure-only decision, 3 Nov 2026)
+      # RFC 3161 timestamp (founder decision 4 Nov 2026: DigiCert's public TSA, repo variable
+      # SIGN_TSA_URL = http://timestamp.digicert.com), so signatures stay valid after the certificate
+      # expires. Empty: no timestamp.
+      TSA: ${{ vars.SIGN_TSA_URL }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
