@@ -51,8 +51,19 @@ This is the honest "hook" level, not a lock. What Manar does about it:
   repeated separators. Each path is checked as text (with `..` applied to the text, as Windows does)
   and as its real target: resolved one element at a time with links followed before `..` is
   applied (as Linux does), 8.3 short names expanded, and any part that does not exist yet appended.
-  It fails closed: a path that cannot be resolved (a broken or looping link, an unreadable folder)
-  is refused. An ordinary relative edit such as `../README.md` is not.
+  A link's target is walked the same way from where the link is, so its `..` is applied after the
+  links before it. After a part that does not exist yet only plain new names may follow (no `..`,
+  no `~` short name on Windows), and an element made only of dots and spaces other than `.` and
+  `..` is refused. It fails closed: a path that cannot be resolved (a broken or looping link, an
+  unreadable folder, no absolute folder to start from), or a call that cannot be classified, is
+  refused. An ordinary relative edit such as `../README.md` is not. String arguments under keys
+  Manar does not know as paths are checked by their text, and treated as files when their name is
+  that of a guarded file (`settings.json`, `hooks.json`, `mcp.json`, ...); arguments nested deeper
+  than 32 levels or holding more than 10,000 values are refused. The MCP wrapper checks a call's
+  `arguments` the same way before asking Manar: decoded strictly at every depth (no duplicate or
+  case-fold-equal keys) and forwarded re-encoded from what was checked. There every file path
+  must be absolute: a relative, `~` or `~user` path is refused ("Manar needs a full file path for
+  this tool"), because Manar cannot know which folder the server resolves it from.
 - A shell command is refused when it names one of those files, names `CLAUDE_CONFIG_DIR` or
   `disableAllHooks`, runs `claude --settings`, or names a tool's settings folder next to something
   that writes or removes files (file commands, redirection, `tee`, `dd`, `sed -i`, `awk`, or an

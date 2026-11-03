@@ -116,6 +116,8 @@ type rpcMsg struct {
 	ID     json.RawMessage
 	Method string
 	Name   string // params.name of a tools/call
+	// Refused: why the call's arguments are refused before Manar is asked (guard.go), or "".
+	Refused string
 	// Canon is the message re-encoded from what the wrapper parsed. It is what reaches the server,
 	// never the original line, so the server reads exactly the keys the decision was made on.
 	Canon []byte
@@ -154,12 +156,75 @@ func parseRPC(b []byte) (rpcMsg, error) {
 		if n, ok := p["name"]; ok {
 			_ = json.Unmarshal(n, &m.Name) // not a string: no name, which is a deny
 		}
+		if a, ok := p["arguments"]; ok {
+			// Decoded as strictly as the top level, at every depth, and re-encoded from what was
+			// checked: the server never reads keys the check did not see.
+			v, err := strictValue(a, 0)
+			if err != nil {
+				return m, err
+			}
+			if args, isObj := v.(map[string]any); !isObj {
+				m.Refused = "Manar: the tool's arguments are not an object"
+			} else {
+				m.Refused = guardedArgs(args)
+			}
+			if p["arguments"], err = encode(v); err != nil {
+				return m, err
+			}
+		}
 		if o["params"], err = encode(p); err != nil {
 			return m, err
 		}
 	}
 	m.Canon, err = encode(o)
 	return m, err
+}
+
+// strictValue decodes any JSON value with the rules of strictObject at every depth (no duplicate
+// or case-fold-equal keys) and numbers kept as written.
+func strictValue(b []byte, depth int) (any, error) {
+	if depth > maxArgDepth {
+		return nil, errTooDeep
+	}
+	t := bytes.TrimSpace(b)
+	if len(t) == 0 {
+		return nil, errors.New("empty value")
+	}
+	switch t[0] {
+	case '{':
+		o, err := strictObject(t, nil)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]any, len(o))
+		for k, raw := range o {
+			if out[k], err = strictValue(raw, depth+1); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(t, &items); err != nil {
+			return nil, err
+		}
+		out := make([]any, len(items))
+		for i, raw := range items {
+			v, err := strictValue(raw, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = v
+		}
+		return out, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(t))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 // encode writes v as compact JSON without HTML escaping (the bytes stay what the client sent).
@@ -261,7 +326,9 @@ func screen(line []byte, server string, decide Decider) (forward []byte, replies
 		return m.Canon, nil
 	}
 	v := Verdict{false, "Manar: this MCP call has no tool name"}
-	if m.Name != "" {
+	if m.Refused != "" {
+		v = Verdict{false, m.Refused}
+	} else if m.Name != "" {
 		v = decide(context.Background(), "mcp", server+"/"+m.Name)
 	}
 	if v.Allow {

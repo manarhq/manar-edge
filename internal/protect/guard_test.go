@@ -1,6 +1,7 @@
 package protect
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -231,6 +232,10 @@ func TestGuardResolvesTheRealTarget(t *testing.T) {
 		"a/../.claude/settings.json",    // '..' in a path that does not exist
 		"rel/.claude/settings.local.json",
 		"../app/.claude/settings.json",
+		"new/folder/../file.txt", // '..' after a part that does not exist
+		"missing/../../app/x.txt",
+		"sub/.../x.txt", // dots and spaces only: another name on Windows
+		"a/. ./b.txt",
 	} {
 		if !guardedTarget(p, dir) {
 			t.Errorf("guardedTarget(%q) = false", p)
@@ -240,8 +245,8 @@ func TestGuardResolvesTheRealTarget(t *testing.T) {
 		"../README.md",
 		"../deep/x/notes.txt",
 		"link/../README.md",
-		"new/folder/../file.txt",
 		"src/main.go",
+		"new/folder/file.txt",
 		filepath.Join(root, "deep", "x", "a.txt"),
 	} {
 		if guardedTarget(p, dir) {
@@ -291,5 +296,152 @@ func TestShellParentElementNextToAToolFolder(t *testing.T) {
 		if GuardedCommand(c) {
 			t.Errorf("GuardedCommand(%q) = true", c)
 		}
+	}
+}
+
+func TestRelativeLinkTargetsAreWalkedNotCleaned(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "app")
+	for _, d := range []string{dir, filepath.Join(root, "deep", "x"), filepath.Join(root, "deep", ".claude")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// sub -> deep/x; deep/cfg -> deep/.claude; rel -> "sub/../cfg".
+	// As text, rel is app/cfg (does not exist, harmless); on disk it is deep/.claude.
+	if err := os.Symlink(filepath.Join(root, "deep", "x"), filepath.Join(dir, "sub")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "deep", ".claude"), filepath.Join(root, "deep", "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("sub/../cfg", filepath.Join(dir, "rel")); err != nil {
+		t.Fatal(err)
+	}
+	if !guardedTarget("rel/settings.json", dir) {
+		t.Fatal("a relative link target was cleaned as text before its own links were followed")
+	}
+	if guardedTarget("rel/../deep/x/ok.txt", dir) {
+		t.Error("an ordinary path through the same link was refused")
+	}
+}
+
+func TestEveryArgumentAndEveryErrorIsChecked(t *testing.T) {
+	// A file under a key Manar does not know as a path.
+	if guardIn(t, "codex-cli", "tool", `{"tool_name":"mcp__x__copy","tool_input":{"output_file":"/home/sam/app/.claude/settings.json"}}`) != GuardReason {
+		t.Error("an unknown argument naming a settings file was not refused")
+	}
+	// What cannot be classified is refused, not passed on.
+	if guardIn(t, "codex-cli", "tool", `not json`) == "" || guardIn(t, "codex-cli", "tool", `{"tool_input":{}}`) == "" {
+		t.Error("an input that cannot be checked was not refused")
+	}
+	// A relative target with no absolute folder to start from cannot be judged.
+	if !guardedTarget("x.txt", "relative/cwd") {
+		t.Error("a relative working folder was trusted")
+	}
+}
+
+func TestMCPWrapperChecksArguments(t *testing.T) {
+	asked := 0
+	allow := func(context.Context, string, string) Verdict { asked++; return Verdict{true, ""} }
+	for _, l := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"/home/sam/app/.claude/settings.json","content":"{}"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"move","arguments":{"source":"a","destination":".cursor/hooks.json"}}}`,
+		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"x","arguments":"not an object"}}`,
+	} {
+		f, r := screen([]byte(l), "fs", allow)
+		if f != nil || len(r) != 1 || !strings.Contains(string(r[0]), "Manar") {
+			t.Errorf("%s: forwarded %s, replies %s", l, f, r)
+		}
+	}
+	if asked != 0 {
+		t.Fatalf("Manar was asked about a guarded call %d times", asked)
+	}
+	readme := filepath.ToSlash(filepath.Join(t.TempDir(), "README.md")) // absolute on every OS
+	l := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"` + readme + `"}}}`
+	if f, _ := screen([]byte(l), "fs", allow); f == nil || asked != 1 {
+		t.Error("an ordinary MCP write was not passed on")
+	}
+}
+
+func TestArgumentScanHasNoSilentCutOff(t *testing.T) {
+	nest := func(levels int, leaf string) string {
+		s := `"` + leaf + `"`
+		for i := 0; i < levels; i++ {
+			s = `{"k":` + s + `}`
+		}
+		return s
+	}
+	deep := `{"tool_name":"mcp__x__y","tool_input":` + nest(6, "/home/sam/app/.claude/settings.json") + `}`
+	if guardIn(t, "codex-cli", "tool", deep) != GuardReason {
+		t.Error("a settings path nested 6 levels deep was not refused")
+	}
+	tooDeep := `{"tool_name":"mcp__x__y","tool_input":` + nest(maxArgDepth+5, "x") + `}`
+	if r := guardIn(t, "codex-cli", "tool", tooDeep); r == "" {
+		t.Error("arguments past the depth limit were passed on")
+	}
+	if guardIn(t, "codex-cli", "tool", `{"tool_name":"mcp__x__y","tool_input":`+nest(6, "ok")+`}`) != "" {
+		t.Error("ordinary nested arguments were refused")
+	}
+}
+
+func TestMCPArgumentsAreStrictAndAbsolute(t *testing.T) {
+	allow := func(context.Context, string, string) Verdict { return Verdict{true, ""} }
+	reply := func(l string) (forwarded bool, msg string) {
+		f, r := screen([]byte(l), "fs", allow)
+		if len(r) == 1 {
+			msg = string(r[0])
+		}
+		return f != nil, msg
+	}
+	call := func(args string) string {
+		return `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":` + args + `}}`
+	}
+	safe := filepath.ToSlash(filepath.Join(t.TempDir(), "x.txt"))
+	settings := filepath.ToSlash(filepath.Join(t.TempDir(), ".claude", "settings.json"))
+	// Duplicate or case-fold-equal keys inside the arguments, at any depth.
+	for _, a := range []string{`{"Path":"a.txt","path":"` + settings + `"}`, `{"o":{"path":"a","path":"b"}}`} {
+		if fw, _ := reply(call(a)); fw {
+			t.Errorf("forwarded %s", a)
+		}
+	}
+	// Relative, ~ and ~user paths are refused with a plain reason; absolute ones are judged.
+	for _, a := range []string{`{"path":"~/.claude/settings.json"}`, `{"path":"~sam/notes.txt"}`, `{"path":"src/main.go"}`, `{"path":"../x"}`} {
+		if fw, msg := reply(call(a)); fw || !strings.Contains(msg, "needs a full file path") && !strings.Contains(msg, "may not change") {
+			t.Errorf("%s: forwarded=%v %s", a, fw, msg)
+		}
+	}
+	if fw, msg := reply(call(`{"path":"src/main.go"}`)); fw || !strings.Contains(msg, "Manar needs a full file path for this tool") {
+		t.Errorf("relative path: forwarded=%v %s", fw, msg)
+	}
+	if fw, msg := reply(call(`{"path":"` + settings + `"}`)); fw || !strings.Contains(msg, "may not change") {
+		t.Errorf("absolute settings path: forwarded=%v %s", fw, msg)
+	}
+	// An absolute safe path goes on, re-encoded from what was checked (numbers as written).
+	f, r := screen([]byte(call(`{ "path" : "`+safe+`", "n": 1.50 }`)), "fs", allow)
+	if r != nil || string(f) != `{"id":1,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"n":1.50,"path":"`+safe+`"},"name":"w"}}` {
+		t.Fatalf("forwarded %s, replies %s", f, r)
+	}
+}
+
+func TestFilesUnderUnknownKeysAreResolved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, ".claude"), filepath.Join(dir, "cfg")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	in := `{"tool_name":"mcp__x__copy","cwd":"` + filepath.ToSlash(dir) + `","tool_input":{"dst":"cfg/settings.json"}}`
+	if guardIn(t, "codex-cli", "tool", in) != GuardReason {
+		t.Error("a link to a settings file under an unknown key was not refused")
+	}
+	allow := func(context.Context, string, string) Verdict { return Verdict{true, ""} }
+	abs := filepath.ToSlash(filepath.Join(dir, "cfg", "settings.json"))
+	if f, _ := screen([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":{"dst":"`+abs+`"}}}`), "fs", allow); f != nil {
+		t.Error("the MCP wrapper let a link to a settings file through under an unknown key")
+	}
+	if f, _ := screen([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"w","arguments":{"dst":"cfg/settings.json"}}}`), "fs", allow); f != nil {
+		t.Error("the MCP wrapper let a relative settings-like path through under an unknown key")
 	}
 }

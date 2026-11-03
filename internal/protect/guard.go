@@ -7,6 +7,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -109,6 +110,9 @@ func guardedTarget(p, cwd string) bool {
 		}
 		abs = filepath.FromSlash(cwd) + string(filepath.Separator) + abs // not cleaned: links come first
 	}
+	if !filepath.IsAbs(abs) {
+		return true // no folder to start from: cannot tell
+	}
 	real, err := realPath(abs)
 	return err != nil || GuardedPath(real)
 }
@@ -117,17 +121,27 @@ func guardedTarget(p, cwd string) bool {
 const maxHops = 40
 
 // realPath resolves an absolute path the way the kernel walks it: one element at a time, each link
-// (symbolic link, or junction on Windows) replaced by its target before the next element, '..'
-// included, is applied. When an element does not exist, the rest is appended as text: a file or
-// folder the tool would create. A link that cannot be read, points nowhere, or loops is an error.
-// On Windows the part that exists is given its long (not 8.3) name.
+// (symbolic link, or junction on Windows) replaced by its target's elements, which are walked the
+// same way from where the link is (or from the root, for an absolute target), so every '..' is
+// applied only after the links before it. A link that cannot be read, points nowhere, or loops is
+// an error, and so is an element made only of dots and spaces other than "." and ".." (Windows
+// reads "..." or ". ." as other names). Once an element does not exist, the rest is a file or
+// folder the tool would create: it may only be plain names (no "..", and no "~" 8.3-style name on
+// Windows), else it is an error. On Windows the part that exists is given its long name.
+// Every error means "cannot tell": the caller refuses.
 func realPath(abs string) (string, error) {
 	vol := filepath.VolumeName(abs)
+	if vol == "" && runtime.GOOS == "windows" {
+		return "", errors.New("no drive")
+	}
 	todo := splitPath(abs[len(vol):])
 	cur := vol + string(filepath.Separator)
 	hops := 0
 	for len(todo) > 0 {
-		e := todo[0]
+		e, err := element(todo[0])
+		if err != nil {
+			return "", err
+		}
 		todo = todo[1:]
 		switch e {
 		case ".":
@@ -139,11 +153,19 @@ func realPath(abs string) (string, error) {
 		next := filepath.Join(cur, e)
 		fi, err := os.Lstat(next)
 		if os.IsNotExist(err) {
-			long, lerr := longPath(cur)
-			if lerr != nil {
-				return "", lerr
+			long, err := longPath(cur)
+			if err != nil {
+				return "", err
 			}
-			return filepath.Join(append([]string{long, e}, todo...)...), nil
+			out := []string{long}
+			for _, r := range append([]string{e}, todo...) {
+				n, err := element(r)
+				if err != nil || n == ".." || n == "." || (runtime.GOOS == "windows" && strings.Contains(n, "~")) {
+					return "", errors.New("only plain new names may follow a part that does not exist")
+				}
+				out = append(out, n)
+			}
+			return filepath.Join(out...), nil
 		}
 		if err != nil {
 			return "", err
@@ -155,21 +177,38 @@ func realPath(abs string) (string, error) {
 		if hops++; hops > maxHops {
 			return "", errors.New("too many links")
 		}
+		if _, err := os.Stat(next); err != nil {
+			return "", errors.New("a link that points nowhere") // broken, or a loop
+		}
 		target, err := os.Readlink(next)
 		if err != nil {
 			return "", err
 		}
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(cur, target)
+		// The target's own elements go first in the queue, walked from the link's folder or from
+		// the root: never joined (and so cleaned) as text.
+		if tv := filepath.VolumeName(target); tv != "" {
+			cur, target = tv+string(filepath.Separator), target[len(tv):]
+		} else if strings.HasPrefix(target, "/") || strings.HasPrefix(target, string(filepath.Separator)) {
+			cur = filepath.VolumeName(cur) + string(filepath.Separator)
 		}
-		if _, err := os.Stat(next); err != nil {
-			return "", errors.New("a link that points nowhere") // broken, or a loop
-		}
-		tv := filepath.VolumeName(target)
-		cur = tv + string(filepath.Separator)
-		todo = append(splitPath(target[len(tv):]), todo...)
+		todo = append(splitPath(target), todo...)
 	}
 	return longPath(cur)
+}
+
+// element returns a path element as the file system reads it: on Windows without trailing dots
+// and spaces. An element made only of dots and spaces other than "." and ".." is an error.
+func element(e string) (string, error) {
+	if e == "." || e == ".." {
+		return e, nil
+	}
+	if strings.Trim(e, ". ") == "" {
+		return "", errors.New("a path element made only of dots and spaces")
+	}
+	if runtime.GOOS == "windows" {
+		e = strings.TrimRight(e, ". ")
+	}
+	return e, nil
 }
 
 func splitPath(p string) []string {
@@ -227,28 +266,38 @@ var targetKeys = map[string]bool{
 // to) and unified and git diffs (---, +++, rename, copy).
 var patchTargets = regexp.MustCompile(`(?m)^(?:\*\*\* (?:Add|Update|Delete) File: |\*\*\* Move to: |(?:\+\+\+|---) |rename (?:from|to) |copy (?:from|to) )(.+?)\s*$|^diff --git (\S+) (\S+)\s*$`)
 
-// editTargets lists every file path in a tool's arguments: values of path-like keys (also in
-// nested objects and lists) and the files named in any patch text.
-func editTargets(args map[string]any) []string {
-	var out []string
-	var walk func(v any, key string, depth int)
+// Limits of one argument scan. Past either, Manar cannot tell what the call names: refused.
+const (
+	maxArgDepth  = 32
+	maxArgValues = 10000
+)
+
+var errTooDeep = errors.New("the arguments are nested too deeply or are too many to check")
+
+// scanArgs walks a tool's arguments with no silent cut-off: it lists the file paths (values of
+// path-like keys and the files named in any patch text) and every string, and fails when the
+// arguments go deeper than maxArgDepth or hold more than maxArgValues values.
+func scanArgs(args any) (targets, values []string, err error) {
 	add := func(s string) {
 		s = strings.TrimSpace(strings.SplitN(s, "\t", 2)[0]) // diff headers may carry a timestamp
 		for _, pre := range []string{"a/", "b/"} {
 			if strings.HasPrefix(s, pre) {
-				out = append(out, strings.TrimPrefix(s, pre)) // git diff prefixes, kept both ways
+				targets = append(targets, strings.TrimPrefix(s, pre)) // git diff prefixes, kept both ways
 			}
 		}
 		if s != "" && s != "/dev/null" {
-			out = append(out, s)
+			targets = append(targets, s)
 		}
 	}
-	walk = func(v any, key string, depth int) {
-		if depth > 4 {
-			return
+	n := 0
+	var walk func(v any, key string, depth int) error
+	walk = func(v any, key string, depth int) error {
+		if n++; depth > maxArgDepth || n > maxArgValues {
+			return errTooDeep
 		}
 		switch x := v.(type) {
 		case string:
+			values = append(values, x)
 			if targetKeys[strings.ToLower(key)] {
 				add(x)
 			}
@@ -259,16 +308,94 @@ func editTargets(args map[string]any) []string {
 			}
 		case []any:
 			for _, e := range x {
-				walk(e, key, depth+1)
+				if err := walk(e, key, depth+1); err != nil {
+					return err
+				}
 			}
 		case map[string]any:
 			for k, e := range x {
-				walk(e, k, depth+1)
+				if err := walk(e, k, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	err = walk(args, "", 0)
+	return targets, values, err
+}
+
+// editTargets is scanArgs's file list (tests and the shell's patch check; no depth to speak of).
+func editTargets(args map[string]any) []string {
+	t, _, _ := scanArgs(args)
+	return t
+}
+
+// guardedText reports a one-line string whose text is a guarded file: a file named under a key
+// Manar does not know as a path (output_file, dst, ...).
+func guardedValue(values []string) (string, bool) {
+	for _, v := range values {
+		if !strings.ContainsAny(v, "\n\r") && GuardedPath(v) {
+			return v, true
+		}
+	}
+	return "", false
+}
+
+// guardedNames are the file names in guardedFiles that are specific enough to stand for one on
+// their own (not "*" or "*.json").
+var guardedNames = []string{
+	"settings*.json", "managed-settings*.json", "hooks.json", "mcp.json", "mcp_config.json",
+	"mcp-config.json", "config.toml", "claude_desktop_config.json",
+}
+
+// namedLikeGuarded lists the one-line string values whose last element has the name of a guarded
+// file (settings.json, hooks.json, mcp.json, ...): under a key Manar does not know as a path they
+// are still treated as files, so a link or a relative path to one is resolved and checked.
+func namedLikeGuarded(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if strings.ContainsAny(v, "\n\r") {
+			continue
+		}
+		parts := strings.Split(canonical(v), "/")
+		last := parts[len(parts)-1]
+		for _, n := range guardedNames {
+			if m, _ := path.Match(n, last); m {
+				out = append(out, v)
+				break
 			}
 		}
 	}
-	walk(args, "", 0)
 	return out
+}
+
+// GuardNeedsFullPath is the deny message for an MCP call that names a file by a relative or ~
+// path: Manar cannot know which folder the server resolves it from.
+const GuardNeedsFullPath = "Manar denied: Manar needs a full file path for this tool."
+
+// guardedArgs is the argument check for an MCP call through the wrapper; reason is empty when it
+// may go on. Arguments that cannot be checked as a whole, and a one-line string whose text is a
+// guarded file, are refused. A path-like argument must be absolute (relative, ~ and ~user paths
+// are refused: the server resolves them from a folder Manar does not know), and an absolute one
+// is refused when its real target is a guarded file.
+func guardedArgs(args map[string]any) (reason string) {
+	targets, values, err := scanArgs(args)
+	if err != nil {
+		return "Manar: " + err.Error()
+	}
+	if _, ok := guardedValue(values); ok {
+		return GuardReason
+	}
+	for _, t := range append(targets, namedLikeGuarded(values)...) {
+		if !filepath.IsAbs(filepath.FromSlash(t)) {
+			return GuardNeedsFullPath
+		}
+		if guardedTarget(t, "") {
+			return GuardReason
+		}
+	}
+	return ""
 }
 
 // toolArgs returns a generic tool's arguments from its hook input (Claude Code, Gemini, Codex:
@@ -298,7 +425,7 @@ func toolArgs(in map[string]any) map[string]any {
 func GuardInput(key, event string, raw []byte) (reason, action, path string) {
 	actionID, resource, err := Classify(key, event, raw)
 	if err != nil {
-		return "", "", "" // the caller refuses an input it cannot classify
+		return "Manar: " + err.Error(), "", "" // what cannot be checked is refused
 	}
 	var in map[string]any
 	_ = json.Unmarshal(raw, &in)
@@ -321,7 +448,16 @@ func GuardInput(key, event string, raw []byte) (reason, action, path string) {
 	if key == "cursor" || key == "windsurf" {
 		targets = nil // their mcp events carry no file arguments Manar can see
 	} else {
-		targets = editTargets(toolArgs(in))
+		var values []string
+		var err error
+		targets, values, err = scanArgs(toolArgs(in))
+		if err != nil {
+			return "Manar: " + err.Error(), "", ""
+		}
+		if v, ok := guardedValue(values); ok {
+			return GuardReason, "edit", v
+		}
+		targets = append(targets, namedLikeGuarded(values)...)
 	}
 	for _, t := range targets {
 		if guardedTarget(t, cwd) {
