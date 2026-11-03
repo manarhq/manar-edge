@@ -350,7 +350,7 @@ func TestMCPWrapperChecksArguments(t *testing.T) {
 		`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"x","arguments":"not an object"}}`,
 	} {
 		f, r := screen([]byte(l), "fs", allow)
-		if f != nil || len(r) != 1 || !strings.Contains(string(r[0]), "may not change AI tool hook") {
+		if f != nil || len(r) != 1 || !strings.Contains(string(r[0]), "Manar") {
 			t.Errorf("%s: forwarded %s, replies %s", l, f, r)
 		}
 	}
@@ -384,44 +384,63 @@ func TestArgumentScanHasNoSilentCutOff(t *testing.T) {
 	}
 }
 
-func TestMCPArgumentsAreStrictAndRootBound(t *testing.T) {
-	old := mcpRoots
-	defer func() { mcpRoots = old }()
+func TestMCPArgumentsAreStrictAndAbsolute(t *testing.T) {
 	allow := func(context.Context, string, string) Verdict { return Verdict{true, ""} }
-	refused := func(l string) bool {
+	reply := func(l string) (forwarded bool, msg string) {
 		f, r := screen([]byte(l), "fs", allow)
-		return f == nil && len(r) == 1
+		if len(r) == 1 {
+			msg = string(r[0])
+		}
+		return f != nil, msg
 	}
-	root := t.TempDir()
-	mcpRoots = []string{root}
+	call := func(args string) string {
+		return `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":` + args + `}}`
+	}
+	safe := filepath.ToSlash(filepath.Join(t.TempDir(), "x.txt"))
+	settings := filepath.ToSlash(filepath.Join(t.TempDir(), ".claude", "settings.json"))
 	// Duplicate or case-fold-equal keys inside the arguments, at any depth.
-	for _, l := range []string{
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":{"Path":"a.txt","path":"/home/sam/app/.claude/settings.json"}}}`,
-		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":{"o":{"path":"a","path":"b"}}}}`,
-	} {
-		if !refused(l) {
-			t.Errorf("not refused: %s", l)
+	for _, a := range []string{`{"Path":"a.txt","path":"` + settings + `"}`, `{"o":{"path":"a","path":"b"}}`} {
+		if fw, _ := reply(call(a)); fw {
+			t.Errorf("forwarded %s", a)
 		}
 	}
-	// The server gets the arguments re-encoded from what was checked, numbers as written.
-	l := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"w","arguments":{ "path" : "src/main.go", "n": 1.50 }}}`
-	f, r := screen([]byte(l), "fs", allow)
-	if r != nil || string(f) != `{"id":2,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"n":1.50,"path":"src/main.go"},"name":"w"}}` {
+	// Relative, ~ and ~user paths are refused with a plain reason; absolute ones are judged.
+	for _, a := range []string{`{"path":"~/.claude/settings.json"}`, `{"path":"~sam/notes.txt"}`, `{"path":"src/main.go"}`, `{"path":"../x"}`} {
+		if fw, msg := reply(call(a)); fw || !strings.Contains(msg, "needs a full file path") && !strings.Contains(msg, "may not change") {
+			t.Errorf("%s: forwarded=%v %s", a, fw, msg)
+		}
+	}
+	if fw, msg := reply(call(`{"path":"src/main.go"}`)); fw || !strings.Contains(msg, "Manar needs a full file path for this tool") {
+		t.Errorf("relative path: forwarded=%v %s", fw, msg)
+	}
+	if fw, msg := reply(call(`{"path":"` + settings + `"}`)); fw || !strings.Contains(msg, "may not change") {
+		t.Errorf("absolute settings path: forwarded=%v %s", fw, msg)
+	}
+	// An absolute safe path goes on, re-encoded from what was checked (numbers as written).
+	f, r := screen([]byte(call(`{ "path" : "`+safe+`", "n": 1.50 }`)), "fs", allow)
+	if r != nil || string(f) != `{"id":1,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"n":1.50,"path":"`+safe+`"},"name":"w"}}` {
 		t.Fatalf("forwarded %s, replies %s", f, r)
 	}
-	// A relative path is judged from the server's root; with no root known it is refused.
-	rel := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"w","arguments":{"path":"../.claude/settings.json"}}}`
-	if !refused(rel) {
-		t.Error("a relative settings path was not refused")
+}
+
+func TestFilesUnderUnknownKeysAreResolved(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	mcpRoots = nil
-	if !refused(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"w","arguments":{"path":"src/main.go"}}}`) {
-		t.Error("a relative path with no known root was not refused")
+	if err := os.Symlink(filepath.Join(dir, ".claude"), filepath.Join(dir, "cfg")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
 	}
-	if refused(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"w","arguments":{"path":"` + filepath.ToSlash(filepath.Join(root, "x.txt")) + `"}}}`) {
-		t.Error("an absolute ordinary path was refused")
+	in := `{"tool_name":"mcp__x__copy","cwd":"` + filepath.ToSlash(dir) + `","tool_input":{"dst":"cfg/settings.json"}}`
+	if guardIn(t, "codex-cli", "tool", in) != GuardReason {
+		t.Error("a link to a settings file under an unknown key was not refused")
 	}
-	if got := rootsOf([]string{"npx", "-y", "@modelcontextprotocol/server-filesystem", root, "--root=" + root, "relative"}); len(got) != 2 {
-		t.Errorf("rootsOf = %v", got)
+	allow := func(context.Context, string, string) Verdict { return Verdict{true, ""} }
+	abs := filepath.ToSlash(filepath.Join(dir, "cfg", "settings.json"))
+	if f, _ := screen([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":{"dst":"`+abs+`"}}}`), "fs", allow); f != nil {
+		t.Error("the MCP wrapper let a link to a settings file through under an unknown key")
+	}
+	if f, _ := screen([]byte(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"w","arguments":{"dst":"cfg/settings.json"}}}`), "fs", allow); f != nil {
+		t.Error("the MCP wrapper let a relative settings-like path through under an unknown key")
 	}
 }

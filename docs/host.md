@@ -57,11 +57,13 @@ This is the honest "hook" level, not a lock. What Manar does about it:
   `..` is refused. It fails closed: a path that cannot be resolved (a broken or looping link, an
   unreadable folder, no absolute folder to start from), or a call that cannot be classified, is
   refused. An ordinary relative edit such as `../README.md` is not. String arguments under keys
-  Manar does not know as paths are checked by their text; arguments nested deeper than 32 levels
-  or holding more than 10,000 values are refused. The MCP wrapper checks a call's `arguments` the
-  same way before asking Manar: decoded strictly at every depth (no duplicate or case-fold-equal
-  keys), forwarded re-encoded from what was checked, and a relative path judged from the folders
-  the server was given on its command line, refused when it was given none.
+  Manar does not know as paths are checked by their text, and treated as files when their name is
+  that of a guarded file (`settings.json`, `hooks.json`, `mcp.json`, ...); arguments nested deeper
+  than 32 levels or holding more than 10,000 values are refused. The MCP wrapper checks a call's
+  `arguments` the same way before asking Manar: decoded strictly at every depth (no duplicate or
+  case-fold-equal keys) and forwarded re-encoded from what was checked. There every file path
+  must be absolute: a relative, `~` or `~user` path is refused ("Manar needs a full file path for
+  this tool"), because Manar cannot know which folder the server resolves it from.
 - A shell command is refused when it names one of those files, names `CLAUDE_CONFIG_DIR` or
   `disableAllHooks`, runs `claude --settings`, or names a tool's settings folder next to something
   that writes or removes files (file commands, redirection, `tee`, `dd`, `sed -i`, `awk`, or an

@@ -7,9 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,7 +24,6 @@ func RunMCPWrap(key, server string, argv []string, in io.Reader, out, errw io.Wr
 	if len(argv) == 0 {
 		return 2
 	}
-	mcpRoots = rootsOf(argv)
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (the MCP server command from the tool's own config, which this wrapper exists to run)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = errw
@@ -119,8 +116,8 @@ type rpcMsg struct {
 	ID     json.RawMessage
 	Method string
 	Name   string // params.name of a tools/call
-	// Guarded: the call's arguments name a hook or settings file (guard.go), or cannot be read.
-	Guarded bool
+	// Refused: why the call's arguments are refused before Manar is asked (guard.go), or "".
+	Refused string
 	// Canon is the message re-encoded from what the wrapper parsed. It is what reaches the server,
 	// never the original line, so the server reads exactly the keys the decision was made on.
 	Canon []byte
@@ -166,8 +163,11 @@ func parseRPC(b []byte) (rpcMsg, error) {
 			if err != nil {
 				return m, err
 			}
-			args, isObj := v.(map[string]any)
-			m.Guarded = !isObj || guardedArgs(args, mcpRoots)
+			if args, isObj := v.(map[string]any); !isObj {
+				m.Refused = "Manar: the tool's arguments are not an object"
+			} else {
+				m.Refused = guardedArgs(args)
+			}
 			if p["arguments"], err = encode(v); err != nil {
 				return m, err
 			}
@@ -178,25 +178,6 @@ func parseRPC(b []byte) (rpcMsg, error) {
 	}
 	m.Canon, err = encode(o)
 	return m, err
-}
-
-// mcpRoots are the folders the wrapped server was given on its command line (absolute paths
-// that are folders): where it resolves a relative path. Set by RunMCPWrap.
-var mcpRoots []string
-
-func rootsOf(argv []string) []string {
-	var out []string
-	for _, a := range argv[1:] {
-		if v, ok := strings.CutPrefix(a, "--root="); ok {
-			a = v
-		}
-		if filepath.IsAbs(a) {
-			if st, err := os.Stat(a); err == nil && st.IsDir() {
-				out = append(out, a)
-			}
-		}
-	}
-	return out
 }
 
 // strictValue decodes any JSON value with the rules of strictObject at every depth (no duplicate
@@ -345,8 +326,8 @@ func screen(line []byte, server string, decide Decider) (forward []byte, replies
 		return m.Canon, nil
 	}
 	v := Verdict{false, "Manar: this MCP call has no tool name"}
-	if m.Guarded {
-		v = Verdict{false, GuardReason}
+	if m.Refused != "" {
+		v = Verdict{false, m.Refused}
 	} else if m.Name != "" {
 		v = decide(context.Background(), "mcp", server+"/"+m.Name)
 	}

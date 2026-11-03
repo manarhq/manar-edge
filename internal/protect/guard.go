@@ -342,37 +342,60 @@ func guardedValue(values []string) (string, bool) {
 	return "", false
 }
 
-// guardedArgs is the argument check for an MCP call through the wrapper: any target or string
-// value that is a guarded file, or arguments that cannot be checked as a whole. The server
-// resolves a relative path against its own root, not the wrapper's: a relative target is checked
-// against every root the server was given (absolute folders on its command line) and the folder
-// both run in, and refused when no root is known.
-func guardedArgs(args map[string]any, roots []string) bool {
-	targets, values, err := scanArgs(args)
-	if err != nil {
-		return true
-	}
-	if _, ok := guardedValue(values); ok {
-		return true
-	}
-	cwd, _ := os.Getwd()
-	for _, t := range targets {
-		if filepath.IsAbs(filepath.FromSlash(t)) {
-			if guardedTarget(t, "") {
-				return true
-			}
+// guardedNames are the file names in guardedFiles that are specific enough to stand for one on
+// their own (not "*" or "*.json").
+var guardedNames = []string{
+	"settings*.json", "managed-settings*.json", "hooks.json", "mcp.json", "mcp_config.json",
+	"mcp-config.json", "config.toml", "claude_desktop_config.json",
+}
+
+// namedLikeGuarded lists the one-line string values whose last element has the name of a guarded
+// file (settings.json, hooks.json, mcp.json, ...): under a key Manar does not know as a path they
+// are still treated as files, so a link or a relative path to one is resolved and checked.
+func namedLikeGuarded(values []string) []string {
+	var out []string
+	for _, v := range values {
+		if strings.ContainsAny(v, "\n\r") {
 			continue
 		}
-		if len(roots) == 0 || guardedTarget(t, cwd) {
-			return true
-		}
-		for _, r := range roots {
-			if guardedTarget(t, r) {
-				return true
+		parts := strings.Split(canonical(v), "/")
+		last := parts[len(parts)-1]
+		for _, n := range guardedNames {
+			if m, _ := path.Match(n, last); m {
+				out = append(out, v)
+				break
 			}
 		}
 	}
-	return false
+	return out
+}
+
+// GuardNeedsFullPath is the deny message for an MCP call that names a file by a relative or ~
+// path: Manar cannot know which folder the server resolves it from.
+const GuardNeedsFullPath = "Manar denied: Manar needs a full file path for this tool."
+
+// guardedArgs is the argument check for an MCP call through the wrapper; reason is empty when it
+// may go on. Arguments that cannot be checked as a whole, and a one-line string whose text is a
+// guarded file, are refused. A path-like argument must be absolute (relative, ~ and ~user paths
+// are refused: the server resolves them from a folder Manar does not know), and an absolute one
+// is refused when its real target is a guarded file.
+func guardedArgs(args map[string]any) (reason string) {
+	targets, values, err := scanArgs(args)
+	if err != nil {
+		return "Manar: " + err.Error()
+	}
+	if _, ok := guardedValue(values); ok {
+		return GuardReason
+	}
+	for _, t := range append(targets, namedLikeGuarded(values)...) {
+		if !filepath.IsAbs(filepath.FromSlash(t)) {
+			return GuardNeedsFullPath
+		}
+		if guardedTarget(t, "") {
+			return GuardReason
+		}
+	}
+	return ""
 }
 
 // toolArgs returns a generic tool's arguments from its hook input (Claude Code, Gemini, Codex:
@@ -434,6 +457,7 @@ func GuardInput(key, event string, raw []byte) (reason, action, path string) {
 		if v, ok := guardedValue(values); ok {
 			return GuardReason, "edit", v
 		}
+		targets = append(targets, namedLikeGuarded(values)...)
 	}
 	for _, t := range targets {
 		if guardedTarget(t, cwd) {
