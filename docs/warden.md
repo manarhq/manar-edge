@@ -61,8 +61,10 @@ or Arabic (from the user's locale). Product name WARDEN, subtitle "Manar app on 
 ## Residual risk
 
 A desktop prompt cannot be fully protected from code running as the same user. That code shares the
-user's session and can, for example, attach a debugger to the real helper, set `LD_PRELOAD`, or click
-the notification through accessibility APIs. The checks above remove the easy attacks (opening the
+user's session and can, for example, attach a debugger to the real helper, set `LD_PRELOAD`, click
+the notification through accessibility APIs, or stop the helper and start one whose
+`DBUS_SESSION_BUS_ADDRESS` points at its own `org.freedesktop.Notifications`, then answer its own
+prompts. The checks above remove the easy attacks (opening the
 socket, running a fake server, forging signals). What stays in scope for a device decision is small
 on purpose: approve **once**, never a standing permission, never a secret, and never a high-risk
 action. Those need the console.

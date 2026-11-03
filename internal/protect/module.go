@@ -101,6 +101,9 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 		off[id] = true
 	}
 	approved := cfg.Status == "APPROVED"
+	if approved && !off["host.claude-code"] {
+		scanClaudeOverrides(found)
+	}
 	ctx := Ctx{Exe: exePath(), GatewayURL: GatewayURL}
 	if approved {
 		ctx.GatewayUp = gatewayUp()
@@ -156,7 +159,10 @@ func reconcileTool(st *Store, f discovery.Found, ctx Ctx, approved, off bool) di
 			res.Protected, res.Mode = false, "none"
 			continue
 		}
-		for _, o := range out {
+		for i, o := range out {
+			if o.Repaired && o.Changed && items[i].Role == RoleHook {
+				reportTamper(TamperHookRemoved, "host."+f.Key, "", o.Path, false)
+			}
 			if o.Warning != "" {
 				logOnce("WARNING " + f.Name + " " + o.Path + ": " + o.Warning)
 				res.Changes = append(res.Changes, "Not changed: "+o.Path+" ("+o.Warning+")")
@@ -233,6 +239,7 @@ func (m *relayModule) Start(ctx context.Context, c *hostclient.Client) error {
 	if err != nil {
 		return err
 	}
+	setTamperClient(c)
 	srv := newRelayServer(c)
 	go func() { <-ctx.Done(); srv.Close() }()
 	if err := srv.Serve(l); err != nil && ctx.Err() == nil {
@@ -297,6 +304,26 @@ func relayHandler(b backend) http.Handler {
 			http.Error(w, "bad request", 400)
 			return
 		}
+		w.Write([]byte("{}"))
+	})
+	// A hook (running as the user) refused an AI tool's change to a hook or settings file. The
+	// service reports it; the kind is fixed here, the hook only names the tool and the file.
+	mux.HandleFunc("POST /v1/tamper", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var in struct {
+			ToolID string `json:"toolId"`
+			Action string `json:"action"`
+			Path   string `json:"path"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in) != nil || !validTool(in.ToolID) ||
+			(in.Action != "edit" && in.Action != "shell") || len(in.Path) > 2048 {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		reportTamper(TamperSettingsWrite, in.ToolID, in.Action, in.Path, true)
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("GET /v1/approvals/{id}", func(w http.ResponseWriter, r *http.Request) {

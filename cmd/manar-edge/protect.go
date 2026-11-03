@@ -87,6 +87,9 @@ func printCoverage(out io.Writer) {
 	fmt.Fprintln(out, "check before shell, file and MCP actions, and backs up every file first. Each change is listed")
 	fmt.Fprintln(out, "on the AI tools page, where a switch per tool turns it off and puts the original back.")
 	fmt.Fprintln(out, "Uninstalling restores every backup. See: manar-edge protect list")
+	fmt.Fprintln(out, "What this cannot stop: you, or a program you run, can switch the checks off (a project's own")
+	fmt.Fprintln(out, "Claude Code settings, claude --settings, CLAUDE_CONFIG_DIR). Manar refuses AI tools' changes to")
+	fmt.Fprintln(out, "these settings files and reports what it sees to the console, which marks the device tampered.")
 	printJail(out)
 }
 

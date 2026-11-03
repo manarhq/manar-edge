@@ -73,10 +73,10 @@ What happens, in this order, and any failure before the last step leaves the key
    signing for them through to that agent, so no other key is lost.
 4. Only then the key file is removed. Open a new terminal (or log in again) to pick up the snippet.
 
-Who may sign: a sign request from the person's own program (no AI tool above it, or an interactive
-terminal between it and the tool: you typing `ssh` or `git push`) is answered at once. A request from
-an AI tool's non-interactive chain is a question to the person (WARDEN): once, 8 hours or always for
-that exact binary (SHA-256) and user. No answer in 2 minutes is a denial. Honest ceiling: this is a
+Who may sign: a sign request from the person's own program (no AI tool above it: you typing `ssh` or
+`git push` in your own terminal) is answered at once. A request from anywhere in an AI tool's chain,
+including a shell or terminal the tool started, is a question to the person (WARDEN): once, 8 hours
+or always for that exact binary (SHA-256) and user. No answer in 2 minutes is a denial. Honest ceiling: this is a
 policy for honest tools; a program running as you that is not in the catalogue can still ask the
 agent to sign (it cannot read the key).
 

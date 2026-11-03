@@ -45,6 +45,9 @@ type Outcome struct {
 	Changed bool
 	// Warning is set when the file was left untouched (malformed, a link, unreadable, unwritable).
 	Warning string
+	// Repaired: Manar had edited this file before, and everything of Manar's had been taken out of
+	// it since; Apply put it back.
+	Repaired bool
 }
 
 type entry struct {
@@ -142,6 +145,8 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 			continue
 		}
 		ent := findEntry(m.Tools[key], fe.Path)
+		// Every edit Manar makes names its own binary (hook command, MCP wrapper).
+		oc.Repaired = ent != nil && !bytes.Contains(cur, []byte("manar-edge"))
 		if ent == nil {
 			e, berr := s.backup(tool, fe, cur, existed, curMode, owner)
 			if berr != nil {
