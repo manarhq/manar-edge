@@ -76,9 +76,15 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 	case "claude-code":
 		// The person's own settings, like Gemini CLI. A deny is exit 2 with the reason on stderr,
 		// which Claude Code shows the model; the timeout (seconds) leaves room for an approval.
+		// Personal mode does not write managed settings, so project settings, --settings and
+		// CLAUDE_CONFIG_DIR can still switch this hook off: the hooks refuse AI tools' changes to
+		// those files, and the service reports what it sees (tamper.go).
 		return []Item{hook(filepath.Join(h, ".claude", "settings.json"), RoleHook, func(r map[string]any) error {
 			return setNestedHook(r, "PreToolUse", map[string]any{"matcher": "*", "hooks": []any{map[string]any{
 				"type": "command", "command": hookCommand(c.Exe, key, "tool"), "timeout": json.Number("600"),
+				// A hook that cannot start, crashes or times out blocks the call (Claude Code
+				// versions without onFailure ignore it and fail open).
+				"onFailure": "block",
 			}}})
 		})}
 	case "cursor":

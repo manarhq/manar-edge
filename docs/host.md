@@ -31,8 +31,32 @@ device, and while its switch in the console (AI tools) is on, the device service
 person's `~/.claude/settings.json`, keeps a backup, and takes it out again when the switch is
 turned off or the device is removed. Every tool call then goes to `POST /host/v1/authorize` and
 shows in the console's Sessions view, with the command redacted (see
-`testdata/contract/host-contract.json`). A person can remove a hook from their own settings, so
-this is the honest "hook" level, not a lock.
+`testdata/contract/host-contract.json`). The hook has `onFailure: "block"`, so a hook that cannot
+start, crashes or times out blocks the call (Claude Code versions without `onFailure` let it run).
+
+What personal mode cannot stop: it writes no managed settings, so a project's own
+`.claude/settings.json` or `.claude/settings.local.json` (`disableAllHooks`), `claude --settings`,
+`CLAUDE_CONFIG_DIR`, or the person editing `~/.claude/settings.json` can take the hook out of play.
+This is the honest "hook" level, not a lock. What Manar does about it:
+
+- Every hook Manar installs (all tools, Claude Code included) refuses an AI tool's edit to a hook or
+  settings file (`**/.claude/settings*.json`, `.cursor/hooks.json`, `.cursor/mcp.json`,
+  `.codeium/windsurf/hooks.json`, `.windsurf/hooks.json`, `.gemini/settings.json`,
+  `.codex/hooks.json`, `.codex/config.toml`, `.copilot/hooks/*.json`, `.github/hooks/*.json`, the
+  MCP files Manar wraps, managed settings) and a shell command that names one, names
+  `CLAUDE_CONFIG_DIR` or `disableAllHooks`, runs `claude --settings`, or moves or deletes a tool's
+  settings folder. The shell check reads the command text: a command that builds the name at run
+  time (variables, encodings, a script written first) is not caught. Cursor has no edit hook, so
+  Cursor's own file edits are not checked.
+- The device reports to the console (`POST /host/v1/events`), and the console marks the device as
+  tampered: `protect.tamper.settings_write` (a hook refused such a change; edits carry the path,
+  shell commands do not), `protect.tamper.hook_removed` (Manar's hook was taken out of a file it
+  protects; the service puts it back within a minute), and on Linux only, for a running Claude Code,
+  `protect.tamper.hooks_disabled` (`disableAllHooks` in the project's settings, from its working
+  folder up to the project root), `protect.tamper.settings_flag` (`--settings`) and
+  `protect.tamper.config_dir` (`CLAUDE_CONFIG_DIR` other than `~/.claude`). The same thing is
+  reported at most every 6 hours. On Windows the service cannot read another process's arguments,
+  environment or working folder, so only the first two are reported there.
 
 For a locked-down agent account (agent mode), `manar-edge install-claude-code <agent>` merges this
 into the managed settings instead; when that hook is present the device leaves the person's own

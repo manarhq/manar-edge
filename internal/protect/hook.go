@@ -316,6 +316,10 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 	if err != nil {
 		return Render(key, Verdict{false, "Manar: " + err.Error()})
 	}
+	if Guard(actionID, resource) {
+		reportGuarded(key, actionID, resource)
+		return Render(key, Verdict{false, GuardReason})
+	}
 	budget := time.Duration(Budget(key)) * time.Second
 	relay := NewRelay()
 	relay.Session = SessionID(raw)
@@ -324,6 +328,20 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 		SnapshotBeforeEdit(key, raw)
 	}
 	return Render(key, v)
+}
+
+// reportGuarded tells the device service that a guarded change was refused (best effort). A shell
+// command is not sent: it can hold secrets; the path of an edit is.
+var reportGuarded = func(key, actionID, resource string) {
+	defer func() { _ = recover() }()
+	body := map[string]string{"toolId": "host." + key, "action": "shell"}
+	if actionID != "shell" {
+		body["action"], body["path"] = "edit", resource
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var ignore map[string]any
+	_ = NewRelay().call(ctx, http.MethodPost, "/v1/tamper", body, &ignore)
 }
 
 // SnapshotBeforeEdit saves a copy of the file an editing tool is about to change when it lies
