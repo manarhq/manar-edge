@@ -48,9 +48,11 @@ This is the honest "hook" level, not a lock. What Manar does about it:
   diff `---`/`+++`, `rename`/`copy` lines), also when the patch is piped to `apply_patch` in a
   shell. An editing call whose files Manar cannot find is refused. Paths are compared after
   removing Windows stream suffixes (`name::$DATA`) and trailing dots and spaces, collapsing `.` and
-  repeated separators, and resolving links and 8.3 short names in the part that exists. It fails
-  closed: a target with a `..` element, or one whose existing part cannot be resolved (a broken or
-  looping link), is refused.
+  repeated separators. Each path is checked as text (with `..` applied to the text, as Windows does)
+  and as its real target: resolved one element at a time with links followed before `..` is
+  applied (as Linux does), 8.3 short names expanded, and any part that does not exist yet appended.
+  It fails closed: a path that cannot be resolved (a broken or looping link, an unreadable folder)
+  is refused. An ordinary relative edit such as `../README.md` is not.
 - A shell command is refused when it names one of those files, names `CLAUDE_CONFIG_DIR` or
   `disableAllHooks`, runs `claude --settings`, or names a tool's settings folder next to something
   that writes or removes files (file commands, redirection, `tee`, `dd`, `sed -i`, `awk`, or an

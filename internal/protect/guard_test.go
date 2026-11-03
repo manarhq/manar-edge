@@ -196,43 +196,63 @@ func TestShellTextIsNormalised(t *testing.T) {
 	}
 }
 
-func TestGuardFailsClosed(t *testing.T) {
-	dir := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
-		t.Fatal(err)
+func TestGuardResolvesTheRealTarget(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "app")
+	for _, d := range []string{filepath.Join(dir, ".claude"), filepath.Join(root, "deep", "x"), filepath.Join(root, "deep", ".claude")} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
 	}
-	// A broken link: the settings file it points at does not exist yet.
+	// A broken link to the settings file, and a broken link to somewhere harmless.
 	if err := os.Symlink(filepath.Join(dir, ".claude", "settings.json"), filepath.Join(dir, "notes.json")); err != nil {
 		t.Skipf("no symlinks here: %v", err)
 	}
-	// A broken link to somewhere harmless is refused too: it cannot be resolved.
-	if err := os.Symlink(filepath.Join(dir, "nowhere", "x"), filepath.Join(dir, "dangling")); err != nil {
+	if err := os.Symlink(filepath.Join(root, "nowhere", "x"), filepath.Join(dir, "dangling")); err != nil {
 		t.Fatal(err)
 	}
-	// link/../.claude: '..' after a link means something else on disk than in the text.
-	if err := os.MkdirAll(filepath.Join(dir, "deep", "x"), 0o755); err != nil {
+	// link -> deep/x, so link/../.claude is deep/.claude on disk (links before '..').
+	if err := os.Symlink(filepath.Join(root, "deep", "x"), filepath.Join(dir, "link")); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(filepath.Join(dir, "deep", "x"), filepath.Join(dir, "link")); err != nil {
+	// A relative link and a loop.
+	if err := os.Symlink("../deep", filepath.Join(dir, "rel")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("loop", filepath.Join(dir, "loop")); err != nil {
 		t.Fatal(err)
 	}
 	for _, p := range []string{
-		"notes.json",
-		"dangling",
-		"dangling/sub/file.txt",
-		"link/../.claude/x.json",
-		"../app/file.txt",
-		`sub\..\file.txt`,
-		"sub/.../file.txt",
+		"notes.json",                    // broken link to the settings file
+		"dangling",                      // broken link
+		"dangling/sub/file.txt",         // below a broken link
+		"loop/x",                        // a link loop
+		"link/../.claude/settings.json", // the link is followed before '..'
+		"a/../.claude/settings.json",    // '..' in a path that does not exist
+		"rel/.claude/settings.local.json",
+		"../app/.claude/settings.json",
 	} {
 		if !guardedTarget(p, dir) {
 			t.Errorf("guardedTarget(%q) = false", p)
 		}
 	}
-	if guardedTarget("plain/new.txt", dir) || guardedTarget(filepath.Join(dir, "deep", "x", "a.txt"), dir) {
-		t.Error("an ordinary path was refused")
+	for _, p := range []string{
+		"../README.md",
+		"../deep/x/notes.txt",
+		"link/../README.md",
+		"new/folder/../file.txt",
+		"src/main.go",
+		filepath.Join(root, "deep", "x", "a.txt"),
+	} {
+		if guardedTarget(p, dir) {
+			t.Errorf("guardedTarget(%q) = true", p)
+		}
 	}
-	in := `{"tool_name":"Write","cwd":"` + filepath.ToSlash(dir) + `","tool_input":{"file_path":"notes.json","content":"{}"}}`
+	in := `{"tool_name":"Write","cwd":"` + filepath.ToSlash(dir) + `","tool_input":{"file_path":"../README.md","content":"x"}}`
+	if r := guardIn(t, "claude-code", "tool", in); r != "" {
+		t.Errorf("an edit of ../README.md was refused: %s", r)
+	}
+	in = `{"tool_name":"Write","cwd":"` + filepath.ToSlash(dir) + `","tool_input":{"file_path":"notes.json","content":"{}"}}`
 	if guardIn(t, "claude-code", "tool", in) != GuardReason {
 		t.Error("a write through a broken link to the settings file was not refused")
 	}
