@@ -1,19 +1,27 @@
-# manar-edge release: on a v* tag, build the device binaries and publish them with SHA256SUMS as a
-# GitHub Release. The binaries are unsigned (decision 10). manar-api templates the checksums it
-# serves in the install one-liner from MANAR_EDGE_VERSION and the SHA256SUMS of this release.
+# manar-edge release: on a v* tag, build the device binaries, sign them, and publish them with
+# SHA256SUMS as a GitHub Release. manar-api templates the checksums it serves in the install
+# one-liner from MANAR_EDGE_VERSION and the SHA256SUMS of this release.
+#
+# Signing (docs/windows-code-signing-trust.md) uses keys that never leave Azure Key Vault:
+#   - the Windows binary is Authenticode-signed with Fixio's code-signing certificate (jsign);
+#   - SHA256SUMS is signed with the cosign release key (SHA256SUMS.sigstore.json).
+# The sign job runs in the environment release-signing, which admits only v* tags (and v* tags
+# can only be created by admins, ruleset "release tags"). It gets an Azure token through GitHub OIDC
+# federation: no stored secret. Until the repo variable SIGNING_VAULT exists, releases are
+# published unsigned, as before. Once it exists, any signing failure stops the release.
 name: release
 
 on:
   push:
     tags: ['v*']
 
-# The only job that holds a write token. It runs tag-triggered code from this repo only.
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -21,7 +29,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.10' # same as ci.yml
-          cache: false # this job holds a write token: never restore a cache a pull request could have filled
+          cache: false # release job: never restore a cache a pull request could have filled
       - run: go test ./...
       - name: Build
         env:
@@ -38,11 +46,122 @@ jobs:
           build windows amd64 manar-edge-windows-amd64.exe
           build linux amd64 manar-edge-linux-amd64
           build linux arm64 manar-edge-linux-arm64
-          (cd dist && sha256sum manar-edge-* > SHA256SUMS && cat SHA256SUMS)
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  sign:
+    needs: build
+    if: vars.SIGNING_VAULT != ''
+    runs-on: ubuntu-24.04
+    environment: release-signing
+    permissions:
+      id-token: write
+    env:
+      AZURE_TENANT_ID: ${{ vars.SIGNING_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ vars.SIGNING_CLIENT_ID }}
+      VAULT: ${{ vars.SIGNING_VAULT }}
+      CERT: manar-code-signing
+      TSA: ${{ vars.SIGN_TSA_URL }} # empty: no timestamp (Azure-only decision, 3 Nov 2026)
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned
+          path: dist
+      - name: Tools (pinned by checksum)
+        run: |
+          set -euo pipefail
+          fetch() { curl -fsSL -o "$3" "$1"; echo "$2  $3" | sha256sum -c - >/dev/null; }
+          fetch https://github.com/ebourg/jsign/releases/download/7.6/jsign-7.6.jar \
+            6cf58aa080e7ff82656f320cff8d4a3bff30408df8766806dcba3740dd839fa5 "$RUNNER_TEMP/jsign.jar"
+          fetch https://github.com/sigstore/cosign/releases/download/v3.1.3/cosign-linux-amd64 \
+            4629c757b7618056f8ddd7e2625ae9fdd94c0372a65049520bc7d9df9efc7f71 "$RUNNER_TEMP/cosign"
+          chmod +x "$RUNNER_TEMP/cosign"
+          sudo apt-get install -y -qq osslsigncode >/dev/null
+      # GitHub OIDC token -> Entra token for the vault (federated credential on the signing identity).
+      - name: Azure token
+        run: |
+          set -euo pipefail
+          umask 077
+          curl -fsS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=api://AzureADTokenExchange" | jq -er .value > "$RUNNER_TEMP/oidc"
+          tok=$(curl -fsS "https://login.microsoftonline.com/$AZURE_TENANT_ID/oauth2/v2.0/token" \
+            --data-urlencode "client_id=$AZURE_CLIENT_ID" --data-urlencode "scope=https://vault.azure.net/.default" \
+            --data-urlencode "grant_type=client_credentials" \
+            --data-urlencode "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            --data-urlencode "client_assertion@$RUNNER_TEMP/oidc" | jq -er .access_token)
+          echo "::add-mask::$tok"
+          printf '%s' "$tok" > "$RUNNER_TEMP/kv-token"
+      - name: Sign the Windows binary
+        run: |
+          set -euo pipefail
+          KV_TOKEN=$(cat "$RUNNER_TEMP/kv-token"); export KV_TOKEN
+          # The public certificate, to check what we are about to sign with and to verify afterwards.
+          curl -fsS -H "Authorization: Bearer $KV_TOKEN" "https://$VAULT.vault.azure.net/certificates/$CERT?api-version=7.4" \
+            | jq -er .cer | base64 -d | openssl x509 -inform der -out "$RUNNER_TEMP/cert.pem"
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -checkend 2592000 \
+            || { echo "::error::code-signing certificate expires within 30 days or has expired"; exit 1; }
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -noout -ext extendedKeyUsage | grep -q "Code Signing" \
+            || { echo "::error::certificate $CERT has no code-signing EKU"; exit 1; }
+          java -jar "$RUNNER_TEMP/jsign.jar" --storetype AZUREKEYVAULT --keystore "$VAULT" \
+            --storepass env:KV_TOKEN --alias "$CERT" --alg SHA-256 ${TSA:+--tsaurl "$TSA"} \
+            dist/manar-edge-windows-amd64.exe
+          # Must chain to our certificate, or nothing is published.
+          osslsigncode verify -CAfile "$RUNNER_TEMP/cert.pem" -in dist/manar-edge-windows-amd64.exe
+          openssl x509 -in "$RUNNER_TEMP/cert.pem" -outform der -out dist/fixio-code-signing.cer
+      - name: Checksums and their signature
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum manar-edge-* fixio-code-signing.cer > SHA256SUMS
+          cat SHA256SUMS
+          # cosign authenticates with the same federated identity (azidentity workload identity).
+          export AZURE_FEDERATED_TOKEN_FILE="$RUNNER_TEMP/oidc"
+          key="azurekms://$VAULT.vault.azure.net/cosign-release"
+          "$RUNNER_TEMP/cosign" sign-blob --key "$key" --tlog-upload=false --use-signing-config=false \
+            --bundle SHA256SUMS.sigstore.json --yes SHA256SUMS
+          "$RUNNER_TEMP/cosign" public-key --key "$key" --outfile cosign-release.pub
+          "$RUNNER_TEMP/cosign" verify-blob --key cosign-release.pub --bundle SHA256SUMS.sigstore.json \
+            --insecure-ignore-tlog=true SHA256SUMS
+      - if: always()
+        run: rm -f "$RUNNER_TEMP/oidc" "$RUNNER_TEMP/kv-token"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed
+          path: dist/
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: [build, sign]
+    # Unsigned only while signing is not configured; once SIGNING_VAULT is set, a failed or skipped
+    # sign job stops the release.
+    if: >-
+      always() && needs.build.result == 'success'
+      && (needs.sign.result == 'success' || (needs.sign.result == 'skipped' && vars.SIGNING_VAULT == ''))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ needs.sign.result == 'success' && 'signed' || 'unsigned' }}
+          path: dist
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+          SIGNED: ${{ needs.sign.result == 'success' }}
         run: |
-          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" \
-            --notes "Unsigned device binaries for Windows (amd64) and Linux (amd64, arm64). Verify with SHA256SUMS."
+          set -euo pipefail
+          if [ "$SIGNED" = true ]; then
+            notes="Device binaries for Windows (amd64, Authenticode-signed by Fixio Technologies LLC SPC) and Linux (amd64, arm64). SHA256SUMS is signed with the Manar release key (SHA256SUMS.sigstore.json, cosign-release.pub)."
+          else
+            (cd dist && sha256sum manar-edge-* > SHA256SUMS)
+            notes="Unsigned device binaries for Windows (amd64) and Linux (amd64, arm64). Verify with SHA256SUMS."
+          fi
+          cat dist/SHA256SUMS
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "$TAG" --notes "$notes"
