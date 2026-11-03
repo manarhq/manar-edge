@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/registry"
@@ -51,11 +53,12 @@ const (
 	sidTrustedInstall = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
 )
 
-// secureMkdir creates a state folder owned by Administrators with SYSTEM and Administrators as
-// the only entries in a protected DACL. A folder that is already there must be owned by SYSTEM or
-// Administrators: ProgramData lets any user create folders, and whoever owns a folder can always
-// change its DACL, so one a user made before Manar was installed is refused, not adopted. Every
-// parent must be a plain folder (no junction) owned by SYSTEM, Administrators or TrustedInstaller.
+// stateSD is a new state folder's security descriptor: owner Administrators, and a protected
+// DACL of SYSTEM and Administrators, inherited by everything below.
+const stateSD = "O:BA" + stateDACL
+
+// secureMkdir makes or adopts a state folder. Every parent must be a plain folder (no junction)
+// owned by SYSTEM, Administrators or TrustedInstaller.
 func secureMkdir(p string) error {
 	p = filepath.Clean(p)
 	for d := filepath.Dir(p); ; d = filepath.Dir(d) {
@@ -66,44 +69,87 @@ func secureMkdir(p string) error {
 			break
 		}
 	}
-	created := false
-	if err := os.Mkdir(p, 0o700); err == nil {
-		created = true
-	} else if !errors.Is(err, os.ErrExist) {
+	return makeStateFolder(p)
+}
+
+// makeStateFolder creates the folder with its owner and protected DACL in the same call, so it
+// never exists with the permissions it would inherit from ProgramData (where any user may create
+// files). If the folder is already there, it is adopted only as described at adoptStateFolder.
+func makeStateFolder(p string) error {
+	sd, err := windows.SecurityDescriptorFromString(stateSD)
+	if err != nil {
 		return err
 	}
-	if !created {
-		if err := checkStateFolder(p, sidSystem, sidAdmins); err != nil {
-			return err
-		}
-	}
-	sd, err := windows.SecurityDescriptorFromString(stateDACL)
+	name, err := windows.UTF16PtrFromString(p)
 	if err != nil {
+		return err
+	}
+	sa := &windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
+	err = windows.CreateDirectory(name, sa)
+	if err == nil || !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		return err
+	}
+	return adoptStateFolder(p, sd)
+}
+
+// adoptStateFolder takes over a folder that already exists (an earlier install, or someone else's
+// folder). Whoever owns a file can always change its DACL, so:
+//   - the folder must be a plain folder owned by SYSTEM or Administrators (a user who made it
+//     before Manar was installed owns it, and is refused);
+//   - its DACL is set to the protected one first, so no other account can open anything new in it;
+//   - then every entry below must be a plain file or folder (no link, junction or mount point)
+//     owned by SYSTEM or Administrators, and its own DACL is reset to only what it inherits.
+//
+// Anything else is refused: Manar does not use the folder, and says to remove it. A handle a user
+// opened before the DACL changed keeps its access; that needs the user to have had access to an
+// Administrators-owned folder, which ProgramData's own permissions do not give.
+func adoptStateFolder(p string, sd *windows.SECURITY_DESCRIPTOR) error {
+	if err := checkStateFolder(p, sidSystem, sidAdmins); err != nil {
 		return err
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return err
 	}
-	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
-	var owner *windows.SID
-	if created {
-		if owner, err = windows.StringToSid(sidAdmins); err != nil {
+	if err := windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil); err != nil {
+		return err
+	}
+	// An empty, unprotected DACL: the entry keeps only the ACEs it inherits from the folder. Never a
+	// NULL DACL, which would mean "everyone".
+	empty, err := windows.SecurityDescriptorFromString("D:")
+	if err != nil {
+		return err
+	}
+	inheritOnly, _, err := empty.DACL()
+	if err != nil || inheritOnly == nil {
+		return errors.New("cannot build an empty access list")
+	}
+	return filepath.WalkDir(p, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || path == p {
 			return err
 		}
-		info |= windows.OWNER_SECURITY_INFORMATION
-	}
-	return windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, info, owner, nil, dacl, nil)
+		if err := checkStateEntry(path, d.IsDir(), sidSystem, sidAdmins); err != nil {
+			return err
+		}
+		return windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION, nil, nil, inheritOnly, nil)
+	})
 }
 
 // checkStateFolder refuses a folder that is a link or junction, or whose owner is not one of owners.
-func checkStateFolder(p string, owners ...string) error {
+func checkStateFolder(p string, owners ...string) error { return checkStateEntry(p, true, owners...) }
+
+// checkStateEntry refuses a link, junction or mount point, a folder where a file is expected or
+// the other way round, and an owner that is not one of owners.
+func checkStateEntry(p string, dir bool, owners ...string) error {
 	st, err := os.Lstat(p)
 	if err != nil {
 		return err
 	}
-	if !st.IsDir() || st.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
-		return fmt.Errorf("%s is not a plain folder (a link or junction?): refusing to keep Manar's state there", p)
+	if st.IsDir() != dir || st.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || (!dir && !st.Mode().IsRegular()) {
+		return fmt.Errorf("%s is not a plain folder or file (a link or junction?): Manar will not keep its state there. "+
+			"Remove the state folder and run the install again", p)
 	}
 	sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
@@ -117,7 +163,7 @@ func checkStateFolder(p string, owners ...string) error {
 		return nil
 	}
 	return fmt.Errorf("%s is owned by %s, not by SYSTEM or Administrators, so another account may control it: "+
-		"Manar will not use it. Remove the folder and run the install again", p, sid.String())
+		"Manar will not use it. Remove the state folder and run the install again", p, sid.String())
 }
 
 func wireguardExe() (string, error) {
