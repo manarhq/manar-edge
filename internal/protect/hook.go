@@ -77,18 +77,7 @@ func Classify(key, event string, raw []byte) (actionID, resource string, err err
 		}
 	default:
 		name := str(in, "tool_name", "toolName")
-		args, _ := in["tool_input"].(map[string]any)
-		if args == nil {
-			args, _ = in["tool_args"].(map[string]any)
-		}
-		if args == nil { // Copilot sends toolArgs as a JSON string
-			if s, ok := in["toolArgs"].(string); ok {
-				_ = json.Unmarshal([]byte(s), &args)
-			} else {
-				args, _ = in["toolArgs"].(map[string]any)
-			}
-		}
-		actionID, resource = classifyName(name, args, str)
+		actionID, resource = classifyName(name, toolArgs(in), str)
 	}
 	if actionID == "" || strings.Trim(resource, "/ ") == "" {
 		return "", "", errors.New("the hook input has no action or resource Manar can check")
@@ -316,9 +305,11 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 	if err != nil {
 		return Render(key, Verdict{false, "Manar: " + err.Error()})
 	}
-	if Guard(actionID, resource) {
-		reportGuarded(key, actionID, resource)
-		return Render(key, Verdict{false, GuardReason})
+	if reason, action, path := GuardInput(key, event, raw); reason != "" {
+		if action != "" {
+			reportGuarded(key, action, path)
+		}
+		return Render(key, Verdict{false, reason})
 	}
 	budget := time.Duration(Budget(key)) * time.Second
 	relay := NewRelay()
@@ -332,11 +323,11 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 
 // reportGuarded tells the device service that a guarded change was refused (best effort). A shell
 // command is not sent: it can hold secrets; the path of an edit is.
-var reportGuarded = func(key, actionID, resource string) {
+var reportGuarded = func(key, action, path string) {
 	defer func() { _ = recover() }()
-	body := map[string]string{"toolId": "host." + key, "action": "shell"}
-	if actionID != "shell" {
-		body["action"], body["path"] = "edit", resource
+	body := map[string]string{"toolId": "host." + key, "action": action}
+	if action == "edit" && path != "" {
+		body["path"] = path
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

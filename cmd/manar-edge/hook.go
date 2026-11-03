@@ -105,8 +105,8 @@ func (h *hookClient) decide(ctx context.Context, raw []byte) (allow bool, reason
 	if err != nil {
 		return false, "Manar: " + err.Error()
 	}
-	if protect.Guard(actionID, resource) {
-		return false, protect.GuardReason
+	if reason, _, _ := protect.GuardInput("claude-code", "tool", raw); reason != "" {
+		return false, reason
 	}
 	var health struct {
 		TaskID string `json:"taskId"`

@@ -1,6 +1,8 @@
 package protect
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -77,7 +79,197 @@ func TestRunHookRefusesGuardedChangesWithoutAskingManar(t *testing.T) {
 	if strings.Join(reported, ",") != "edit,shell" {
 		t.Fatalf("reported %v", reported)
 	}
-	if !Guard("edit", "/x/.claude/settings.json") || Guard("read", "/x/.claude/settings.json") {
-		t.Fatal("Guard: edits are refused, reads are not")
+}
+
+func guardIn(t *testing.T, key, event, in string) string {
+	t.Helper()
+	r, _, _ := GuardInput(key, event, []byte(in))
+	return r
+}
+
+func TestEveryEditTargetIsChecked(t *testing.T) {
+	refused := []string{
+		// Codex apply_patch: the patch names the files.
+		`{"tool_name":"apply_patch","tool_input":{"input":"*** Begin Patch\n*** Update File: src/main.go\n@@\n-a\n+b\n*** Add File: .claude/settings.local.json\n+{}\n*** End Patch"}}`,
+		`{"tool_name":"apply_patch","tool_input":{"command":["apply_patch","*** Begin Patch\n*** Update File: notes.md\n*** Move to: .cursor/hooks.json\n*** End Patch"]}}`,
+		`{"tool_name":"apply_patch","tool_input":{"patch":"diff --git a/x b/.gemini/settings.json\n--- a/x\n+++ b/.gemini/settings.json\n"}}`,
+		`{"tool_name":"apply_patch","tool_input":{"patch":"rename from a.json\nrename to .codex/hooks.json\n"}}`,
+		// Editors with other argument names.
+		`{"tool_name":"str_replace_editor","tool_input":{"command":"create","path":".claude/settings.json","file_text":"{}"}}`,
+		`{"tool_name":"move_file","tool_input":{"source":"x.json","destination":".claude/settings.local.json"}}`,
+		// An MCP tool that writes a guarded file.
+		`{"tool_name":"mcp__fs__write_file","tool_input":{"path":"/home/sam/app/.claude/settings.json","content":"{}"}}`,
+		// Copilot's arguments as a JSON string.
+		`{"toolName":"edit","toolArgs":"{\"path\":\".github/hooks/x.json\"}"}`,
+		// apply_patch through the shell.
+		`{"tool_name":"Bash","tool_input":{"command":"apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: .claude/settings.json\n*** End Patch\nEOF"}}`,
+	}
+	for _, in := range refused {
+		if guardIn(t, "codex-cli", "tool", in) != GuardReason {
+			t.Errorf("not refused: %s", in)
+		}
+	}
+	// An editing call with no file Manar can find is refused; one with only ordinary files is not.
+	if guardIn(t, "codex-cli", "tool", `{"tool_name":"apply_patch","tool_input":{"input":"*** Begin Patch\n*** End Patch"}}`) != GuardNoTarget {
+		t.Error("an edit without a target was not refused")
+	}
+	for _, in := range []string{
+		`{"tool_name":"apply_patch","tool_input":{"input":"*** Begin Patch\n*** Update File: src/main.go\n*** End Patch"}}`,
+		`{"tool_name":"Write","tool_input":{"file_path":"/home/sam/app/README.md","content":"x"}}`,
+		`{"tool_name":"mcp__fs__read_file","tool_input":{"path":"/home/sam/app/main.go"}}`,
+		`{"tool_name":"Read","tool_input":{"file_path":"/home/sam/app/.claude/settings.json"}}`,
+	} {
+		if r := guardIn(t, "codex-cli", "tool", in); r != "" {
+			t.Errorf("refused (%s): %s", r, in)
+		}
+	}
+}
+
+func TestPathCanonicalisation(t *testing.T) {
+	for _, p := range []string{
+		`C:\Users\sam\app\.claude\settings.json.`,
+		`C:\Users\sam\app\.claude\settings.json. . `,
+		`C:\Users\sam\app\.claude.\settings.json`,
+		`C:\Users\sam\app\.claude\settings.json::$DATA`,
+		`C:\Users\sam\app\.claude\settings.json:alt`,
+		`/home/sam/app//.claude/./x/../settings.json`,
+	} {
+		if !GuardedPath(p) {
+			t.Errorf("GuardedPath(%q) = false", p)
+		}
+	}
+	if GuardedPath(`C:\Users\sam\app\notes:2026.txt`) || GuardedPath("/tmp/a:b/file.txt") {
+		t.Error("a colon in an ordinary path made it guarded")
+	}
+}
+
+func TestLinksToGuardedFilesAreFollowed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	real := filepath.Join(dir, ".claude", "settings.json")
+	if err := os.WriteFile(real, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, filepath.Join(dir, "notes.json")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(dir, ".claude"), filepath.Join(dir, "cfg")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{"notes.json", "cfg/settings.local.json", filepath.Join(dir, "cfg", "settings.json")} {
+		if !guardedTarget(p, dir) {
+			t.Errorf("guardedTarget(%q) = false", p)
+		}
+	}
+	if guardedTarget("other.json", dir) {
+		t.Error("an ordinary new file was guarded")
+	}
+	in := `{"tool_name":"Write","cwd":"` + filepath.ToSlash(dir) + `","tool_input":{"file_path":"notes.json","content":"{}"}}`
+	if guardIn(t, "claude-code", "tool", in) != GuardReason {
+		t.Error("a write through a link was not refused")
+	}
+}
+
+func TestShellTextIsNormalised(t *testing.T) {
+	for _, c := range []string{
+		`echo x > ~/app//.claude//settings.json`,
+		`echo x > .claude/./settings.json`,
+		`echo x > .claude/sub/../settings.json`,
+		`python3 -c "import json; open('.claude/'+'s.json','w')"`,
+		`cd .claude && node -e "require('fs').writeFileSync('x','y')"`,
+		`perl -pi -e 's/a/b/' .cursor/x`,
+		`echo '{}' | tee .gemini/x.json`,
+		`dd if=/tmp/x of=.codex/y`,
+		`sed -i 's/true/false/' .claude/x.json`,
+		`sed -E -i '' .claude/x.json`,
+	} {
+		if !GuardedCommand(c) {
+			t.Errorf("GuardedCommand(%q) = false", c)
+		}
+	}
+	for _, c := range []string{`ls .claude`, `cat .claude/commands/review.md`, `python3 -m pytest`, `sed -n 1p README.md`} {
+		if GuardedCommand(c) {
+			t.Errorf("GuardedCommand(%q) = true", c)
+		}
+	}
+}
+
+func TestGuardFailsClosed(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A broken link: the settings file it points at does not exist yet.
+	if err := os.Symlink(filepath.Join(dir, ".claude", "settings.json"), filepath.Join(dir, "notes.json")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+	// A broken link to somewhere harmless is refused too: it cannot be resolved.
+	if err := os.Symlink(filepath.Join(dir, "nowhere", "x"), filepath.Join(dir, "dangling")); err != nil {
+		t.Fatal(err)
+	}
+	// link/../.claude: '..' after a link means something else on disk than in the text.
+	if err := os.MkdirAll(filepath.Join(dir, "deep", "x"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "deep", "x"), filepath.Join(dir, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{
+		"notes.json",
+		"dangling",
+		"dangling/sub/file.txt",
+		"link/../.claude/x.json",
+		"../app/file.txt",
+		`sub\..\file.txt`,
+		"sub/.../file.txt",
+	} {
+		if !guardedTarget(p, dir) {
+			t.Errorf("guardedTarget(%q) = false", p)
+		}
+	}
+	if guardedTarget("plain/new.txt", dir) || guardedTarget(filepath.Join(dir, "deep", "x", "a.txt"), dir) {
+		t.Error("an ordinary path was refused")
+	}
+	in := `{"tool_name":"Write","cwd":"` + filepath.ToSlash(dir) + `","tool_input":{"file_path":"notes.json","content":"{}"}}`
+	if guardIn(t, "claude-code", "tool", in) != GuardReason {
+		t.Error("a write through a broken link to the settings file was not refused")
+	}
+}
+
+func TestShellNormalisingCannotHideAName(t *testing.T) {
+	for _, c := range []string{
+		`echo x > a/../.claude/settings.json`,
+		`echo x >a/../.claude/x`,
+		`cat <.claude/x >y`,
+		// The '..' rule would drop text here; the raw command still matches.
+		`echo x > .claude/settings$(x)/../y`,
+		"echo x > `.claude/settings`/../y",
+		`echo x >.cursor/a`,
+	} {
+		if !GuardedCommand(c) {
+			t.Errorf("GuardedCommand(%q) = false", c)
+		}
+	}
+}
+
+func TestShellParentElementNextToAToolFolder(t *testing.T) {
+	for _, c := range []string{
+		`echo x > $var/../.claude/settings.json`,
+		`echo x > a$b/../.claude/settings.json`,
+		"echo x > `pwd`/../.claude/settings.json",
+		"cp y \"$(dirname x)\"/../.cursor/hooks.json",
+		`cd .gemini && cd x/..`,
+		`cat .codex/x ../y/..`,
+	} {
+		if !GuardedCommand(c) {
+			t.Errorf("GuardedCommand(%q) = false", c)
+		}
+	}
+	for _, c := range []string{`cd ../app && git status`, `ls .claude`, `cat ../README.md`} {
+		if GuardedCommand(c) {
+			t.Errorf("GuardedCommand(%q) = true", c)
+		}
 	}
 }
