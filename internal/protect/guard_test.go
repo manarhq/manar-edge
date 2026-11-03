@@ -357,7 +357,8 @@ func TestMCPWrapperChecksArguments(t *testing.T) {
 	if asked != 0 {
 		t.Fatalf("Manar was asked about a guarded call %d times", asked)
 	}
-	l := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"/home/sam/app/README.md"}}}`
+	readme := filepath.ToSlash(filepath.Join(t.TempDir(), "README.md")) // absolute on every OS
+	l := `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"write_file","arguments":{"path":"` + readme + `"}}}`
 	if f, _ := screen([]byte(l), "fs", allow); f == nil || asked != 1 {
 		t.Error("an ordinary MCP write was not passed on")
 	}
