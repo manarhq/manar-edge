@@ -35,6 +35,9 @@ var (
 	defaultHostURL = "https://agents-manar.fixio.ae:3443"
 )
 
+// installCodeEnv carries the install code from the one-liner.
+const installCodeEnv = "MANAR_INSTALL_CODE"
+
 func cmdInstall(base string, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	code := fs.String("code", "", "install code from the console (Add device)")
@@ -44,8 +47,17 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	// The one-liner passes the code in the environment: a command line is visible to every local
+	// user while the install runs, the environment of an elevated process is not. Not passed on to
+	// anything this process starts.
+	if env := os.Getenv(installCodeEnv); env != "" {
+		_ = os.Unsetenv(installCodeEnv)
+		if *code == "" {
+			*code = env
+		}
+	}
 	if *code == "" || fs.NArg() != 0 {
-		return errors.New("usage: manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL]")
+		return errors.New("usage: manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL] (or the code in " + installCodeEnv + ")")
 	}
 	if err := requireAdmin(); err != nil {
 		return err

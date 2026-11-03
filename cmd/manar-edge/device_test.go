@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
 	"strings"
 	"testing"
 )
@@ -142,5 +143,16 @@ func TestUninstallRestoresSecretsFirstAndStopsIfItCannot(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), "manar-edge secret restore --all") {
 		t.Fatalf("the message must name a command that exists:\n%s", out.String())
+	}
+}
+
+func TestInstallTakesTheCodeFromTheEnvironment(t *testing.T) {
+	t.Setenv(installCodeEnv, "ABCDEFGH23")
+	err := cmdInstall(t.TempDir(), []string{"--tenant", "me-1", "--api", "https://127.0.0.1:1", "--host-url", "https://127.0.0.1:1"}, io.Discard)
+	if err == nil || strings.Contains(err.Error(), "usage") {
+		t.Fatalf("the code in the environment was not used: %v", err)
+	}
+	if _, set := os.LookupEnv(installCodeEnv); set {
+		t.Fatal("the code is still in the environment for child processes")
 	}
 }
