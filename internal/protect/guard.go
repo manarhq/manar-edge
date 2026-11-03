@@ -2,6 +2,7 @@ package protect
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path"
 	"path/filepath"
@@ -93,13 +94,12 @@ func GuardedPath(p string) bool {
 }
 
 // guardedTarget is GuardedPath for a file a tool is about to write, also through what the path
-// stands for on disk: links in the part that exists (the file itself, or the folders above it)
-// are resolved, and so are Windows 8.3 short names (EvalSymlinks returns long names there).
-// A relative path is taken from cwd, the tool's working folder. It fails closed: a target with a
-// '..' element (which a link before it would change the meaning of), or one whose existing part
-// cannot be resolved (a broken or looping link, an unreadable folder), counts as guarded.
+// stands for on disk. A relative path is taken from cwd, the tool's working folder. The path is
+// checked twice: as text (GuardedPath, which applies '..' to the text, as Windows does) and as the
+// real target realPath finds (links first, as Linux does). It fails closed: when the path cannot
+// be resolved, it counts as guarded.
 func guardedTarget(p, cwd string) bool {
-	if GuardedPath(p) || hasDotDot(p) {
+	if GuardedPath(p) {
 		return true
 	}
 	abs := filepath.FromSlash(p)
@@ -107,38 +107,73 @@ func guardedTarget(p, cwd string) bool {
 		if cwd == "" {
 			cwd, _ = os.Getwd()
 		}
-		if hasDotDot(cwd) {
-			return true
-		}
-		abs = filepath.Join(cwd, abs) // no '..' left to clean: only '.' and repeated separators go
+		abs = filepath.FromSlash(cwd) + string(filepath.Separator) + abs // not cleaned: links come first
 	}
-	abs = filepath.Clean(abs)
-	rest := ""
-	for dir := abs; ; dir = filepath.Dir(dir) {
-		_, err := os.Lstat(dir)
-		if err == nil {
-			r, err := filepath.EvalSymlinks(dir)
-			return err != nil || GuardedPath(filepath.Join(r, rest))
-		}
-		if !os.IsNotExist(err) {
-			return true
-		}
-		if filepath.Dir(dir) == dir {
-			return true
-		}
-		rest = filepath.Join(filepath.Base(dir), rest)
-	}
+	real, err := realPath(abs)
+	return err != nil || GuardedPath(real)
 }
 
-// hasDotDot reports a '..' element in either separator, including Windows spellings such as
-// '...' or '.. ' (trailing dots and spaces are ignored there).
-func hasDotDot(p string) bool {
-	for _, e := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
-		if len(e) >= 2 && strings.Trim(e, ". ") == "" {
-			return true
+// maxHops bounds the links followed for one path (Linux's own limit is 40).
+const maxHops = 40
+
+// realPath resolves an absolute path the way the kernel walks it: one element at a time, each link
+// (symbolic link, or junction on Windows) replaced by its target before the next element, '..'
+// included, is applied. When an element does not exist, the rest is appended as text: a file or
+// folder the tool would create. A link that cannot be read, points nowhere, or loops is an error.
+// On Windows the part that exists is given its long (not 8.3) name.
+func realPath(abs string) (string, error) {
+	vol := filepath.VolumeName(abs)
+	todo := splitPath(abs[len(vol):])
+	cur := vol + string(filepath.Separator)
+	hops := 0
+	for len(todo) > 0 {
+		e := todo[0]
+		todo = todo[1:]
+		switch e {
+		case ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
 		}
+		next := filepath.Join(cur, e)
+		fi, err := os.Lstat(next)
+		if os.IsNotExist(err) {
+			long, lerr := longPath(cur)
+			if lerr != nil {
+				return "", lerr
+			}
+			return filepath.Join(append([]string{long, e}, todo...)...), nil
+		}
+		if err != nil {
+			return "", err
+		}
+		if fi.Mode()&(os.ModeSymlink|os.ModeIrregular) == 0 {
+			cur = next
+			continue
+		}
+		if hops++; hops > maxHops {
+			return "", errors.New("too many links")
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			return "", err
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(cur, target)
+		}
+		if _, err := os.Stat(next); err != nil {
+			return "", errors.New("a link that points nowhere") // broken, or a loop
+		}
+		tv := filepath.VolumeName(target)
+		cur = tv + string(filepath.Separator)
+		todo = append(splitPath(target[len(tv):]), todo...)
 	}
-	return false
+	return longPath(cur)
+}
+
+func splitPath(p string) []string {
+	return strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == filepath.Separator })
 }
 
 // GuardedCommand reports whether a shell command names a guarded file, points Claude Code at other
