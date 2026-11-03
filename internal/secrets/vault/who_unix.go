@@ -18,7 +18,7 @@ func WhoOfHome(home string) (Who, error) {
 	if !ok || !st.IsDir() {
 		return Who{}, errors.New("the home folder is not a plain folder")
 	}
-	return Who{UID: int(s.Uid), GID: int(s.Gid)}, nil
+	return Who{UID: int(s.Uid), GID: int(s.Gid), Home: home}, nil
 }
 
 func (w Who) owns(st os.FileInfo) bool {

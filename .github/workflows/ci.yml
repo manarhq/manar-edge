@@ -43,6 +43,20 @@ jobs:
           go-version: '1.26.10' # same as the GitLab image; go.mod's 1.26.8 has stdlib CVEs
       - run: go test -race ./...
 
+  # The Windows file-system code the SYSTEM service relies on (handle-relative opens, junction and
+  # owner checks) can only be tested on Windows. GitHub-hosted: there is no self-hosted Windows runner.
+  test-windows:
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.10' # same as the GitLab image; go.mod's 1.26.8 has stdlib CVEs
+      - run: go test ./internal/safefs/
+      - run: go test -run 'TestStateFolderOwner' ./cmd/manar-edge/
+
   # testdata/contract/host-contract.json is shared with manar-api (src/contract/host-contract.json):
   # both test suites read it, so the copies must stay byte-identical.
   contract:

@@ -26,13 +26,7 @@ func WhoOfHome(home string) (Who, error) {
 	if err != nil || sid == nil {
 		return Who{}, errors.New("no owner on the home folder")
 	}
-	return Who{UID: -1, GID: -1, SID: sid.String()}, nil
+	return Who{UID: -1, GID: -1, SID: sid.String(), Home: home}, nil
 }
-
-// Windows: links are refused by noLinks; the file's owner is the home's owner or an
-// administrator-type owner, which the ACL of a profile folder already gives the user.
-func (w Who) owns(st os.FileInfo) bool { return true }
-
-func openNoFollow(path string) (*os.File, error) { return os.Open(path) }
 
 func (w Who) do(fn func() error) error { return fn() }

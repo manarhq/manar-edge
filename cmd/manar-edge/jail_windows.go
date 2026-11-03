@@ -43,9 +43,39 @@ func requireAdmin() error {
 	return nil
 }
 
+// Owners a state folder may have, and owners its parent folders may have (the drive root
+// belongs to TrustedInstaller).
+const (
+	sidSystem         = "S-1-5-18"
+	sidAdmins         = "S-1-5-32-544"
+	sidTrustedInstall = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+)
+
+// secureMkdir creates a state folder owned by Administrators with SYSTEM and Administrators as
+// the only entries in a protected DACL. A folder that is already there must be owned by SYSTEM or
+// Administrators: ProgramData lets any user create folders, and whoever owns a folder can always
+// change its DACL, so one a user made before Manar was installed is refused, not adopted. Every
+// parent must be a plain folder (no junction) owned by SYSTEM, Administrators or TrustedInstaller.
 func secureMkdir(p string) error {
-	if err := os.MkdirAll(p, 0o700); err != nil {
+	p = filepath.Clean(p)
+	for d := filepath.Dir(p); ; d = filepath.Dir(d) {
+		if err := checkStateFolder(d, sidSystem, sidAdmins, sidTrustedInstall); err != nil {
+			return err
+		}
+		if filepath.Dir(d) == d {
+			break
+		}
+	}
+	created := false
+	if err := os.Mkdir(p, 0o700); err == nil {
+		created = true
+	} else if !errors.Is(err, os.ErrExist) {
 		return err
+	}
+	if !created {
+		if err := checkStateFolder(p, sidSystem, sidAdmins); err != nil {
+			return err
+		}
 	}
 	sd, err := windows.SecurityDescriptorFromString(stateDACL)
 	if err != nil {
@@ -55,8 +85,39 @@ func secureMkdir(p string) error {
 	if err != nil {
 		return err
 	}
-	return windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, dacl, nil)
+	info := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION | windows.PROTECTED_DACL_SECURITY_INFORMATION)
+	var owner *windows.SID
+	if created {
+		if owner, err = windows.StringToSid(sidAdmins); err != nil {
+			return err
+		}
+		info |= windows.OWNER_SECURITY_INFORMATION
+	}
+	return windows.SetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, info, owner, nil, dacl, nil)
+}
+
+// checkStateFolder refuses a folder that is a link or junction, or whose owner is not one of owners.
+func checkStateFolder(p string, owners ...string) error {
+	st, err := os.Lstat(p)
+	if err != nil {
+		return err
+	}
+	if !st.IsDir() || st.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+		return fmt.Errorf("%s is not a plain folder (a link or junction?): refusing to keep Manar's state there", p)
+	}
+	sd, err := windows.GetNamedSecurityInfo(p, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	sid, _, err := sd.Owner()
+	if err != nil || sid == nil {
+		return fmt.Errorf("%s has no owner: refusing to keep Manar's state there", p)
+	}
+	if slices.Contains(owners, sid.String()) {
+		return nil
+	}
+	return fmt.Errorf("%s is owned by %s, not by SYSTEM or Administrators, so another account may control it: "+
+		"Manar will not use it. Remove the folder and run the install again", p, sid.String())
 }
 
 func wireguardExe() (string, error) {

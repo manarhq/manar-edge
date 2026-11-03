@@ -55,7 +55,7 @@ func idOf(kind, ref, owner string) string {
 	return kind + "-" + sum([]byte(kind + "\x00" + ref + "\x00" + owner))[:16]
 }
 
-func (e *Entry) who() Who { return Who{UID: e.UID, GID: e.GID, SID: sidOf(e.Owner)} }
+func (e *Entry) who() Who { return Who{UID: e.UID, GID: e.GID, SID: sidOf(e.Owner), Home: e.Home} }
 
 func sidOf(owner string) string {
 	if strings.HasPrefix(owner, "S-") {
