@@ -91,13 +91,13 @@ Get-AuthenticodeSignature .\manar-edge-windows-amd64.exe | Format-List Status, S
 
 `Status` must be `Valid`, and `SignerCertificate.Thumbprint` must match the thumbprint Fixio gave you.
 
-Every release also has `SHA256SUMS`, signed with the Manar release key. This covers the Windows and
+Every release also has `SHA256SUMS`, signed with the Manar edge release key. This covers the Windows and
 Linux binaries and the `.cer` file. With [cosign](https://github.com/sigstore/cosign) and the
-`cosign-release.pub` from the release, after you compare its fingerprint
-(`sha256sum cosign-release.pub`) with the one Fixio gives you:
+`cosign-edge.pub` from the release, after you compare its fingerprint
+(`sha256sum cosign-edge.pub`) with the one Fixio gives you:
 
 ```bash
-cosign verify-blob --key cosign-release.pub --bundle SHA256SUMS.sigstore.json \
+cosign verify-blob --key cosign-edge.pub --bundle SHA256SUMS.sigstore.json \
   --insecure-ignore-tlog=true SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS
 ```

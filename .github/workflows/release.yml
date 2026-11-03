@@ -4,7 +4,7 @@
 #
 # Signing (docs/windows-code-signing-trust.md) uses keys that never leave Azure Key Vault:
 #   - the Windows binary is Authenticode-signed with Fixio's code-signing certificate (jsign);
-#   - SHA256SUMS is signed with the cosign release key (SHA256SUMS.sigstore.json).
+#   - SHA256SUMS is signed with the manar-edge cosign key, cosign-edge (SHA256SUMS.sigstore.json).
 # The sign job runs in the environment release-signing, which admits only v* tags (and v* tags
 # can only be created by admins, ruleset "release tags"). It gets an Azure token through GitHub OIDC
 # federation: no stored secret. Until the repo variable SIGNING_VAULT exists, releases are
@@ -62,7 +62,7 @@ jobs:
       id-token: write
     env:
       AZURE_TENANT_ID: ${{ vars.SIGNING_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ vars.SIGNING_CLIENT_ID }}
+      AZURE_CLIENT_ID: ${{ vars.AUTHENTICODE_SIGNER_CLIENT_ID }} # signer-authenticode: this environment only
       VAULT: ${{ vars.SIGNING_VAULT }}
       CERT: manar-code-signing
       TSA: ${{ vars.SIGN_TSA_URL }} # empty: no timestamp (Azure-only decision, 3 Nov 2026)
@@ -120,11 +120,11 @@ jobs:
           cat SHA256SUMS
           # cosign authenticates with the same federated identity (azidentity workload identity).
           export AZURE_FEDERATED_TOKEN_FILE="$RUNNER_TEMP/oidc"
-          key="azurekms://$VAULT.vault.azure.net/cosign-release"
+          key="azurekms://$VAULT.vault.azure.net/cosign-edge"
           "$RUNNER_TEMP/cosign" sign-blob --key "$key" --tlog-upload=false --use-signing-config=false \
             --bundle SHA256SUMS.sigstore.json --yes SHA256SUMS
-          "$RUNNER_TEMP/cosign" public-key --key "$key" --outfile cosign-release.pub
-          "$RUNNER_TEMP/cosign" verify-blob --key cosign-release.pub --bundle SHA256SUMS.sigstore.json \
+          "$RUNNER_TEMP/cosign" public-key --key "$key" --outfile cosign-edge.pub
+          "$RUNNER_TEMP/cosign" verify-blob --key cosign-edge.pub --bundle SHA256SUMS.sigstore.json \
             --insecure-ignore-tlog=true SHA256SUMS
       - if: always()
         run: rm -f "$RUNNER_TEMP/oidc" "$RUNNER_TEMP/kv-token"
@@ -158,7 +158,7 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$SIGNED" = true ]; then
-            notes="Device binaries for Windows (amd64, Authenticode-signed by Fixio Technologies LLC SPC) and Linux (amd64, arm64). SHA256SUMS is signed with the Manar release key (SHA256SUMS.sigstore.json, cosign-release.pub)."
+            notes="Device binaries for Windows (amd64, Authenticode-signed by Fixio Technologies LLC SPC) and Linux (amd64, arm64). SHA256SUMS is signed with the Manar edge release key (SHA256SUMS.sigstore.json, cosign-edge.pub)."
           else
             (cd dist && sha256sum manar-edge-* > SHA256SUMS)
             notes="Unsigned device binaries for Windows (amd64) and Linux (amd64, arm64). Verify with SHA256SUMS."
