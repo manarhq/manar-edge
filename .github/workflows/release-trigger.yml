@@ -1,7 +1,8 @@
 # Starts manar-infra's release workflow as soon as `ci` passes on main, instead of waiting for its
-# 5-minute poll. Inert until the org secret RELEASE_DISPATCH_TOKEN exists (fine-grained token on
-# manar-infra only, Actions: read and write). It only asks manar-infra to look: the release run
-# re-checks main and its ci run itself, and releases every repo that moved.
+# 5-minute poll. Inert until RELEASE_DISPATCH_TOKEN exists (fine-grained token on manar-infra only,
+# Actions: read and write). The token is a secret of the environment release-dispatch, which admits
+# only main: a workflow on any other branch can't read it. It only asks manar-infra to look: the
+# release run re-checks main and its ci run itself, and releases every repo that moved.
 name: release-trigger
 
 on:
@@ -18,6 +19,7 @@ jobs:
       github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
       && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ${{ github.event.repository.private && fromJSON('["self-hosted","manar"]') || 'ubuntu-24.04' }}
+    environment: release-dispatch
     env:
       TOKEN: ${{ secrets.RELEASE_DISPATCH_TOKEN }}
     steps:
