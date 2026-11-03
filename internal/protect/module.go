@@ -246,6 +246,10 @@ func (m *relayModule) Start(ctx context.Context, c *hostclient.Client) error {
 func relayHandler(b backend) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/authorize", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+			http.Error(w, "this account has no tools Manar protects on this device", http.StatusForbidden)
+			return
+		}
 		var in struct{ ToolID, ActionID, Resource string }
 		dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 		var raw map[string]string
@@ -296,6 +300,10 @@ func relayHandler(b backend) http.Handler {
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("GET /v1/approvals/{id}", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 		ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 		defer cancel()
 		s, err := b.ApprovalStatus(ctx, r.PathValue("id"))
@@ -310,6 +318,27 @@ func relayHandler(b backend) http.Handler {
 		json.NewEncoder(w).Encode(map[string]string{"status": s})
 	})
 	return mux
+}
+
+// protectedUID reports whether Manar changed any tool settings for the Linux account uid.
+var protectedUID = func(uid string) bool {
+	st := theStore()
+	return st != nil && st.HasUID(uid)
+}
+
+// callerAllowed: the Linux relay socket is open to every local account (mode 0666, so each
+// person's hooks can reach it), but only root and the accounts whose tools Manar protects may ask
+// for a decision, so another account on the machine cannot send prompts to the owner's phone in
+// this device's name. On Windows the caller is "sid:..." from the pipe; the pipe's DACL already
+// limits it to signed-in accounts and the SID is recorded with the decision.
+func callerAllowed(caller string) bool {
+	switch {
+	case strings.HasPrefix(caller, "sid:"), caller == "uid:0":
+		return true
+	case strings.HasPrefix(caller, "uid:"):
+		return protectedUID(strings.TrimPrefix(caller, "uid:"))
+	}
+	return false
 }
 
 func validTool(id string) bool {

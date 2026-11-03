@@ -254,12 +254,14 @@ func TestMCPWrapDeniesCallsAndPassesTheRest(t *testing.T) {
 	if f != nil || len(r) != 1 || !bytes.Contains(r[0], []byte("policy_denied")) || !bytes.Contains(r[0], []byte(`"id":1`)) {
 		t.Fatalf("%s %s", f, r)
 	}
-	for _, l := range []string{
-		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read"}}`,
-		`{"jsonrpc":"2.0","id":3,"method":"tools/list"}`,
+	// What is let through is the canonical form of what was parsed, not the client's line.
+	for l, want := range map[string]string{
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read"}}`:                           `{"id":2,"jsonrpc":"2.0","method":"tools/call","params":{"name":"read"}}`,
+		`{ "method" : "tools/list", "id":3, "jsonrpc":"2.0" }`:                                              `{"id":3,"jsonrpc":"2.0","method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"arguments":{"q":"<a&b>"},"name":"read"}}`: `{"id":4,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"q":"<a&b>"},"name":"read"}}`,
 	} {
-		if f, r := screen([]byte(l), "fs", deny); string(f) != l || r != nil {
-			t.Fatalf("%q was not passed through: %s %s", l, f, r)
+		if f, r := screen([]byte(l), "fs", deny); string(f) != want || r != nil {
+			t.Fatalf("%q: forwarded %s, replies %s", l, f, r)
 		}
 	}
 	// A line that is not JSON-RPC is answered with an error and never reaches the server.
@@ -568,5 +570,37 @@ func TestJailEnvEditKeepsOtherSettingsAndRestoresThem(t *testing.T) {
 	}
 	if b, _ := os.ReadFile(path); !strings.Contains(string(b), "corp:3128") {
 		t.Fatalf("user proxy lost: %s", b)
+	}
+}
+
+func TestMCPWrapRefusesAmbiguousMessages(t *testing.T) {
+	asked := 0
+	allow := func(context.Context, string, string) Verdict { asked++; return Verdict{true, ""} }
+	for _, l := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","Method":"ping","params":{"name":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"ping","method":"tools/call","params":{"name":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","name":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","NAME":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read"}} {"x":1}`,
+		`{"jsonrpc":"2.0","id":1,"method":7}`,
+		`{"jsonrpc":"2.0","id":2,"Method":"tools/call","params":{"name":"x"}}`,
+		`{"jsonrpc":"2.0","id":2,"METHOD":"tools/call","params":{"name":"x"}}`,
+		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\",\"params\":{},\"PARAMS\":{}}",
+		// U+212A KELVIN SIGN folds to k: "\u212aey" and "key" are one key to a folding decoder.
+		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"\u212aey\":1,\"key\":2}}",
+		// U+017F LONG S folds to s: a look-alike of "arguments".
+		"{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"x\",\"argument\u017f\":{}}}",
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"Name":"x"}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call"}`,
+	} {
+		if !needsDecision([]byte(l)) {
+			t.Errorf("%s would be forwarded unchecked", l)
+		}
+		if f, r := screen([]byte(l), "fs", allow); f != nil || len(r) != 1 || !bytes.Contains(r[0], []byte("-32700")) {
+			t.Errorf("%s: forwarded %s, replies %s", l, f, r)
+		}
+	}
+	if asked != 0 {
+		t.Fatalf("asked %d times about ambiguous messages", asked)
 	}
 }

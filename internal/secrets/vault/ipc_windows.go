@@ -4,6 +4,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"time"
@@ -14,9 +15,14 @@ import (
 
 const pipeName = `\\.\pipe\manar-edge-vault`
 
-// Local System full control, authenticated users read and write (they cannot create instances).
-const pipeSDDL = "D:(A;;GA;;;SY)(A;;GRGW;;;AU)"
+// pipeSDDL: protected DACL, SYSTEM full control, authenticated users FILE_GENERIC_READ |
+// FILE_WRITE_DATA (0x12008b) and nothing else. Not FILE_APPEND_DATA: on a pipe that is the right to
+// create an instance, which would let any user serve this name next to the service.
+const pipeSDDL = "D:P(A;;GA;;;SY)(A;;0x12008b;;;AU)"
 
+// dialDaemon connects to the service's pipe and checks that the process serving it runs as
+// SYSTEM, so a user who created the name first (or while the service was stopped) is not trusted
+// with a credential request or a restore.
 func dialDaemon(timeout time.Duration) (io.ReadWriteCloser, error) {
 	n, err := windows.UTF16PtrFromString(pipeName)
 	if err != nil {
@@ -24,9 +30,14 @@ func dialDaemon(timeout time.Duration) (io.ReadWriteCloser, error) {
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		h, err := windows.CreateFile(n, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING,
+		h, err := windows.CreateFile(n, windows.FILE_GENERIC_READ|windows.FILE_WRITE_DATA, 0, nil, windows.OPEN_EXISTING,
 			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 		if err == nil {
+			var pid uint32
+			if windows.GetNamedPipeServerProcessId(h, &pid) != nil || !isSystem(pid) {
+				windows.CloseHandle(h)
+				return nil, errors.New("the vault pipe is not served by the Manar service")
+			}
 			return os.NewFile(uintptr(h), pipeName), nil
 		}
 		if time.Now().After(deadline) {
@@ -116,4 +127,10 @@ func (p pipeRW) Write(b []byte) (int, error) {
 	var n uint32
 	err := windows.WriteFile(p.h, b, &n, nil)
 	return int(n), err
+}
+
+// isSystem reports whether the process runs as LocalSystem.
+func isSystem(pid uint32) bool {
+	owner, _, err := peerOf(pid)
+	return err == nil && owner == "S-1-5-18"
 }

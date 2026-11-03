@@ -12,7 +12,8 @@ import (
 )
 
 // On Windows the relay is a named pipe. Its DACL gives SYSTEM and Administrators full control and
-// authenticated users read and write, but not the right to create an instance; the service creates
+// authenticated users FILE_GENERIC_READ | FILE_WRITE_DATA (0x12008b), not FILE_APPEND_DATA, which on
+// a pipe is the right to create an instance; the service creates
 // the first instance with FILE_FLAG_FIRST_PIPE_INSTANCE, so a squatter makes the service fail
 // instead of being trusted, and the client checks the pipe's server runs as SYSTEM. The calling
 // user's SID goes into the audit record.
@@ -20,7 +21,7 @@ var errEOF = io.EOF
 
 const (
 	relayPipe = `\\.\pipe\manar-edge-relay`
-	relaySDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)"
+	relaySDDL = "D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;0x12008b;;;AU)"
 )
 
 type pipeConn struct {
@@ -133,7 +134,10 @@ func openPipe() (windows.Handle, error) {
 		return 0, err
 	}
 	for i := 0; i < 20; i++ {
-		h, err := windows.CreateFile(n, windows.GENERIC_READ|windows.GENERIC_WRITE, 0, nil, windows.OPEN_EXISTING, 0, 0)
+		// Only the rights the DACL grants, and identification-level impersonation: whoever serves
+		// the pipe cannot act as the caller (Close connects as SYSTEM to wake the listener).
+		h, err := windows.CreateFile(n, windows.FILE_GENERIC_READ|windows.FILE_WRITE_DATA, 0, nil, windows.OPEN_EXISTING,
+			windows.SECURITY_SQOS_PRESENT|windows.SECURITY_IDENTIFICATION, 0)
 		if err == nil {
 			return h, nil
 		}

@@ -34,6 +34,10 @@ func TestRelayOnlyForwardsKnownToolsAndRecordsTheCaller(t *testing.T) {
 	srv := newRelayServer(b)
 	go srv.Serve(l)
 	defer srv.Close()
+	old := protectedUID
+	defer func() { protectedUID = old }()
+	me := strconv.Itoa(os.Geteuid())
+	protectedUID = func(uid string) bool { return uid == me }
 
 	r := NewRelay()
 	if v := r.Decide(context.Background(), "cursor", "shell", "ls", 5e9); !v.Allow || b.calls != 1 {
@@ -77,5 +81,32 @@ func TestDecideFailsClosedWithAWayOutWhenTheServiceIsGone(t *testing.T) {
 	v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9)
 	if v.Allow || !strings.Contains(v.Reason, "manar-edge protect restore") {
 		t.Fatalf("%+v", v)
+	}
+}
+
+func TestRelayRefusesAccountsWithoutProtectedTools(t *testing.T) {
+	dir := t.TempDir()
+	relayDir, relaySock, relayOwner = dir, filepath.Join(dir, "relay.sock"), uint32(os.Geteuid())
+	l, err := listenRelay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &fakeBackend{}
+	srv := newRelayServer(b)
+	go srv.Serve(l)
+	defer srv.Close()
+	old := protectedUID
+	defer func() { protectedUID = old }()
+	protectedUID = func(string) bool { return false }
+	if os.Geteuid() == 0 {
+		t.Skip("root may always ask")
+	}
+	if v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9); v.Allow || b.calls != 0 {
+		t.Fatalf("an account with no protected tools was let through: %+v", v)
+	}
+	for c, want := range map[string]bool{"uid:0": true, "sid:S-1-5-21-1-2-3-1001": true, "unknown": false, "": false, "uid:1000": false} {
+		if callerAllowed(c) != want {
+			t.Errorf("callerAllowed(%q) != %v", c, want)
+		}
 	}
 }
