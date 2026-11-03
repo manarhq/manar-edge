@@ -1,7 +1,7 @@
 {
   "_comment": "The device <-> manar-api contract. One file, byte-identical in manarhq/manar-edge (testdata/contract/host-contract.json) and manarhq/manar-api (src/contract/host-contract.json); both test suites read it and CI checks the copies match. Change both repos together.",
   "events": {
-    "_comment": "POST /host/v1/events bodies. edge: what the current device sends; legacy: what manar-edge 0.1.1 sends (empty strings for missing fields), which manar-api still takes.",
+    "_comment": "POST /host/v1/events bodies. edge: what the current device sends; legacy: what manar-edge 0.1.1 sends (empty strings for missing fields, vault kinds ssh-restore and file as the path class), which manar-api still takes.",
     "edge": {
       "events": [
         {
@@ -56,6 +56,24 @@
           "maskedPath": "~/.config/gh/hosts.yml",
           "blocked": false,
           "at": "2026-11-02T21:57:38Z"
+        },
+        {
+          "type": "secret.vault.denied",
+          "toolId": "",
+          "process": "ssh-add",
+          "pathClass": "ssh-restore",
+          "maskedPath": "id_ed25519",
+          "blocked": true,
+          "at": "2026-11-02T21:57:39Z"
+        },
+        {
+          "type": "secret.vault.denied",
+          "toolId": "",
+          "process": "cat",
+          "pathClass": "file",
+          "maskedPath": "env",
+          "blocked": true,
+          "at": "2026-11-02T21:57:40Z"
         }
       ]
     }
