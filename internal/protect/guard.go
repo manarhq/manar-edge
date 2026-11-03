@@ -35,12 +35,12 @@ var guardedText = []string{
 
 var (
 	// A tool's settings folder named as a whole.
-	guardedDir = regexp.MustCompile(`(^|[\s/"'=~:(])\.(claude|cursor|gemini|codex|copilot|windsurf|codeium)(/|\s|$|["';&|)])`)
+	guardedDir = regexp.MustCompile(`(^|[\s/"'=~:(<>])\.(claude|cursor|gemini|codex|copilot|windsurf|codeium)(/|\s|$|["';&|)])`)
 	// Something next to it that can replace, remove or write files: file commands, redirection,
 	// and interpreters or tools that write files themselves.
 	changeVerb  = regexp.MustCompile(`(^|[\s;&|(])(rm|rmdir|mv|cp|ln|unlink|install|rsync|tar|unzip|truncate|touch|tee|dd|awk|gawk|python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|del|erase|rd|move|ren|rename|xcopy|robocopy|mklink|remove-item|move-item|rename-item|copy-item|new-item|set-content|add-content|out-file)(\s|$)|\bsed\s+(-[a-z]*\s+)*-[a-z]*i|>`)
 	claudeFlags = regexp.MustCompile(`\bclaude(\.exe)?\b[^;&|]*\s--settings\b`)
-	dotDot      = regexp.MustCompile(`[^/\s"'=]+/\.\./`)
+	dotDot      = regexp.MustCompile("(^|/)[^/\\s\"'=;&|<>()$`]+/\\.\\./")
 )
 
 // canonical lower-cases p, uses '/', drops Windows stream suffixes (name:stream, name::$DATA) and
@@ -90,9 +90,11 @@ func GuardedPath(p string) bool {
 // guardedTarget is GuardedPath for a file a tool is about to write, also through what the path
 // stands for on disk: links in the part that exists (the file itself, or the folders above it)
 // are resolved, and so are Windows 8.3 short names (EvalSymlinks returns long names there).
-// A relative path is taken from cwd, the tool's working folder.
+// A relative path is taken from cwd, the tool's working folder. It fails closed: a target with a
+// '..' element (which a link before it would change the meaning of), or one whose existing part
+// cannot be resolved (a broken or looping link, an unreadable folder), counts as guarded.
 func guardedTarget(p, cwd string) bool {
-	if GuardedPath(p) {
+	if GuardedPath(p) || hasDotDot(p) {
 		return true
 	}
 	abs := filepath.FromSlash(p)
@@ -100,22 +102,38 @@ func guardedTarget(p, cwd string) bool {
 		if cwd == "" {
 			cwd, _ = os.Getwd()
 		}
-		abs = filepath.Join(cwd, abs)
+		if hasDotDot(cwd) {
+			return true
+		}
+		abs = filepath.Join(cwd, abs) // no '..' left to clean: only '.' and repeated separators go
 	}
 	abs = filepath.Clean(abs)
 	rest := ""
 	for dir := abs; ; dir = filepath.Dir(dir) {
-		if _, err := os.Lstat(dir); err == nil {
-			if r, err := filepath.EvalSymlinks(dir); err == nil {
-				return GuardedPath(filepath.Join(r, rest))
-			}
-			return false
+		_, err := os.Lstat(dir)
+		if err == nil {
+			r, err := filepath.EvalSymlinks(dir)
+			return err != nil || GuardedPath(filepath.Join(r, rest))
+		}
+		if !os.IsNotExist(err) {
+			return true
 		}
 		if filepath.Dir(dir) == dir {
-			return false
+			return true
 		}
 		rest = filepath.Join(filepath.Base(dir), rest)
 	}
+}
+
+// hasDotDot reports a '..' element in either separator, including Windows spellings such as
+// '...' or '.. ' (trailing dots and spaces are ignored there).
+func hasDotDot(p string) bool {
+	for _, e := range strings.FieldsFunc(p, func(r rune) bool { return r == '/' || r == '\\' }) {
+		if len(e) >= 2 && strings.Trim(e, ". ") == "" {
+			return true
+		}
+	}
+	return false
 }
 
 // GuardedCommand reports whether a shell command names a guarded file, points Claude Code at other
@@ -126,13 +144,19 @@ func guardedTarget(p, cwd string) bool {
 // later). It narrows what an AI tool does by accident or on a planted instruction; the reports
 // (tamper.go) and the console are what make the rest visible.
 func GuardedCommand(cmd string) bool {
-	c := strings.ToLower(strings.ReplaceAll(cmd, `\`, "/"))
-	for prev := ""; prev != c; {
-		prev = c
-		c = strings.ReplaceAll(c, "//", "/")
-		c = strings.ReplaceAll(c, "/./", "/")
-		c = dotDot.ReplaceAllString(c, "")
+	raw := strings.ToLower(strings.ReplaceAll(cmd, `\`, "/"))
+	norm := raw
+	for prev := ""; prev != norm; {
+		prev = norm
+		norm = strings.ReplaceAll(norm, "//", "/")
+		norm = strings.ReplaceAll(norm, "/./", "/")
+		norm = dotDot.ReplaceAllString(norm, "$1")
 	}
+	// Normalising removes text, so the raw command is checked too: a match in either refuses.
+	return guardedText1(raw) || guardedText1(norm)
+}
+
+func guardedText1(c string) bool {
 	for _, t := range guardedText {
 		if strings.Contains(c, t) {
 			return true
