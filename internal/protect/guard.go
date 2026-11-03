@@ -266,28 +266,38 @@ var targetKeys = map[string]bool{
 // to) and unified and git diffs (---, +++, rename, copy).
 var patchTargets = regexp.MustCompile(`(?m)^(?:\*\*\* (?:Add|Update|Delete) File: |\*\*\* Move to: |(?:\+\+\+|---) |rename (?:from|to) |copy (?:from|to) )(.+?)\s*$|^diff --git (\S+) (\S+)\s*$`)
 
-// editTargets lists every file path in a tool's arguments: values of path-like keys (also in
-// nested objects and lists) and the files named in any patch text.
-func editTargets(args map[string]any) []string {
-	var out []string
-	var walk func(v any, key string, depth int)
+// Limits of one argument scan. Past either, Manar cannot tell what the call names: refused.
+const (
+	maxArgDepth  = 32
+	maxArgValues = 10000
+)
+
+var errTooDeep = errors.New("the arguments are nested too deeply or are too many to check")
+
+// scanArgs walks a tool's arguments with no silent cut-off: it lists the file paths (values of
+// path-like keys and the files named in any patch text) and every string, and fails when the
+// arguments go deeper than maxArgDepth or hold more than maxArgValues values.
+func scanArgs(args any) (targets, values []string, err error) {
 	add := func(s string) {
 		s = strings.TrimSpace(strings.SplitN(s, "\t", 2)[0]) // diff headers may carry a timestamp
 		for _, pre := range []string{"a/", "b/"} {
 			if strings.HasPrefix(s, pre) {
-				out = append(out, strings.TrimPrefix(s, pre)) // git diff prefixes, kept both ways
+				targets = append(targets, strings.TrimPrefix(s, pre)) // git diff prefixes, kept both ways
 			}
 		}
 		if s != "" && s != "/dev/null" {
-			out = append(out, s)
+			targets = append(targets, s)
 		}
 	}
-	walk = func(v any, key string, depth int) {
-		if depth > 4 {
-			return
+	n := 0
+	var walk func(v any, key string, depth int) error
+	walk = func(v any, key string, depth int) error {
+		if n++; depth > maxArgDepth || n > maxArgValues {
+			return errTooDeep
 		}
 		switch x := v.(type) {
 		case string:
+			values = append(values, x)
 			if targetKeys[strings.ToLower(key)] {
 				add(x)
 			}
@@ -298,22 +308,33 @@ func editTargets(args map[string]any) []string {
 			}
 		case []any:
 			for _, e := range x {
-				walk(e, key, depth+1)
+				if err := walk(e, key, depth+1); err != nil {
+					return err
+				}
 			}
 		case map[string]any:
 			for k, e := range x {
-				walk(e, k, depth+1)
+				if err := walk(e, k, depth+1); err != nil {
+					return err
+				}
 			}
 		}
+		return nil
 	}
-	walk(args, "", 0)
-	return out
+	err = walk(args, "", 0)
+	return targets, values, err
 }
 
-// guardedValue finds a one-line string anywhere in the arguments whose text is a guarded file: a
-// file named under a key Manar does not know as a path (output_file, dst, ...).
-func guardedValue(args map[string]any) (string, bool) {
-	for _, v := range stringValues(args) {
+// editTargets is scanArgs's file list (tests and the shell's patch check; no depth to speak of).
+func editTargets(args map[string]any) []string {
+	t, _, _ := scanArgs(args)
+	return t
+}
+
+// guardedText reports a one-line string whose text is a guarded file: a file named under a key
+// Manar does not know as a path (output_file, dst, ...).
+func guardedValue(values []string) (string, bool) {
+	for _, v := range values {
 		if !strings.ContainsAny(v, "\n\r") && GuardedPath(v) {
 			return v, true
 		}
@@ -321,43 +342,37 @@ func guardedValue(args map[string]any) (string, bool) {
 	return "", false
 }
 
-// guardedArgs is the argument check of GuardInput for an MCP call: any target or string value
-// that is a guarded file. cwd "" means this process's working folder.
-func guardedArgs(args map[string]any, cwd string) bool {
-	if _, ok := guardedValue(args); ok {
+// guardedArgs is the argument check for an MCP call through the wrapper: any target or string
+// value that is a guarded file, or arguments that cannot be checked as a whole. The server
+// resolves a relative path against its own root, not the wrapper's: a relative target is checked
+// against every root the server was given (absolute folders on its command line) and the folder
+// both run in, and refused when no root is known.
+func guardedArgs(args map[string]any, roots []string) bool {
+	targets, values, err := scanArgs(args)
+	if err != nil {
 		return true
 	}
-	for _, t := range editTargets(args) {
-		if guardedTarget(t, cwd) {
+	if _, ok := guardedValue(values); ok {
+		return true
+	}
+	cwd, _ := os.Getwd()
+	for _, t := range targets {
+		if filepath.IsAbs(filepath.FromSlash(t)) {
+			if guardedTarget(t, "") {
+				return true
+			}
+			continue
+		}
+		if len(roots) == 0 || guardedTarget(t, cwd) {
 			return true
+		}
+		for _, r := range roots {
+			if guardedTarget(t, r) {
+				return true
+			}
 		}
 	}
 	return false
-}
-
-// stringValues lists every string in a tool's arguments (nested objects and lists included).
-func stringValues(v any) []string {
-	var out []string
-	var walk func(any, int)
-	walk = func(v any, depth int) {
-		if depth > 4 {
-			return
-		}
-		switch x := v.(type) {
-		case string:
-			out = append(out, x)
-		case []any:
-			for _, e := range x {
-				walk(e, depth+1)
-			}
-		case map[string]any:
-			for _, e := range x {
-				walk(e, depth+1)
-			}
-		}
-	}
-	walk(v, 0)
-	return out
 }
 
 // toolArgs returns a generic tool's arguments from its hook input (Claude Code, Gemini, Codex:
@@ -410,9 +425,13 @@ func GuardInput(key, event string, raw []byte) (reason, action, path string) {
 	if key == "cursor" || key == "windsurf" {
 		targets = nil // their mcp events carry no file arguments Manar can see
 	} else {
-		args := toolArgs(in)
-		targets = editTargets(args)
-		if v, ok := guardedValue(args); ok {
+		var values []string
+		var err error
+		targets, values, err = scanArgs(toolArgs(in))
+		if err != nil {
+			return "Manar: " + err.Error(), "", ""
+		}
+		if v, ok := guardedValue(values); ok {
 			return GuardReason, "edit", v
 		}
 	}

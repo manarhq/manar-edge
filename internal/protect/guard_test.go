@@ -362,3 +362,66 @@ func TestMCPWrapperChecksArguments(t *testing.T) {
 		t.Error("an ordinary MCP write was not passed on")
 	}
 }
+
+func TestArgumentScanHasNoSilentCutOff(t *testing.T) {
+	nest := func(levels int, leaf string) string {
+		s := `"` + leaf + `"`
+		for i := 0; i < levels; i++ {
+			s = `{"k":` + s + `}`
+		}
+		return s
+	}
+	deep := `{"tool_name":"mcp__x__y","tool_input":` + nest(6, "/home/sam/app/.claude/settings.json") + `}`
+	if guardIn(t, "codex-cli", "tool", deep) != GuardReason {
+		t.Error("a settings path nested 6 levels deep was not refused")
+	}
+	tooDeep := `{"tool_name":"mcp__x__y","tool_input":` + nest(maxArgDepth+5, "x") + `}`
+	if r := guardIn(t, "codex-cli", "tool", tooDeep); r == "" {
+		t.Error("arguments past the depth limit were passed on")
+	}
+	if guardIn(t, "codex-cli", "tool", `{"tool_name":"mcp__x__y","tool_input":`+nest(6, "ok")+`}`) != "" {
+		t.Error("ordinary nested arguments were refused")
+	}
+}
+
+func TestMCPArgumentsAreStrictAndRootBound(t *testing.T) {
+	old := mcpRoots
+	defer func() { mcpRoots = old }()
+	allow := func(context.Context, string, string) Verdict { return Verdict{true, ""} }
+	refused := func(l string) bool {
+		f, r := screen([]byte(l), "fs", allow)
+		return f == nil && len(r) == 1
+	}
+	root := t.TempDir()
+	mcpRoots = []string{root}
+	// Duplicate or case-fold-equal keys inside the arguments, at any depth.
+	for _, l := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":{"Path":"a.txt","path":"/home/sam/app/.claude/settings.json"}}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"w","arguments":{"o":{"path":"a","path":"b"}}}}`,
+	} {
+		if !refused(l) {
+			t.Errorf("not refused: %s", l)
+		}
+	}
+	// The server gets the arguments re-encoded from what was checked, numbers as written.
+	l := `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"w","arguments":{ "path" : "src/main.go", "n": 1.50 }}}`
+	f, r := screen([]byte(l), "fs", allow)
+	if r != nil || string(f) != `{"id":2,"jsonrpc":"2.0","method":"tools/call","params":{"arguments":{"n":1.50,"path":"src/main.go"},"name":"w"}}` {
+		t.Fatalf("forwarded %s, replies %s", f, r)
+	}
+	// A relative path is judged from the server's root; with no root known it is refused.
+	rel := `{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"w","arguments":{"path":"../.claude/settings.json"}}}`
+	if !refused(rel) {
+		t.Error("a relative settings path was not refused")
+	}
+	mcpRoots = nil
+	if !refused(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"w","arguments":{"path":"src/main.go"}}}`) {
+		t.Error("a relative path with no known root was not refused")
+	}
+	if refused(`{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"w","arguments":{"path":"` + filepath.ToSlash(filepath.Join(root, "x.txt")) + `"}}}`) {
+		t.Error("an absolute ordinary path was refused")
+	}
+	if got := rootsOf([]string{"npx", "-y", "@modelcontextprotocol/server-filesystem", root, "--root=" + root, "relative"}); len(got) != 2 {
+		t.Errorf("rootsOf = %v", got)
+	}
+}

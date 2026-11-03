@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,6 +26,7 @@ func RunMCPWrap(key, server string, argv []string, in io.Reader, out, errw io.Wr
 	if len(argv) == 0 {
 		return 2
 	}
+	mcpRoots = rootsOf(argv)
 	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command (the MCP server command from the tool's own config, which this wrapper exists to run)
 	cmd := exec.Command(argv[0], argv[1:]...)
 	cmd.Stderr = errw
@@ -157,8 +160,17 @@ func parseRPC(b []byte) (rpcMsg, error) {
 			_ = json.Unmarshal(n, &m.Name) // not a string: no name, which is a deny
 		}
 		if a, ok := p["arguments"]; ok {
-			var args map[string]any
-			m.Guarded = json.Unmarshal(a, &args) != nil || guardedArgs(args, "")
+			// Decoded as strictly as the top level, at every depth, and re-encoded from what was
+			// checked: the server never reads keys the check did not see.
+			v, err := strictValue(a, 0)
+			if err != nil {
+				return m, err
+			}
+			args, isObj := v.(map[string]any)
+			m.Guarded = !isObj || guardedArgs(args, mcpRoots)
+			if p["arguments"], err = encode(v); err != nil {
+				return m, err
+			}
 		}
 		if o["params"], err = encode(p); err != nil {
 			return m, err
@@ -166,6 +178,72 @@ func parseRPC(b []byte) (rpcMsg, error) {
 	}
 	m.Canon, err = encode(o)
 	return m, err
+}
+
+// mcpRoots are the folders the wrapped server was given on its command line (absolute paths
+// that are folders): where it resolves a relative path. Set by RunMCPWrap.
+var mcpRoots []string
+
+func rootsOf(argv []string) []string {
+	var out []string
+	for _, a := range argv[1:] {
+		if v, ok := strings.CutPrefix(a, "--root="); ok {
+			a = v
+		}
+		if filepath.IsAbs(a) {
+			if st, err := os.Stat(a); err == nil && st.IsDir() {
+				out = append(out, a)
+			}
+		}
+	}
+	return out
+}
+
+// strictValue decodes any JSON value with the rules of strictObject at every depth (no duplicate
+// or case-fold-equal keys) and numbers kept as written.
+func strictValue(b []byte, depth int) (any, error) {
+	if depth > maxArgDepth {
+		return nil, errTooDeep
+	}
+	t := bytes.TrimSpace(b)
+	if len(t) == 0 {
+		return nil, errors.New("empty value")
+	}
+	switch t[0] {
+	case '{':
+		o, err := strictObject(t, nil)
+		if err != nil {
+			return nil, err
+		}
+		out := make(map[string]any, len(o))
+		for k, raw := range o {
+			if out[k], err = strictValue(raw, depth+1); err != nil {
+				return nil, err
+			}
+		}
+		return out, nil
+	case '[':
+		var items []json.RawMessage
+		if err := json.Unmarshal(t, &items); err != nil {
+			return nil, err
+		}
+		out := make([]any, len(items))
+		for i, raw := range items {
+			v, err := strictValue(raw, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = v
+		}
+		return out, nil
+	}
+	dec := json.NewDecoder(bytes.NewReader(t))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }
 
 // encode writes v as compact JSON without HTML escaping (the bytes stay what the client sent).

@@ -56,7 +56,7 @@ jobs:
           go-version: '1.26.10' # same as the GitLab image; go.mod's 1.26.8 has stdlib CVEs
       - run: go test ./internal/safefs/
       - run: go test -run 'TestStateFolderOwner|TestNewStateFolderIsBornProtected|TestAdoptRefusesForeignOrLinkedContent' ./cmd/manar-edge/
-      - run: go test -run 'TestGuard|TestEveryEditTarget|TestPathCanonicalisation|TestShell|TestEveryArgument|TestMCPWrapperChecksArguments' ./internal/protect/
+      - run: go test -run 'TestGuard|TestEveryEditTarget|TestPathCanonicalisation|TestShell|TestEveryArgument|TestMCPWrapperChecksArguments|TestArgumentScan|TestMCPArgumentsAreStrict' ./internal/protect/
 
   # testdata/contract/host-contract.json is shared with manar-api (src/contract/host-contract.json):
   # both test suites read it, so the copies must stay byte-identical.
