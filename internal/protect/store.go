@@ -342,6 +342,24 @@ func writeState(path string, data []byte, mode os.FileMode) error {
 	return os.Rename(tmp, path)
 }
 
+// HasUID reports whether Manar changes any file for the account with this uid.
+func (s *Store) HasUID(uid string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	m, err := s.load()
+	if err != nil {
+		return false
+	}
+	for _, es := range m.Tools {
+		for _, e := range es {
+			if strconv.Itoa(e.UID) == uid {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Has reports whether Manar currently changes anything for this tool and user.
 func (s *Store) Has(tool, user string) bool {
 	s.mu.Lock()

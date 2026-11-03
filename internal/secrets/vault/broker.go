@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,6 +30,38 @@ type Request struct {
 	Owner   string
 	Program string
 	SHA     string
+	// ViaAI: the program runs under an AI tool (its process chain leads to one). Such a request is
+	// never answered by a standing grant, and an "8 hours" or "always" answer counts once.
+	ViaAI bool
+}
+
+// interpreters run whatever script they are given, so a grant to one is a grant to any code.
+var interpreters = map[string]bool{
+	"python": true, "node": true, "bash": true, "sh": true, "dash": true, "zsh": true, "fish": true, "ksh": true,
+	"pwsh": true, "powershell": true, "cmd": true, "ruby": true, "perl": true, "php": true, "deno": true, "bun": true,
+	"java": true, "lua": true, "osascript": true, "wscript": true, "cscript": true, "env": true, "busybox": true,
+}
+
+// isInterpreter matches the program's file name without ".exe" and version digits (python3.12).
+func isInterpreter(program string) bool {
+	n := strings.ToLower(program)
+	if i := strings.LastIndexAny(n, `/\`); i >= 0 {
+		n = n[i+1:]
+	}
+	n = strings.TrimSuffix(n, ".exe")
+	n = strings.TrimRight(n, "0123456789.-")
+	return interpreters[n]
+}
+
+// standingGrants is false where the requesting binary cannot be pinned to its caller: on Windows
+// any program of the same user can start the helper with another parent process recorded
+// (PROC_THREAD_ATTRIBUTE_PARENT_PROCESS), so a grant to a binary would be a grant to everyone.
+var standingGrants = runtime.GOOS != "windows"
+
+// OnceOnly reports whether the request can only be answered for this one call: no standing
+// grant is looked up for it and none is kept from the answer.
+func OnceOnly(r Request) bool {
+	return r.Kind == kindRestore || r.Program == "" || r.SHA == "" || r.ViaAI || isInterpreter(r.Program) || !standingGrants
 }
 
 // Approver asks the person. WARDEN's prompt replaces the console approval path by supplying
@@ -114,7 +148,7 @@ func (b *Broker) Authorize(ctx context.Context, r Request) error {
 	key := grantKey(r)
 	b.mu.Lock()
 	g, ok := b.grants()[key]
-	if !restore && r.Program != "" && r.SHA != "" && ok && (g.Always || b.now().Before(g.Until)) {
+	if !OnceOnly(r) && ok && (g.Always || b.now().Before(g.Until)) {
 		b.mu.Unlock()
 		return nil
 	}
@@ -143,7 +177,7 @@ func (b *Broker) Authorize(ctx context.Context, r Request) error {
 	}
 
 	b.mu.Lock()
-	if !restore && r.Program != "" && r.SHA != "" { // never keep a standing grant for a binary we could not pin
+	if !OnceOnly(r) { // never keep a standing grant for a binary we could not pin, or for an AI tool's call
 		switch d {
 		case Allow8h:
 			m := b.grants()

@@ -221,6 +221,15 @@ func (a consoleApprover) Ask(ctx context.Context, r Request) (Decision, error) {
 	if r.Program == "" {
 		body["program"], body["programPath"], body["programSha"] = "unknown program", "unknown", strings.Repeat("0", 64)
 	}
+	// The console offers 8 hours and always; say when the device will count any yes as once (the
+	// secret-file gate keeps its own grants).
+	switch {
+	case r.Kind == "file":
+	case r.ViaAI:
+		body["program"] += " (run by an AI tool; a yes counts once)"
+	case OnceOnly(r):
+		body["program"] += " (a yes counts once)"
+	}
 	if err := a.c.Do(ctx, http.MethodPost, "/secrets/access", body, &created); err != nil {
 		return Deny, err
 	}

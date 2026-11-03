@@ -210,3 +210,44 @@ func TestRestoreAllOnlyForAdministrators(t *testing.T) {
 		}
 	}
 }
+
+func TestNoStandingGrantForAIToolsOrInterpreters(t *testing.T) {
+	for _, r := range []Request{
+		func() Request { r := req; r.ViaAI = true; return r }(),
+		func() Request { r := req; r.Program = "/usr/bin/python3.12"; return r }(),
+		func() Request { r := req; r.Program = `C:\Program Files\nodejs\node.exe`; return r }(),
+	} {
+		ap := &fakeApprover{answers: []Decision{AllowAlways}}
+		b, _ := brokerFor(t, ap)
+		r.Owner = req.Owner
+		for i := 0; i < 2; i++ {
+			if _, err := b.Credential(context.Background(), r); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if ap.asked != 2 {
+			t.Fatalf("%+v: an always answer was kept (asked %d)", r, ap.asked)
+		}
+	}
+	// An always answer to the plain binary does not let the same binary under an AI tool through.
+	ap := &fakeApprover{answers: []Decision{AllowAlways}}
+	b, _ := brokerFor(t, ap)
+	_, _ = b.Credential(context.Background(), req)
+	ai := req
+	ai.ViaAI = true
+	_, _ = b.Credential(context.Background(), ai)
+	if ap.asked != 2 {
+		t.Fatalf("a standing grant answered an AI tool's request (asked %d)", ap.asked)
+	}
+}
+
+func TestIsInterpreter(t *testing.T) {
+	for p, want := range map[string]bool{
+		"/usr/bin/python3": true, "/usr/bin/python3.12": true, `C:\x\pwsh.exe`: true, "/bin/bash": true,
+		"/usr/local/bin/aws": false, `C:\Program Files\Amazon\AWSCLIV2\aws.exe`: false, "/usr/bin/terraform": false,
+	} {
+		if isInterpreter(p) != want {
+			t.Errorf("isInterpreter(%q) != %v", p, want)
+		}
+	}
+}

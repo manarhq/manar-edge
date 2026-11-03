@@ -570,3 +570,31 @@ func TestJailEnvEditKeepsOtherSettingsAndRestoresThem(t *testing.T) {
 		t.Fatalf("user proxy lost: %s", b)
 	}
 }
+
+func TestMCPWrapRefusesAmbiguousMessages(t *testing.T) {
+	asked := 0
+	allow := func(context.Context, string, string) Verdict { asked++; return Verdict{true, ""} }
+	for _, l := range []string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","Method":"ping","params":{"name":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"ping","method":"tools/call","params":{"name":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","name":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read","NAME":"delete"}}`,
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read"}} {"x":1}`,
+		`{"jsonrpc":"2.0","id":1,"method":7}`,
+	} {
+		if !needsDecision([]byte(l)) {
+			t.Errorf("%s would be forwarded unchecked", l)
+		}
+		if f, r := screen([]byte(l), "fs", allow); f != nil || len(r) != 1 || !bytes.Contains(r[0], []byte("-32700")) {
+			t.Errorf("%s: forwarded %s, replies %s", l, f, r)
+		}
+	}
+	if asked != 0 {
+		t.Fatalf("asked %d times about ambiguous messages", asked)
+	}
+	// "Method" alone is not a method to a case-sensitive server, nor to the wrapper: passed on.
+	l := `{"jsonrpc":"2.0","id":2,"Method":"tools/call","params":{"name":"x"}}`
+	if needsDecision([]byte(l)) {
+		t.Errorf("%s needs no decision", l)
+	}
+}

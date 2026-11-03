@@ -2,6 +2,7 @@ package protect
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,7 +35,11 @@ func (s *stubBackend) ApprovalStatus(context.Context, string) (string, error) {
 }
 
 func relayFor(t *testing.T, b backend) *Relay {
-	srv := httptest.NewServer(relayHandler(b))
+	srv := httptest.NewUnstartedServer(relayHandler(b))
+	srv.Config.ConnContext = func(ctx context.Context, _ net.Conn) context.Context {
+		return context.WithValue(ctx, callerKey{}, "uid:0")
+	}
+	srv.Start()
 	t.Cleanup(srv.Close)
 	return &Relay{Base: srv.URL, HTTP: &http.Client{Timeout: 5 * time.Second}, PollMin: time.Millisecond, PollMax: 5 * time.Millisecond}
 }

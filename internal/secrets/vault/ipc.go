@@ -129,6 +129,10 @@ func handleConn(ctx context.Context, rw io.ReadWriter, peer Peer, b *Broker, env
 		return
 	}
 	r := Request{Kind: req.Kind, Ref: req.Ref, Owner: peer.Owner}
+	if peer.PID > 0 {
+		// aws (or anything) run by an AI tool: the person is asked every time, and told so.
+		_, r.ViaAI = AIChain(peer.PID)
+	}
 	if env.Identify != nil {
 		if p, err := env.Identify(peer.PID); err == nil {
 			r.Program, r.SHA = p.Path, p.SHA

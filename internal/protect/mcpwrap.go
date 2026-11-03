@@ -5,8 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os/exec"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -104,12 +107,71 @@ func RunMCPWrap(key, server string, argv []string, in io.Reader, out, errw io.Wr
 	return 0
 }
 
+// rpcMsg is the part of a JSON-RPC message the wrapper decides on.
 type rpcMsg struct {
-	ID     json.RawMessage `json:"id,omitempty"`
-	Method string          `json:"method,omitempty"`
-	Params struct {
-		Name string `json:"name"`
-	} `json:"params"`
+	ID     json.RawMessage
+	Method string
+	Name   string // params.name of a tools/call
+}
+
+// parseRPC reads one JSON-RPC object as the server will: keys match exactly, and a message with
+// a duplicate key, or two keys that differ only in case, is refused. Servers disagree on which
+// copy of a duplicate wins (and Go's decoder would match "Method" for "method"), so a message the
+// wrapper and the server could read differently is never passed on.
+func parseRPC(b []byte) (rpcMsg, error) {
+	var m rpcMsg
+	o, err := strictObject(b)
+	if err != nil {
+		return m, err
+	}
+	m.ID = o["id"]
+	if raw, ok := o["method"]; ok && json.Unmarshal(raw, &m.Method) != nil {
+		return m, errors.New("method is not a string")
+	}
+	if raw, ok := o["params"]; ok && m.Method == "tools/call" {
+		p, err := strictObject(raw)
+		if err != nil {
+			return m, err
+		}
+		if n, ok := p["name"]; ok {
+			_ = json.Unmarshal(n, &m.Name) // not a string: no name, which is a deny
+		}
+	}
+	return m, nil
+}
+
+// strictObject decodes a JSON object, refusing duplicate and case-variant keys, and anything after it.
+func strictObject(b []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, errors.New("not a JSON object")
+	}
+	out := map[string]json.RawMessage{}
+	seen := map[string]bool{}
+	for dec.More() {
+		t, err := dec.Token()
+		k, ok := t.(string)
+		if err != nil || !ok {
+			return nil, errors.New("bad key")
+		}
+		lk := strings.ToLower(k)
+		if seen[lk] {
+			return nil, errors.New("duplicate key " + strconv.Quote(k))
+		}
+		seen[lk] = true
+		var v json.RawMessage
+		if err := dec.Decode(&v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	if t, err := dec.Token(); err != nil || t != json.Delim('}') {
+		return nil, errors.New("unterminated object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return nil, errors.New("data after the object")
+	}
+	return out, nil
 }
 
 // screen returns what to forward to the server (nil for nothing) and the replies to send back.
@@ -144,16 +206,16 @@ func screen(line []byte, server string, decide Decider) (forward []byte, replies
 		}
 		return forward, replies
 	}
-	var m rpcMsg
-	if json.Unmarshal(t, &m) != nil {
+	m, err := parseRPC(t)
+	if err != nil {
 		return nil, [][]byte{parseError}
 	}
 	if m.Method != "tools/call" {
 		return line, nil
 	}
 	v := Verdict{false, "Manar: this MCP call has no tool name"}
-	if m.Params.Name != "" {
-		v = decide(context.Background(), "mcp", server+"/"+m.Params.Name)
+	if m.Name != "" {
+		v = decide(context.Background(), "mcp", server+"/"+m.Name)
 	}
 	if v.Allow {
 		return line, nil
@@ -189,8 +251,8 @@ func needsDecision(line []byte) bool {
 		}
 		return false
 	}
-	var m rpcMsg
-	return json.Unmarshal(t, &m) == nil && m.Method == "tools/call"
+	m, err := parseRPC(t)
+	return err != nil || m.Method == "tools/call" // screen answers a refused message
 }
 
 // validRPC is true when line is a JSON object or array.

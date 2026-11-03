@@ -36,8 +36,10 @@ func started(h windows.Handle) (int64, error) {
 
 // Identify holds handles to the helper and its parent (a handle cannot be recycled to another
 // process), requires the parent to have started before the helper and to still be running, and
-// hashes the parent's image. The peer must be this manar-edge binary. A parent that spoofs its
-// own parentage is not detected; the console shows the path and hash, so the person judges.
+// hashes the parent's image. The peer must be this manar-edge binary. A recorded parent cannot be
+// verified on Windows (any program of the same user can name another parent when it starts a
+// process), so the path and hash only inform the person: no standing grant is kept or used on
+// Windows (standingGrants in broker.go), and every release asks.
 func Identify(helperPID int) (Program, error) {
 	self, err := os.Executable()
 	if err != nil {
