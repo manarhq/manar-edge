@@ -304,8 +304,28 @@ HTTP 410  {"statusCode":410,"code":"device_removed","message":"This device was r
 ```
 
 manar-edge treats a reply as removal only when the status is 410 AND `code` is `device_removed`.
-401, 403, 5xx, timeouts, network and TLS errors, and a 410 without that code do not: they keep the
-current behaviour.
+401, 403, 423, 5xx, timeouts, network and TLS errors, and a 410 without that code do not: the hooks
+stay and keep denying what they cannot ask about (fail closed). A local `manar-edge uninstall` by an
+administrator is the only other way the hooks come out. manar-api also answers 410 for every
+device of a personal workspace whose owner deleted their account.
+
+### Locked (423)
+
+manar-api answers 423 when it will not serve a genuine device certificate:
+
+| `code` | When | Device |
+| --- | --- | --- |
+| `device_revoked` | an admin revoked (or rejected) the device: a lost or stolen laptop | locked, and the secret vault is wiped |
+| `certificate_revoked` | this certificate is revoked or unknown | locked |
+| `account_suspended` | the workspace is suspended | locked |
+| `workspace_deleted` | the workspace is being deleted or is gone | locked |
+
+Locked means: the code is saved in `<state dir>/host/locked`; the hooks stay installed and the relay
+denies every protected action with `device_locked` without asking; no standing vault grant counts;
+nothing but the config check-in leaves the device. The first good config clears it (the workspace
+let the device back in), and so does a fresh enrolment. manar-edge 0.1.6 and older also keep their
+hooks on a 423 (they only counted 401 and 403), so the API never answers a device certificate with
+those.
 
 On the first such reply (any host call: the config check-in, the hook relay, and so on):
 

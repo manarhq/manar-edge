@@ -3,16 +3,29 @@ package vault
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 type fakeApprover struct {
 	answers []Decision
 	err     error
 	asked   int
+	ids     []string
+}
+
+// AskGrant names the console request each answer came from ("g<n>"), and the server lists every
+// such grant, as the real console does until a person withdraws one.
+func (f *fakeApprover) AskGrant(ctx context.Context, r Request) (Decision, string, error) {
+	d, err := f.Ask(ctx, r)
+	id := fmt.Sprintf("g%d", f.asked)
+	f.ids = append(f.ids, id)
+	return d, id, err
 }
 
 func (f *fakeApprover) Ask(context.Context, Request) (Decision, error) {
@@ -34,7 +47,19 @@ func brokerFor(t *testing.T, a Approver) (*Broker, *time.Time) {
 	}
 	now := time.Date(2026, 11, 1, 10, 0, 0, 0, time.UTC)
 	req.Owner = e.owner
-	return &Broker{V: e.v, A: a, Now: func() time.Time { return now }}, &now
+	// The console lists every grant its fake approver gave (synced just now).
+	t.Cleanup(func() { SetServerGrants(nil, time.Time{}) })
+	b := &Broker{V: e.v, A: a, Now: func() time.Time { return now }}
+	b.sync = func() {
+		if f, ok := a.(*fakeApprover); ok {
+			var list []hostclient.VaultGrant
+			for _, id := range f.ids {
+				list = append(list, hostclient.VaultGrant{ID: id})
+			}
+			SetServerGrants(list, now)
+		}
+	}
+	return b, &now
 }
 
 var req = Request{Kind: "aws", Ref: "default", Program: "/usr/bin/aws", SHA: "aa11"}
@@ -249,5 +274,64 @@ func TestIsInterpreter(t *testing.T) {
 		if isInterpreter(p) != want {
 			t.Errorf("isInterpreter(%q) != %v", p, want)
 		}
+	}
+}
+
+// Standing grants are the console's (founder decision, 4 Nov 2026): a grant counts only while the
+// server's list, read within the offline lease, still names it. Withdrawn in the console, it is
+// asked again; a grant the console never named (an older device's) is asked again too.
+func TestStandingGrantOnlyWhileTheServerListsIt(t *testing.T) {
+	ap := &fakeApprover{answers: []Decision{AllowAlways}}
+	b, now := brokerFor(t, ap)
+	b.sync = nil // this test drives the server list itself
+	if _, err := b.Credential(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	// Never synced: no standing grant counts.
+	_, _ = b.Credential(context.Background(), req)
+	if ap.asked != 2 {
+		t.Fatalf("a grant counted before any server list: asked %d", ap.asked)
+	}
+	SetServerGrants([]hostclient.VaultGrant{{ID: ap.ids[1]}}, *now)
+	_, _ = b.Credential(context.Background(), req)
+	if ap.asked != 2 {
+		t.Fatalf("a listed grant was not honoured: asked %d", ap.asked)
+	}
+	// Withdrawn in the console: the next list leaves it out, and it is asked again.
+	SetServerGrants([]hostclient.VaultGrant{}, *now)
+	_, _ = b.Credential(context.Background(), req)
+	if ap.asked != 3 {
+		t.Fatalf("a withdrawn grant was honoured: asked %d", ap.asked)
+	}
+	// Listed again, then the device goes quiet past the 24-hour lease.
+	SetServerGrants([]hostclient.VaultGrant{{ID: ap.ids[2]}}, *now)
+	*now = now.Add(25 * time.Hour)
+	_, _ = b.Credential(context.Background(), req)
+	if ap.asked != 4 {
+		t.Fatalf("a grant outlived the offline lease: asked %d", ap.asked)
+	}
+	// An 8-hour grant ends when the server says, even if the local copy says later.
+	until := now.Add(time.Hour)
+	SetServerGrants([]hostclient.VaultGrant{{ID: ap.ids[3], Until: &until}}, *now)
+	*now = now.Add(2 * time.Hour)
+	_, _ = b.Credential(context.Background(), req)
+	if ap.asked != 5 {
+		t.Fatalf("a grant outlived the server's end: asked %d", ap.asked)
+	}
+}
+
+// A revoked (lost or stolen) device wipes its vault: nothing is left to release.
+func TestWipeDeletesEverySecret(t *testing.T) {
+	ap := &fakeApprover{answers: []Decision{AllowOnce}}
+	b, _ := brokerFor(t, ap)
+	n, err := b.V.Wipe()
+	if err != nil || n == 0 {
+		t.Fatalf("wiped %d: %v", n, err)
+	}
+	if left, _ := b.V.Entries(); len(left) != 0 {
+		t.Fatalf("%d secrets left", len(left))
+	}
+	if _, err := b.Credential(context.Background(), req); err == nil {
+		t.Fatal("a wiped secret was released")
 	}
 }

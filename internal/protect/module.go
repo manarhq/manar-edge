@@ -54,6 +54,30 @@ var isPaused = func() bool {
 	return d != "" && pause.Paused(d)
 }
 
+// lockedReason is the deny reason while Manar refuses this device (423), "" otherwise. The hooks
+// stay installed and every protected action is denied without asking (founder decision, 4 Nov 2026:
+// a revoked or stolen laptop's AI agents stay locked until an admin acts).
+var lockedReason = func() string {
+	cfgMu.Lock()
+	d := stateDir
+	cfgMu.Unlock()
+	if d == "" {
+		return ""
+	}
+	switch code := hostclient.LockedCode(d); code {
+	case "":
+		return ""
+	case "account_suspended":
+		return "device_locked (the workspace is suspended; AI actions stay blocked until it is active again)"
+	case "workspace_deleted":
+		return "device_locked (the workspace is being deleted; an administrator of this computer can uninstall Manar)"
+	case "device_revoked":
+		return "device_locked (this device was revoked by its workspace; AI actions stay blocked until an admin acts)"
+	default:
+		return "device_locked (Manar does not accept this device's certificate; ask your workspace admin)"
+	}
+}
+
 func theStore() *Store {
 	cfgMu.Lock()
 	defer cfgMu.Unlock()
@@ -82,18 +106,13 @@ func gatewayUp() bool { return door.Routable() && door.Healthy(GatewayURL) }
 
 // reconcile protects what was found for every account that uses it, undoes it for tools the
 // owner switched off, and returns the resulting state. Nothing is changed until the owner has
-// approved the device: a pending device would deny every call its hooks make.
+// approved the device: a pending device would deny every call its hooks make. Any status other
+// than APPROVED (pending, revoked, rejected) leaves what is installed alone: hooks come out only
+// on the workspace's authenticated "removed" reply (the daemon's unprotect) or a local uninstall.
 func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Config) map[string]discovery.State {
 	st := theStore()
 	states := map[string]discovery.State{}
 	if st == nil {
-		return states
-	}
-	if cfg.Status == discovery.StatusRevoked || cfg.Status == "REJECTED" || cfg.Status == "REVOKED" {
-		for _, err := range st.RestoreAll() {
-			logOnce("restore after revocation: " + err.Error())
-		}
-		logOnce("this device was revoked or rejected: Manar's hooks and wrappers are removed")
 		return states
 	}
 	off := map[string]bool{}
@@ -274,6 +293,10 @@ func relayHandler(b backend) http.Handler {
 		if isPaused() {
 			// Not even asked: every protected tool is denied while AI is paused.
 			json.NewEncoder(w).Encode(&hostclient.AuthorizeResult{Decision: "DENY", Reason: pause.Reason})
+			return
+		}
+		if reason := lockedReason(); reason != "" {
+			json.NewEncoder(w).Encode(&hostclient.AuthorizeResult{Decision: "DENY", Reason: reason})
 			return
 		}
 		caller, _ := r.Context().Value(callerKey{}).(string)

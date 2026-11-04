@@ -99,3 +99,56 @@ func TestRevokedBeforeTheDeviceReadItIsRefused(t *testing.T) {
 		t.Fatalf("revoked: %+v", v)
 	}
 }
+
+// A device Manar locked (revoked, suspended, workspace deleted) keeps its hooks and denies every
+// action without asking, with a reason the person can act on, also after a restart.
+func TestLockedDeviceDeniesWithoutAskingManar(t *testing.T) {
+	dir := t.TempDir()
+	Configure(dir)
+	b := &stubBackend{result: hostclient.AuthorizeResult{Decision: "ALLOW"}, status: "APPROVED"}
+	r := relayFor(t, b)
+	locked := relayLocked(t, dir, "device_revoked")
+	v := r.Decide(context.Background(), "cursor", "shell", "ls", 5*time.Second)
+	if v.Allow || !strings.Contains(v.Reason, "device_locked") || b.asked.Load() != 0 {
+		t.Fatalf("locked authorize: %+v asked=%d", v, b.asked.Load())
+	}
+	locked(false)
+	if v := r.Decide(context.Background(), "cursor", "shell", "ls", 5*time.Second); !v.Allow {
+		t.Fatalf("unlocked authorize: %+v", v)
+	}
+}
+
+// relayLocked locks the device the way hostclient does on a 423 reply (a config poll answered
+// 423) and returns a switch to unlock it (a good config).
+func relayLocked(t *testing.T, dir, code string) func(bool) {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.Header.Get("X-Unlock"), "1") {
+			_, _ = w.Write([]byte(`{"status":"APPROVED"}`))
+			return
+		}
+		w.WriteHeader(423)
+		_, _ = w.Write([]byte(`{"code":"` + code + `"}`))
+	}))
+	t.Cleanup(srv.Close)
+	c := hostclient.NewForTest(dir, srv.URL, srv.Client())
+	_, _ = c.Config(context.Background())
+	if hostclient.LockedCode(dir) != code {
+		t.Fatal("setup: not locked")
+	}
+	return func(on bool) {
+		if !on {
+			hc := &http.Client{Transport: unlockHeader{srv.Client().Transport}}
+			if _, err := hostclient.NewForTest(dir, srv.URL, hc).Config(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+}
+
+type unlockHeader struct{ rt http.RoundTripper }
+
+func (u unlockHeader) RoundTrip(r *http.Request) (*http.Response, error) {
+	r.Header.Set("X-Unlock", "1")
+	return u.rt.RoundTrip(r)
+}

@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
 func TestHashedMachineIDIsStableAndAcceptedByTheAPI(t *testing.T) {
@@ -154,5 +156,44 @@ func TestInstallTakesTheCodeFromTheEnvironment(t *testing.T) {
 	}
 	if _, set := os.LookupEnv(installCodeEnv); set {
 		t.Fatal("the code is still in the environment for child processes")
+	}
+}
+
+// One laptop, two workspaces: the person is asked in plain words, and only "y" or "yes" moves it.
+func TestMoveQuestionNeedsAnExplicitYes(t *testing.T) {
+	e := &hostclient.OtherWorkspaceError{From: "acme", To: "globex"}
+	for in, want := range map[string]bool{"y\n": true, "YES\n": true, "\n": false, "n\n": false, "": false, "sure\n": false} {
+		var out strings.Builder
+		if got := askMove(e, strings.NewReader(in), &out); got != want {
+			t.Errorf("%q: got %v", in, got)
+		}
+		if !strings.Contains(out.String(), `moves from "acme" to "globex"`) || !strings.Contains(out.String(), "rules will apply") {
+			t.Fatalf("question: %s", out.String())
+		}
+	}
+	msg := moveRefused(e).Error()
+	for _, want := range []string{"--confirm-move", "MANAR_CONFIRM_MOVE=1", `"acme"`, `"globex"`} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("refusal lacks %q: %s", want, msg)
+		}
+	}
+}
+
+func TestKeylessEnrolRefusesAComputerOfAnotherWorkspace(t *testing.T) {
+	base := t.TempDir()
+	if err := refuseOtherWorkspace(base, "acme"); err != nil {
+		t.Fatalf("not enrolled: %v", err)
+	}
+	_ = os.MkdirAll(base+"/host", 0o700)
+	_ = os.WriteFile(base+"/host/host.json", []byte(`{"tenantSlug":"personal-1"}`), 0o600)
+	if err := refuseOtherWorkspace(base, "personal-1"); err != nil {
+		t.Fatalf("same workspace: %v", err)
+	}
+	if err := refuseOtherWorkspace(base, "acme"); err == nil || !strings.Contains(err.Error(), "personal-1") {
+		t.Fatalf("err = %v", err)
+	}
+	_ = hostclient.MarkRemoved(base)
+	if err := refuseOtherWorkspace(base, "acme"); err != nil {
+		t.Fatalf("a removed enrolment must not block: %v", err)
 	}
 }

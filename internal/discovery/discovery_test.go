@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -108,36 +109,48 @@ func TestModuleReportsOnChangeNotEveryPoll(t *testing.T) {
 	}
 }
 
-type refusingAPI struct{ fakeAPI }
-
-func (r *refusingAPI) Config(context.Context) (*hostclient.Config, error) {
-	return nil, &hostclient.StatusError{Code: 401, Message: "Certificate is unknown or has been revoked"}
+type refusingAPI struct {
+	fakeAPI
+	err error
 }
 
-func TestModuleTellsProtectWhenManarKeepsRefusingTheDevice(t *testing.T) {
-	u := fakeHome(t, ".cursor")
-	p := probe()
-	var mu sync.Mutex
-	var statuses []string
-	SetReconciler(func(_ context.Context, _ []Found, cfg *hostclient.Config) map[string]State {
+func (r *refusingAPI) Config(context.Context) (*hostclient.Config, error) { return nil, r.err }
+
+// A refused, unreachable or misrouted device keeps its protection: no reply other than the
+// authenticated "removed" (410 device_removed, handled by the daemon) may take the hooks out. A
+// revoked or stolen laptop answered 401 used to unprotect itself after three refusals.
+func TestModuleNeverUnprotectsOnRefusalsOrNetworkErrors(t *testing.T) {
+	for _, err := range []error{
+		&hostclient.StatusError{Code: 401, Message: "Certificate is unknown or has been revoked"},
+		&hostclient.StatusError{Code: 403, Message: "forbidden (a proxy)"},
+		&hostclient.StatusError{Code: 423, APICode: "device_revoked"},
+		&hostclient.StatusError{Code: 503},
+		errors.New("dial tcp: connection refused"),
+	} {
+		u := fakeHome(t, ".cursor")
+		p := probe()
+		var mu sync.Mutex
+		calls := 0
+		// Only this module's calls count (an earlier test's module may still be finishing): its
+		// config would be the "revoked" one the module made up, since Manar never sent one.
+		SetReconciler(func(_ context.Context, _ []Found, cfg *hostclient.Config) map[string]State {
+			if cfg.Status == StatusRevoked {
+				mu.Lock()
+				calls++
+				mu.Unlock()
+			}
+			return nil
+		})
+		m := &Module{Poll: 2 * time.Millisecond, Report: time.Hour, Probe: &p, Users: func() []User { return []User{u} }, GOOS: "linux"}
+		ctx, cancel := context.WithCancel(context.Background())
+		go m.run(ctx, &refusingAPI{err: err})
+		time.Sleep(60 * time.Millisecond)
+		cancel()
+		SetReconciler(nil)
 		mu.Lock()
-		statuses = append(statuses, cfg.Status)
+		if calls != 0 {
+			t.Errorf("%v: protection was reconciled %d times without a config; it must be left as it is", err, calls)
+		}
 		mu.Unlock()
-		return nil
-	})
-	defer SetReconciler(nil)
-	m := &Module{Poll: 5 * time.Millisecond, Report: time.Hour, Probe: &p, Users: func() []User { return []User{u} }, GOOS: "linux"}
-	ctx, cancel := context.WithCancel(context.Background())
-	go m.run(ctx, &refusingAPI{})
-	time.Sleep(100 * time.Millisecond)
-	cancel()
-	mu.Lock()
-	defer mu.Unlock()
-	found := false
-	for _, st := range statuses {
-		found = found || st == StatusRevoked
-	}
-	if !found {
-		t.Fatalf("got %v, want a revoked report after three refusals", statuses)
 	}
 }

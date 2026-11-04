@@ -55,6 +55,10 @@ type fileID struct {
 type gateGrant struct {
 	Until  time.Time `json:"until,omitempty"`
 	Always bool      `json:"always,omitempty"`
+	// ID is the console request behind an "8 hours" or "Always" grant: it counts only while the
+	// server lists it (vault.ServerAllows). Once is the 60-second "allow once" window.
+	ID   string `json:"id,omitempty"`
+	Once bool   `json:"once,omitempty"`
 }
 
 // GateKey names what a grant covers: the user the program runs as, the tool, the file class, the
@@ -158,7 +162,7 @@ func (g *Gate) allows(k GateKey) bool {
 	defer g.mu.Unlock()
 	g.load()
 	gr, ok := g.grants[k.s()]
-	return ok && (gr.Always || g.now().Before(gr.Until))
+	return ok && (gr.Always || g.now().Before(gr.Until)) && (gr.Once || vault.ServerAllows(gr.ID, g.now()))
 }
 
 // ask starts the question for k unless one is open or the person just said no. It returns at once.
@@ -186,16 +190,16 @@ func (g *Gate) run(k GateKey) {
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	// Owner is the user the program runs as: that user's prompt, nobody else's.
-	d, err := g.Approver.Ask(ctx, vault.Request{Kind: "file", Ref: k.Class, Owner: strconv.Itoa(k.UID), Program: k.Exe, SHA: k.SHA})
+	d, id, err := vault.AskGrant(ctx, g.Approver, vault.Request{Kind: "file", Ref: k.Class, Owner: strconv.Itoa(k.UID), Program: k.Exe, SHA: k.SHA})
 	g.mu.Lock()
 	delete(g.inflight, k.s())
 	switch {
 	case err == nil && d == vault.AllowOnce:
-		g.grants[k.s()] = gateGrant{Until: g.now().Add(onceWindow)}
+		g.grants[k.s()] = gateGrant{Until: g.now().Add(onceWindow), Once: true}
 	case err == nil && d == vault.Allow8h:
-		g.grants[k.s()] = gateGrant{Until: g.now().Add(8 * time.Hour)}
+		g.grants[k.s()] = gateGrant{Until: g.now().Add(8 * time.Hour), ID: id}
 	case err == nil && d == vault.AllowAlways:
-		g.grants[k.s()] = gateGrant{Always: true}
+		g.grants[k.s()] = gateGrant{Always: true, ID: id}
 	default:
 		d = vault.Deny
 	}

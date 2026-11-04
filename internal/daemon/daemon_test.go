@@ -213,3 +213,55 @@ func TestRemovedDeviceReturnsWhenItEnrolsAgain(t *testing.T) {
 		t.Fatal("Run did not return after a new enrolment")
 	}
 }
+
+// polling calls the API like every real module does (config every few milliseconds).
+type polling struct{ unprotectFake }
+
+func (p *polling) Start(ctx context.Context, c *hostclient.Client) error {
+	p.starts.Add(1)
+	for ctx.Err() == nil {
+		_, _ = c.Config(ctx)
+		time.Sleep(2 * time.Millisecond)
+	}
+	return nil
+}
+
+// Founder decision, 4 Nov 2026: revoking, suspending or a broken network never switches protection
+// off. Only the authenticated 410 device_removed reply (TestRemovedDevice...) or a local uninstall
+// takes Manar's hooks out; 401, 403 (a proxy), 423 (locked), 5xx and network errors do not.
+func TestRefusalsAndNetworkErrorsNeverUnprotect(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"401", 401, `{"message":"Certificate is unknown or has been revoked"}`},
+		{"403 from a proxy", 403, `<html>forbidden</html>`},
+		{"423 revoked", 423, `{"statusCode":423,"code":"device_revoked"}`},
+		{"423 suspended", 423, `{"statusCode":423,"code":"account_suspended"}`},
+		{"503", 503, `{"reason":"enforcement_dependency_unavailable"}`},
+		{"network", 0, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			reset()
+			retryPause = 10 * time.Millisecond
+			m := &polling{unprotectFake{fake: fake{name: "m"}}}
+			Register(m)
+			var hook atomic.Int32
+			RegisterOnRemoved("hook", func(context.Context) error { hook.Add(1); return nil })
+			c := removedServerClient(t, tc.status, tc.body)
+			if tc.status == 0 {
+				c = hostclient.NewForTest(t.TempDir(), "http://127.0.0.1:1", http.DefaultClient)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			_ = Run(ctx, c)
+			if m.unprotected.Load() != 0 || hook.Load() != 0 || hostclient.IsMarkedRemoved(c.StateDir()) {
+				t.Fatalf("unprotected=%d hook=%d removed=%v", m.unprotected.Load(), hook.Load(), hostclient.IsMarkedRemoved(c.StateDir()))
+			}
+			if m.starts.Load() == 0 {
+				t.Fatal("the module never ran")
+			}
+		})
+	}
+}

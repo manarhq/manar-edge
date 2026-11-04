@@ -193,6 +193,12 @@ func cmdHostEnrol(base string, args []string, p hostPlatform, out io.Writer) err
 	if err := requireAdmin(); err != nil {
 		return err
 	}
+	// A computer enrolled in another workspace is not moved by IT behind the person's back (founder
+	// decision, 4 Nov 2026). ponytail: the confirmed move for key-less enrolment is Phase B (EC-7);
+	// until then it is refused.
+	if err := refuseOtherWorkspace(base, *tenant); err != nil {
+		return err
+	}
 	api, err := checkAPIURL(*server)
 	if err != nil && *plainHTTP {
 		if u, perr := url.Parse(strings.TrimRight(*server, "/")); perr == nil && u.Scheme == "http" && u.Host != "" {
@@ -254,6 +260,22 @@ func cmdHostEnrol(base string, args []string, p hostPlatform, out io.Writer) err
 		resp.HostID, id, resp.Status, hostKeyType, dir)
 	if resp.Status != "APPROVED" {
 		fmt.Fprintln(out, "waiting for an admin: approve it in the console under Fleet, Hosts")
+	}
+	return nil
+}
+
+// refuseOtherWorkspace fails when this computer is enrolled (and not removed) in another workspace.
+func refuseOtherWorkspace(base, tenant string) error {
+	b, err := os.ReadFile(filepath.Join(base, hostStateDir, fileHostState))
+	if err != nil || hostclient.IsMarkedRemoved(base) {
+		return nil
+	}
+	var cur struct {
+		TenantSlug string `json:"tenantSlug"`
+	}
+	if json.Unmarshal(b, &cur) == nil && cur.TenantSlug != "" && cur.TenantSlug != tenant {
+		return fmt.Errorf("this computer is enrolled in workspace %q, not %q: nothing was changed. "+
+			"Ask the person to move it with `manar-edge install --confirm-move`, or uninstall Manar first", cur.TenantSlug, tenant)
 	}
 	return nil
 }
