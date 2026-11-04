@@ -93,12 +93,43 @@ func (m *Module) Start(ctx context.Context, c *hostclient.Client) error {
 		case err := <-errc:
 			return err
 		case <-t.C:
+			syncGrants(ctx, c, v)
 			runInstructions(ctx, c, v)
 			srv.Ensure() // an agent that died is listening again within one interval
 			if !quiesced.Load() && time.Since(last) > 5*time.Minute {
 				last = time.Now()
 				offerKeys(ctx, c, v)
 			}
+		}
+	}
+}
+
+// syncGrants takes the server's standing grants from the config. Refused (423, the device is
+// locked): no standing grant counts, and a revoked device (lost or stolen) wipes its vault. Any
+// other failure keeps the last list, which lapses after Lease.
+func syncGrants(ctx context.Context, c *hostclient.Client, v *Vault) {
+	cfg, err := c.Config(ctx)
+	if err == nil {
+		var list []hostclient.VaultGrant
+		if cfg.VaultGrants != nil {
+			list = *cfg.VaultGrants
+			if list == nil {
+				list = []hostclient.VaultGrant{}
+			}
+		}
+		SetServerGrants(list, time.Now())
+		return
+	}
+	code := hostclient.LockedCode(c.StateDir())
+	if code == "" {
+		return
+	}
+	SetServerGrants(nil, time.Time{})
+	if code == "device_revoked" {
+		if n, err := v.Wipe(); err != nil {
+			log.Printf("manar-edge: vault: wiping a revoked device: %v", err)
+		} else if n > 0 {
+			log.Printf("manar-edge: vault: this device was revoked by its workspace: %d vault entries deleted", n)
 		}
 	}
 }
@@ -214,6 +245,13 @@ func sendEvent(ctx context.Context, c *hostclient.Client, typ, process string, r
 type consoleApprover struct{ c *hostclient.Client }
 
 func (a consoleApprover) Ask(ctx context.Context, r Request) (Decision, error) {
+	d, _, err := a.AskGrant(ctx, r)
+	return d, err
+}
+
+// AskGrant is Ask plus the console request's id: a standing grant is matched with the server's list
+// by it.
+func (a consoleApprover) AskGrant(ctx context.Context, r Request) (Decision, string, error) {
 	var created struct{ ID string }
 	// The console sees the full path (home masked) and the hash of the binary, not just a name.
 	body := map[string]string{"kind": r.Kind, "ref": r.Ref, "program": filepath.Base(r.Program),
@@ -231,7 +269,7 @@ func (a consoleApprover) Ask(ctx context.Context, r Request) (Decision, error) {
 		body["program"] += " (a yes counts once)"
 	}
 	if err := a.c.Do(ctx, http.MethodPost, "/secrets/access", body, &created); err != nil {
-		return Deny, err
+		return Deny, "", err
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
@@ -240,11 +278,11 @@ func (a consoleApprover) Ask(ctx context.Context, r Request) (Decision, error) {
 	for {
 		var st struct{ Status string }
 		if err := a.c.Do(ctx, http.MethodGet, "/secrets/access/"+created.ID, nil, &st); err == nil && st.Status != "PENDING" {
-			return Decision(st.Status), nil
+			return Decision(st.Status), created.ID, nil
 		}
 		select {
 		case <-ctx.Done():
-			return Deny, ctx.Err()
+			return Deny, "", ctx.Err()
 		case <-t.C:
 		}
 	}

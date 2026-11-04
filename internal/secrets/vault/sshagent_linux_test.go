@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/manarhq/manar-edge/internal/hostclient"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -30,6 +31,12 @@ type answers struct {
 func (a *answers) Ask(context.Context, Request) (Decision, error) {
 	a.calls.Add(1)
 	return a.d.Load().(Decision), nil
+}
+
+// AskGrant: every answer comes from console request "rig", which the server lists (see below).
+func (a *answers) AskGrant(ctx context.Context, r Request) (Decision, string, error) {
+	d, err := a.Ask(ctx, r)
+	return d, "rig", err
 }
 
 type rig struct {
@@ -153,7 +160,10 @@ func TestMoveSignAskDenyRestoreByteIdentical(t *testing.T) {
 	if err != nil || r.pub.Verify(data, sig) != nil {
 		t.Fatalf("allowed program must sign: %v", err)
 	}
-	// "Always" is remembered for that exact binary and user: no second question.
+	// "Always" is remembered for that exact binary and user while the console lists it: no second
+	// question.
+	SetServerGrants([]hostclient.VaultGrant{{ID: "rig"}}, time.Now())
+	t.Cleanup(func() { SetServerGrants(nil, time.Time{}) })
 	r.ans.d.Store(AllowAlways)
 	_, _ = r.client().Sign(r.pub, data)
 	n := r.ans.calls.Load()

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"log"
 	"runtime"
 	"sort"
@@ -15,8 +14,8 @@ import (
 	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
-// StatusRevoked is the status the module reports to the reconciler when Manar keeps refusing the
-// device's certificate.
+// StatusRevoked was the status the module reported when Manar kept refusing the device. It is no
+// longer sent: a refused device keeps its protection. Kept so a stale caller cannot unprotect.
 const StatusRevoked = "REVOKED"
 
 // State is what protection did for one tool across the accounts that use it.
@@ -110,7 +109,6 @@ func (m *Module) run(ctx context.Context, c api) error {
 	}
 	var last []byte
 	var lastAt time.Time
-	refused := 0
 	t := time.NewTicker(poll)
 	defer t.Stop()
 	for {
@@ -118,17 +116,10 @@ func (m *Module) run(ctx context.Context, c api) error {
 		var states map[string]State
 		cfg, cerr := c.Config(ctx)
 		if cerr != nil && ctx.Err() == nil {
+			// No config (refused, locked, unreachable, a proxy in the way): protection stays exactly
+			// as it is and the hooks keep denying what they cannot ask about (fail closed). Only the
+			// authenticated "removed" reply (410 device_removed) or a local uninstall takes them out.
 			log.Printf("manar-edge: discovery: config: %v", cerr)
-			// Manar refuses this device's certificate (revoked or rejected): after three refusals in
-			// a row take Manar's hooks out, so the tools are not left denying everything.
-			var se *hostclient.StatusError
-			if errors.As(cerr, &se) && (se.Code == 401 || se.Code == 403) {
-				if refused++; refused >= 3 {
-					cfg = &hostclient.Config{Status: StatusRevoked}
-				}
-			}
-		} else if cerr == nil {
-			refused = 0
 		}
 		if r := currentReconciler(); r != nil && cfg != nil {
 			states = r(ctx, found, cfg)

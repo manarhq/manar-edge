@@ -10,12 +10,14 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -262,6 +264,7 @@ func TestOnly410WithTheDeviceRemovedCodeCountsAsRemoval(t *testing.T) {
 		{"401", 401, `{"code":"device_removed"}`, false},
 		{"403", 403, `{"code":"device_removed"}`, false},
 		{"500", 500, `{"code":"device_removed"}`, false},
+		{"423 locked", 423, `{"code":"device_revoked"}`, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := removedClient(t, tc.status, tc.body)
@@ -304,5 +307,184 @@ func TestRemovedMarkSurvivesAndEnrolClearsIt(t *testing.T) {
 	}
 	if err := ClearRemoved(dir); err != nil {
 		t.Fatalf("clearing twice: %v", err)
+	}
+}
+
+// 423 is Manar refusing a genuine device (revoked, suspended, workspace deleted): the device
+// remembers it, keeps protecting, stops sending anything but its config poll, and is unlocked by
+// the first good config. 401 and 403 (a proxy, a misconfiguration) neither lock nor unprotect.
+func TestLockedReplyIsRememberedStopsSyncingAndAGoodConfigUnlocks(t *testing.T) {
+	var mu sync.Mutex
+	status, body, hits := 423, `{"statusCode":423,"code":"device_revoked"}`, map[string]int{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		hits[r.URL.Path]++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	c := &Client{Info: &Info{}, http: srv.Client(), base: srv.URL, stateDir: dir, removed: make(chan struct{})}
+
+	if _, err := c.Config(context.Background()); err == nil || IsRemoved(err) {
+		t.Fatalf("err = %v", err)
+	}
+	if got := LockedCode(dir); got != "device_revoked" {
+		t.Fatalf("LockedCode = %q", got)
+	}
+	// Nothing else leaves the device while it is locked.
+	err := c.Inventory(context.Background(), nil, nil)
+	var se *StatusError
+	if !errors.As(err, &se) || !se.Locked() {
+		t.Fatalf("inventory while locked: %v", err)
+	}
+	mu.Lock()
+	if hits["/host/v1/inventory"] != 0 {
+		t.Fatal("inventory was sent while locked")
+	}
+	mu.Unlock()
+	select {
+	case <-c.Removed():
+		t.Fatal("a locked device must not count as removed")
+	default:
+	}
+	// A new client (a restart) is still locked.
+	if LockedCode(dir) == "" {
+		t.Fatal("lock not on disk")
+	}
+	// The workspace lets it back in: the first good config unlocks it.
+	mu.Lock()
+	status, body = 200, `{"hostId":"h","status":"APPROVED"}`
+	mu.Unlock()
+	if _, err := c.Config(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if LockedCode(dir) != "" {
+		t.Fatal("still locked after a good config")
+	}
+
+	// 401 and 403 neither lock nor unprotect.
+	for _, code := range []int{401, 403} {
+		mu.Lock()
+		status, body = code, `{"code":"device_revoked"}`
+		mu.Unlock()
+		_, _ = c.Config(context.Background())
+		if LockedCode(dir) != "" || IsMarkedRemoved(dir) {
+			t.Fatalf("%d changed the device state", code)
+		}
+	}
+}
+
+// moveServer is a Manar that signs any CSR and records POST /host/v1/moved with the caller's SAN.
+func moveServer(t *testing.T) (url string, httpc *http.Client, moved *[]string, keys *[]string) {
+	t.Helper()
+	ca := newCA(t)
+	var mu sync.Mutex
+	moved, keys = &[]string{}, &[]string{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/hosts/register", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]string
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		blk, _ := pem.Decode([]byte(body["csr"]))
+		csr, _ := x509.ParseCertificateRequest(blk.Bytes)
+		der, _ := x509.MarshalPKIXPublicKey(csr.PublicKey)
+		mu.Lock()
+		*keys = append(*keys, string(der))
+		mu.Unlock()
+		certPEM := ca.sign(t, csr.PublicKey, &x509.Certificate{
+			SerialNumber: big.NewInt(time.Now().UnixNano()), Subject: pkix.Name{CommonName: "host"}, URIs: csr.URIs,
+			NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+			KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		})
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"hostId": "h-" + csr.URIs[0].Host, "status": "APPROVED", "certificatePem": certPEM, "caChainPem": ca.pem,
+		})
+	})
+	mux.HandleFunc("POST /host/v1/moved", func(w http.ResponseWriter, r *http.Request) {
+		if len(r.TLS.PeerCertificates) == 0 {
+			http.Error(w, "no cert", 401)
+			return
+		}
+		mu.Lock()
+		*moved = append(*moved, r.TLS.PeerCertificates[0].URIs[0].String())
+		mu.Unlock()
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewUnstartedServer(mux)
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	srvKey, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	srvCert := ca.sign(t, &srvKey.PublicKey, &x509.Certificate{
+		SerialNumber: big.NewInt(3), Subject: pkix.Name{CommonName: "localhost"}, DNSNames: []string{"localhost"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})
+	srvKeyDER, _ := x509.MarshalPKCS8PrivateKey(srvKey)
+	pair, err := tls.X509KeyPair([]byte(srvCert), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: srvKeyDER}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.TLS = &tls.Config{Certificates: []tls.Certificate{pair}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pool}
+	srv.StartTLS()
+	t.Cleanup(srv.Close)
+	return strings.Replace(srv.URL, "127.0.0.1", "localhost", 1),
+		&http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}, moved, keys
+}
+
+// One laptop, two workspaces (founder decision, 4 Nov 2026): installing for another workspace
+// never silently replaces the first. Without a confirmation nothing is sent; with one the device
+// gets a NEW key for the new workspace and tells the old one it moved, signed with its old
+// certificate, so the old workspace shows it as moved instead of approved and silent.
+func TestEnrolForAnotherWorkspaceNeedsConfirmationAndUsesANewKey(t *testing.T) {
+	url, httpc, moved, keys := moveServer(t)
+	dir := t.TempDir()
+	in := EnrolInput{StateDir: dir, APIURL: url, HostURL: url, InstallKey: "ABCDEFGHJK", TenantSlug: "acme",
+		MachineID: "m-1", Hostname: "laptop", OS: "linux", HTTP: httpc}
+	if _, err := Enrol(context.Background(), in); err != nil {
+		t.Fatal(err)
+	}
+	oldKey, _ := os.ReadFile(filepath.Join(Dir(dir), fileKey))
+
+	in.TenantSlug = "globex"
+	_, err := Enrol(context.Background(), in)
+	var other *OtherWorkspaceError
+	if !errors.As(err, &other) || other.From != "acme" || other.To != "globex" {
+		t.Fatalf("err = %v", err)
+	}
+	if len(*keys) != 1 {
+		t.Fatal("a registration was sent without the person's confirmation")
+	}
+	if b, _ := os.ReadFile(filepath.Join(Dir(dir), fileInfo)); !strings.Contains(string(b), `"acme"`) {
+		t.Fatal("host.json changed without confirmation")
+	}
+
+	in.ConfirmMove = true
+	info, err := Enrol(context.Background(), in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.TenantSlug != "globex" || info.MovedFrom != "acme" {
+		t.Fatalf("info = %+v", info)
+	}
+	// The old workspace is told only when the caller says so (after it stopped the service).
+	if len(*moved) != 0 {
+		t.Fatal("the old workspace was told before the service was stopped")
+	}
+	if !info.TellOldWorkspace(context.Background(), dir) {
+		t.Fatal("old workspace not told")
+	}
+	newKey, _ := os.ReadFile(filepath.Join(Dir(dir), fileKey))
+	if string(newKey) == string(oldKey) || len(*keys) != 2 || (*keys)[0] == (*keys)[1] {
+		t.Fatal("the device key was reused across workspaces")
+	}
+	if len(*moved) != 1 || (*moved)[0] != "host://acme/m-1" {
+		t.Fatalf("old workspace told: %v", *moved)
+	}
+	// The new files work together.
+	if _, err := New(dir); err != nil {
+		t.Fatal(err)
 	}
 }

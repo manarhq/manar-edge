@@ -73,6 +73,8 @@ type Approver interface {
 type grant struct {
 	Until  time.Time `json:"until,omitempty"`
 	Always bool      `json:"always,omitempty"`
+	// ID is the console request that gave it; the grant counts only while the server lists it.
+	ID string `json:"id,omitempty"`
 }
 
 type flight struct {
@@ -91,6 +93,7 @@ type Broker struct {
 
 	mu       sync.Mutex
 	inflight map[string]*flight
+	sync     func() // tests: refresh the server list before a lookup
 }
 
 func (b *Broker) now() time.Time {
@@ -146,9 +149,12 @@ func (b *Broker) Authorize(ctx context.Context, r Request) error {
 		}
 	}
 	key := grantKey(r)
+	if b.sync != nil {
+		b.sync()
+	}
 	b.mu.Lock()
 	g, ok := b.grants()[key]
-	if !OnceOnly(r) && ok && (g.Always || b.now().Before(g.Until)) {
+	if !OnceOnly(r) && ok && (g.Always || b.now().Before(g.Until)) && ServerAllows(g.ID, b.now()) {
 		b.mu.Unlock()
 		return nil
 	}
@@ -171,21 +177,21 @@ func (b *Broker) Authorize(ctx context.Context, r Request) error {
 	b.inflight[key] = f
 	b.mu.Unlock()
 
-	d, err := b.A.Ask(ctx, r) // no lock held while the person decides
+	d, id, err := AskGrant(ctx, b.A, r) // no lock held while the person decides
 	if err != nil || (d != AllowOnce && d != Allow8h && d != AllowAlways) {
 		d = Deny
 	}
 
 	b.mu.Lock()
-	if !OnceOnly(r) { // never keep a standing grant for a binary we could not pin, or for an AI tool's call
+	if !OnceOnly(r) && id != "" { // never keep a standing grant for a binary we could not pin, for an AI tool's call, or the server cannot name
 		switch d {
 		case Allow8h:
 			m := b.grants()
-			m[key] = grant{Until: b.now().Add(8 * time.Hour)}
+			m[key] = grant{Until: b.now().Add(8 * time.Hour), ID: id}
 			_ = b.saveGrants(m)
 		case AllowAlways:
 			m := b.grants()
-			m[key] = grant{Always: true}
+			m[key] = grant{Always: true, ID: id}
 			_ = b.saveGrants(m)
 		}
 	}

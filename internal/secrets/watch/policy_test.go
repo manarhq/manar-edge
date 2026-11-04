@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/manarhq/manar-edge/internal/hostclient"
 	"github.com/manarhq/manar-edge/internal/secrets/vault"
 )
 
@@ -63,6 +64,31 @@ func (f *fakeApprover) Ask(ctx context.Context, r vault.Request) (vault.Decision
 	return f.d, nil
 }
 func (f *fakeApprover) n() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.calls) }
+
+// AskGrant: every answer comes from console request "w1", which the server lists (TestMain).
+func (f *fakeApprover) AskGrant(ctx context.Context, r vault.Request) (vault.Decision, string, error) {
+	d, err := f.Ask(ctx, r)
+	return d, "w1", err
+}
+
+func TestMain(m *testing.M) {
+	vault.SetServerGrants([]hostclient.VaultGrant{{ID: "w1"}}, time.Now())
+	os.Exit(m.Run())
+}
+
+// A standing grant withdrawn in the console (the server's list no longer names it) is asked again.
+func TestWithdrawnGrantIsAskedAgain(t *testing.T) {
+	defer vault.SetServerGrants([]hostclient.VaultGrant{{ID: "w1"}}, time.Now())
+	ap := &fakeApprover{d: vault.AllowAlways}
+	var exe string
+	g := gateWith(t, ap, "", &exe)
+	decideEventually(t, g, key1)
+	vault.SetServerGrants([]hostclient.VaultGrant{}, time.Now())
+	if g.Decide(1, key1) {
+		t.Fatal("a withdrawn grant still let the program through")
+	}
+	eventually(t, func() bool { return ap.n() == 2 })
+}
 
 func eventually(t *testing.T, f func() bool) {
 	t.Helper()

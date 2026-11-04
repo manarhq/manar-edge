@@ -21,7 +21,7 @@ var version = "dev"
 const usage = `usage:
   manar-edge enroll --api <url> [--state-dir D]   (token on stdin or in MANAR_ENROLL_TOKEN)
   manar-edge enrol --server <url> --tenant <slug> [--machine-id ID]   (Windows, domain-joined: computer certificate)
-  manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL]   (personal device: enrol and install the service; the code may come in MANAR_INSTALL_CODE)
+  manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL] [--confirm-move]   (personal device: enrol and install the service; the code may come in MANAR_INSTALL_CODE)
   manar-edge uninstall   (stop the service, restore what Manar changed, remove its files)
   manar-edge service run|install|remove
   manar-edge secret aws <profile>   (credential_process helper for vaulted AWS keys)

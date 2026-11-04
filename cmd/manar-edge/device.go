@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -38,14 +39,66 @@ var (
 // installCodeEnv carries the install code from the one-liner.
 const installCodeEnv = "MANAR_INSTALL_CODE"
 
+// confirmMoveEnv=1 confirms moving the computer to another workspace (the one-liner runs without a
+// terminal to ask in: `curl ... | sudo MANAR_CONFIRM_MOVE=1 sh`).
+const confirmMoveEnv = "MANAR_CONFIRM_MOVE"
+
+// askMove asks whether to move the computer to the new workspace; only "y" or "yes" says so.
+func askMove(e *hostclient.OtherWorkspaceError, in io.Reader, out io.Writer) bool {
+	fmt.Fprintf(out, "This computer moves from %q to %q: %q's rules will apply to the AI tools on it, "+
+		"and %q will show it as moved. Continue? [y/N] ", e.From, e.To, e.To, e.From)
+	line, _ := bufio.NewReader(in).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return true
+	}
+	return false
+}
+
+// moveRefused is the answer when nobody can be asked (no terminal).
+func moveRefused(e *hostclient.OtherWorkspaceError) error {
+	return fmt.Errorf("%v. Nothing was changed. To move it, run the install again with --confirm-move "+
+		"(for the one-line installer: `curl ... | sudo MANAR_CONFIRM_MOVE=1 sh`, or set $env:MANAR_CONFIRM_MOVE=1 "+
+		"first in PowerShell), or uninstall Manar first", e)
+}
+
+func strconvQuote(s string) string { return fmt.Sprintf("%q", s) }
+
+// openPrompt finds the person's terminal: standard input when it is one, otherwise (the one-liner
+// pipes the script into sh) the controlling terminal on Linux. ok is false when there is none.
+func openPrompt() (io.ReadWriteCloser, bool) {
+	if isTerminal(os.Stdin) {
+		return struct {
+			io.Reader
+			io.Writer
+			io.Closer
+		}{os.Stdin, os.Stderr, io.NopCloser(nil)}, true
+	}
+	if runtime.GOOS == "windows" {
+		return nil, false
+	}
+	f, err := os.OpenFile("/dev/tty", os.O_RDWR, 0)
+	if err != nil || !isTerminal(f) {
+		if f != nil {
+			f.Close()
+		}
+		return nil, false
+	}
+	return f, true
+}
+
 func cmdInstall(base string, args []string, out io.Writer) error {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	code := fs.String("code", "", "install code from the console (Add device)")
 	tenant := fs.String("tenant", "", "tenant slug (with a short code; not needed for a mik_ key)")
 	api := fs.String("api", defaultAPIURL, "Manar API base URL")
 	hostURL := fs.String("host-url", defaultHostURL, "Manar device (mTLS) URL")
+	confirmMove := fs.Bool("confirm-move", false, "move this computer from the workspace it is enrolled in (its rules stop applying, the new workspace's apply)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if os.Getenv(confirmMoveEnv) == "1" {
+		*confirmMove = true
 	}
 	// The one-liner passes the code in the environment: a command line is visible to every local
 	// user while the install runs, the environment of an elevated process is not. Not passed on to
@@ -57,7 +110,7 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 		}
 	}
 	if *code == "" || fs.NArg() != 0 {
-		return errors.New("usage: manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL] (or the code in " + installCodeEnv + ")")
+		return errors.New("usage: manar-edge install --code <code> --tenant <slug> [--api URL] [--host-url URL] [--confirm-move] (or the code in " + installCodeEnv + ")")
 	}
 	if err := requireAdmin(); err != nil {
 		return err
@@ -79,10 +132,26 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	fmt.Fprintln(out, "Registering this computer with Manar...")
-	info, err := hostclient.Enrol(ctx, hostclient.EnrolInput{
+	in := hostclient.EnrolInput{
 		StateDir: base, APIURL: *api, HostURL: *hostURL, InstallKey: strings.TrimSpace(*code), TenantSlug: *tenant,
-		MachineID: mid, Hostname: hostname, OS: osLabel(),
-	})
+		MachineID: mid, Hostname: hostname, OS: osLabel(), ConfirmMove: *confirmMove,
+	}
+	info, err := hostclient.Enrol(ctx, in)
+	var other *hostclient.OtherWorkspaceError
+	if errors.As(err, &other) {
+		// Ask the person at the keyboard; a script (no terminal) is refused with what to do.
+		tty, ok := openPrompt()
+		if !ok {
+			return moveRefused(other)
+		}
+		yes := askMove(other, tty, tty)
+		tty.Close()
+		if !yes {
+			return errors.New("nothing was changed: this computer stays in workspace " + strconvQuote(other.From))
+		}
+		in.ConfirmMove = true
+		info, err = hostclient.Enrol(ctx, in)
+	}
 	if err != nil {
 		return err
 	}
@@ -90,6 +159,14 @@ func cmdInstall(base string, args []string, out io.Writer) error {
 	// or leave the old binary running.
 	if err := deviceServiceStop(); err != nil {
 		return fmt.Errorf("stopping the running service: %w", err)
+	}
+	// A move: only now, with the old service stopped, tell the old workspace (told earlier, it
+	// would answer the old service "removed" and that service would take protection out).
+	if info.MovedFrom != "" {
+		fmt.Fprintf(out, "This computer moved from workspace %q to %q, with a new device key.\n", info.MovedFrom, info.TenantSlug)
+		if !info.TellOldWorkspace(context.Background(), base) {
+			fmt.Fprintf(out, "Workspace %q could not be told; an admin there can remove this computer from its device list.\n", info.MovedFrom)
+		}
 	}
 	exe, err := installedBinary()
 	if err != nil {

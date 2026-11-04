@@ -38,14 +38,17 @@ func TestReconcileFollowsApprovalAndTheOwnersSwitch(t *testing.T) {
 	if read(t, hooks) != orig {
 		t.Fatal("re-protected while the owner has it off")
 	}
-	// A revoked device gets its tools back, even with the owner's switch on.
+	// A revoked or rejected device keeps its hooks: only the authenticated "removed" reply (410
+	// device_removed, the daemon's unprotect path) or a local uninstall gives the tools back.
 	reconcile(context.Background(), found, &hostclient.Config{Status: "APPROVED"})
 	if !strings.Contains(read(t, hooks), "hook-tool") {
 		t.Fatal("setup")
 	}
-	reconcile(context.Background(), found, &hostclient.Config{Status: "REVOKED"})
-	if read(t, hooks) != orig {
-		t.Fatal("hooks left behind on a revoked device")
+	for _, status := range []string{"REVOKED", "REJECTED", discovery.StatusRevoked} {
+		reconcile(context.Background(), found, &hostclient.Config{Status: status})
+		if !strings.Contains(read(t, hooks), "hook-tool") {
+			t.Fatalf("hooks taken out on a %s config", status)
+		}
 	}
 	// ChatGPT desktop has nothing to edit and is never reported protected.
 	cg := []discovery.Found{{Spec: discovery.Spec{Key: "chatgpt-desktop", ID: "host.chatgpt-desktop"}, Users: []discovery.User{u}}}

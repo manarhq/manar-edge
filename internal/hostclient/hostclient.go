@@ -37,6 +37,8 @@ const (
 	fileInfo = "host.json"
 	// fileRemoved exists while the workspace has removed this device (see MarkRemoved).
 	fileRemoved = "removed"
+	// fileLocked exists while Manar refuses this device with 423 (see LockedCode).
+	fileLocked = "locked"
 
 	maxBody = 1 << 20
 )
@@ -54,6 +56,35 @@ type Info struct {
 	// APIURL is the public base URL used to enrol; HostURL is the mTLS listener for /host/v1/*.
 	APIURL  string `json:"apiUrl,omitempty"`
 	HostURL string `json:"hostUrl,omitempty"`
+
+	// MovedFrom is the workspace this enrolment moved the device away from (not stored).
+	MovedFrom string `json:"-"`
+	old       *Client
+}
+
+// TellOldWorkspace tells the workspace the device moved away from (POST /host/v1/moved, signed with
+// the old certificate, held in memory since before the move). Call it only after the running
+// service is stopped: told first, the old workspace answers that service 410 device_removed, and
+// it would take protection out. It then clears any removed or locked mark that service left. It
+// reports whether the old workspace was told.
+func (i *Info) TellOldWorkspace(ctx context.Context, stateDir string) bool {
+	if i.MovedFrom == "" || i.old == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	ok := i.old.Do(ctx, http.MethodPost, "/moved", nil, nil) == nil
+	_ = ClearRemoved(stateDir)
+	_ = clearLocked(stateDir)
+	return ok
+}
+
+// OtherWorkspaceError: the device is enrolled in another workspace. Enrolling here moves it, so
+// the person must confirm first (EnrolInput.ConfirmMove); nothing was sent.
+type OtherWorkspaceError struct{ From, To string }
+
+func (e *OtherWorkspaceError) Error() string {
+	return fmt.Sprintf("this computer is enrolled in workspace %q; installing for workspace %q moves it there and that workspace's rules will apply to the AI tools on it", e.From, e.To)
 }
 
 // EnrolInput is what Enrol needs. WriteDir must already exist with the right permissions.
@@ -69,6 +100,8 @@ type EnrolInput struct {
 	Hostname   string
 	OS         string
 	HTTP       *http.Client // optional; tests inject a client that trusts their server
+	// ConfirmMove: the person confirmed moving the device from the workspace it is enrolled in.
+	ConfirmMove bool
 }
 
 // Dir is where a state dir keeps the host files.
@@ -98,10 +131,29 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 		}
 		slug = in.TenantSlug
 	}
-	// The key is written BEFORE the request and reused by every later run: a re-install after a
-	// failed or interrupted one presents the same key, so the server sees the same machine, not
-	// a rekey that waits for an admin.
-	key, err := loadOrCreateKey(Dir(in.StateDir))
+	// Enrolled in another workspace: only with the person's confirmation, a NEW key (one key per
+	// workspace, never reused), and the old workspace told, with the old certificate (loaded now,
+	// before anything on disk changes).
+	var moveFrom string
+	var old *Client
+	if prev, err := enrolled(in.StateDir); err == nil && prev.TenantSlug != "" && prev.TenantSlug != slug {
+		moveFrom = prev.TenantSlug
+		if !IsMarkedRemoved(in.StateDir) {
+			if !in.ConfirmMove {
+				return nil, &OtherWorkspaceError{From: moveFrom, To: slug}
+			}
+			old, _ = New(in.StateDir) // best effort: a broken old enrolment cannot be told
+		}
+	}
+	// Otherwise the key is written BEFORE the request and reused by every later run: a re-install
+	// after a failed or interrupted one presents the same key, so the server sees the same machine,
+	// not a new device.
+	var key *ecdsa.PrivateKey
+	if moveFrom != "" {
+		key, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	} else {
+		key, err = loadOrCreateKey(Dir(in.StateDir))
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -158,8 +210,25 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	if moveFrom != "" {
+		info.MovedFrom, info.old = moveFrom, old
+		// The old client must not touch this state dir: its lock or removed marks are not ours.
+		if old != nil {
+			old.stateDir = ""
+		}
+		der, err := x509.MarshalPKCS8PrivateKey(key)
+		if err != nil {
+			return nil, err
+		}
+		if err := writePrivate(filepath.Join(dir, fileKey), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})); err != nil {
+			return nil, err
+		}
+	}
 	// A fresh registration is a new start: protection may resume.
 	if err := ClearRemoved(in.StateDir); err != nil {
+		return nil, err
+	}
+	if err := clearLocked(in.StateDir); err != nil {
 		return nil, err
 	}
 	for _, f := range []struct {
@@ -175,6 +244,16 @@ func Enrol(ctx context.Context, in EnrolInput) (*Info, error) {
 		}
 	}
 	return info, nil
+}
+
+// enrolled reads host.json.
+func enrolled(stateDir string) (*Info, error) {
+	b, err := os.ReadFile(filepath.Join(Dir(stateDir), fileInfo))
+	if err != nil {
+		return nil, err
+	}
+	var info Info
+	return &info, json.Unmarshal(b, &info)
 }
 
 // Client calls /host/v1/* over mTLS.
@@ -254,6 +333,12 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	// A locked device only polls its config (to learn when it is let back in); nothing else leaves.
+	if path != "/config" && c.stateDir != "" {
+		if code := LockedCode(c.stateDir); code != "" {
+			return &StatusError{Code: http.StatusLocked, APICode: code, Message: "this device is locked by its workspace"}
+		}
+	}
 	res, err := c.http.Do(req)
 	if err != nil {
 		return err
@@ -265,7 +350,17 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 		if se.Removed() && c.removed != nil {
 			c.removedOnce.Do(func() { close(c.removed) })
 		}
+		if se.Locked() && c.stateDir != "" {
+			if err := markLocked(c.stateDir, se.APICode); err != nil {
+				return errors.Join(se, err)
+			}
+		}
 		return se
+	}
+	if path == "/config" && c.stateDir != "" {
+		if err := clearLocked(c.stateDir); err != nil {
+			return err
+		}
 	}
 	if out == nil || len(b) == 0 {
 		return nil
@@ -284,6 +379,50 @@ type StatusError struct {
 // device. No other status (401, 403, 5xx, a 410 without the code) counts.
 func (e *StatusError) Removed() bool {
 	return e.Code == http.StatusGone && e.APICode == "device_removed"
+}
+
+// Locked is HTTP 423: Manar will not serve this genuine device (revoked, suspended, workspace
+// deleted). The device keeps its hooks and denies AI actions; it never unprotects on it.
+func (e *StatusError) Locked() bool { return e.Code == http.StatusLocked }
+
+// LockedCode is the reason Manar gave when it locked this device ("" while it is not locked).
+// device_revoked also wipes the secret vault (a lost or stolen laptop).
+func LockedCode(stateDir string) string {
+	b, err := os.ReadFile(filepath.Join(Dir(stateDir), fileLocked))
+	if errors.Is(err, os.ErrNotExist) {
+		return ""
+	}
+	var l struct {
+		Code string `json:"code"`
+	}
+	if err != nil || json.Unmarshal(b, &l) != nil || l.Code == "" {
+		return "locked" // unreadable or tampered with: still locked (fail closed)
+	}
+	return l.Code
+}
+
+var lockedCodePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
+
+func markLocked(stateDir, code string) error {
+	if !lockedCodePattern.MatchString(code) {
+		code = "locked"
+	}
+	if LockedCode(stateDir) == code {
+		return nil
+	}
+	if err := os.MkdirAll(Dir(stateDir), 0o700); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(map[string]string{"code": code, "at": time.Now().UTC().Format(time.RFC3339)})
+	return writePrivate(filepath.Join(Dir(stateDir), fileLocked), append(b, '\n'))
+}
+
+func clearLocked(stateDir string) error {
+	err := os.Remove(filepath.Join(Dir(stateDir), fileLocked))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }
 
 // IsRemoved reports whether err is the "device removed from the workspace" reply.
@@ -349,6 +488,15 @@ type Config struct {
 	// DataCollection is the effective product-improvement-data choice of the device's owner.
 	// Nil (an API that does not send it) means off.
 	DataCollection *DataCollection `json:"dataCollection,omitempty"`
+	// VaultGrants lists the standing secret-vault grants ("8 hours", "Always") the device may keep;
+	// it drops any other. Nil from an API that does not send it: then no standing grant counts.
+	VaultGrants *[]VaultGrant `json:"vaultGrants,omitempty"`
+}
+
+// VaultGrant is one standing grant: the console request that gave it and when it ends (nil: no end).
+type VaultGrant struct {
+	ID    string     `json:"id"`
+	Until *time.Time `json:"until"`
 }
 
 // DataCollection is the "dataCollection" part of GET /host/v1/config.
