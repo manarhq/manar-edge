@@ -25,9 +25,12 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/ports"
 )
 
 const (
@@ -330,15 +333,24 @@ func proxyFromEnv(req *http.Request) (*url.URL, error) {
 	if u.Scheme != "http" {
 		return nil, fmt.Errorf("proxy %s://%s: only http:// CONNECT proxies are supported (set HTTPS_PROXY=http://host:port)", u.Scheme, u.Host)
 	}
-	if ip := net.ParseIP(u.Hostname()); (ip != nil && ip.IsLoopback() || u.Hostname() == "localhost") && jailNoProxy() {
+	if isJailFilter(u) {
 		return nil, nil
 	}
 	return u, nil
 }
 
-func jailNoProxy() bool {
+// isJailFilter recognises the proxy JAIL names in a protected tool's environment: loopback, one of
+// JAIL's own ports, together with JAIL's NO_PROXY. A user's own local proxy (cntlm, px) on any other
+// port, or with another NO_PROXY, is not matched.
+func isJailFilter(u *url.URL) bool {
+	if ip := net.ParseIP(u.Hostname()); !(ip != nil && ip.IsLoopback()) && u.Hostname() != "localhost" {
+		return false
+	}
+	if p := u.Port(); p != strconv.Itoa(ports.JailWindowsProxyPort) && p != strconv.Itoa(ports.JailGatewayPort) {
+		return false
+	}
 	for _, k := range []string{"NO_PROXY", "no_proxy"} {
-		if v := os.Getenv(k); v == "localhost,127.0.0.1" || v == "127.0.0.1,localhost" {
+		if os.Getenv(k) == ports.JailNoProxy {
 			return true
 		}
 	}

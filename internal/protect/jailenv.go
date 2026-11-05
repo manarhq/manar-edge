@@ -2,6 +2,8 @@ package protect
 
 import (
 	"strings"
+
+	"github.com/manarhq/manar-edge/internal/ports"
 )
 
 // KindJSONEnv reverses JailEnvEdit on a settings file the user changed since.
@@ -46,7 +48,7 @@ func undoJSONEnv(root map[string]any) error {
 }
 
 // JailNoProxy is the NO_PROXY value JAIL sets.
-const JailNoProxy = "localhost,127.0.0.1"
+const JailNoProxy = ports.JailNoProxy
 
 // SharedStore is the device's backup store (set up by Configure), for packages that edit tool
 // settings next to protect.
