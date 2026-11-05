@@ -3,14 +3,15 @@ package warden
 import (
 	"bytes"
 	"errors"
-	"regexp"
 	"strings"
 
 	toast "git.sr.ht/~jackmordaunt/go-toast/v2"
 	"git.sr.ht/~jackmordaunt/go-toast/v2/tmpl"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
-var safeID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+var safeID = lazyre.New(`^[A-Za-z0-9_-]{1,64}$`)
 
 // BuildToastXML renders the toast. The text is cleaned with Display again here, whatever the
 // caller did, and the ids that go into button arguments must be plain. The XML is shown through the

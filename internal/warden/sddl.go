@@ -2,10 +2,11 @@ package warden
 
 import (
 	"errors"
-	"regexp"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
-var sidPattern = regexp.MustCompile(`^S-1-\d+(-\d+)+$`)
+var sidPattern = lazyre.New(`^S-1-\d+(-\d+)+$`)
 
 // pipeUserRights is FILE_GENERIC_READ | FILE_GENERIC_WRITE without FILE_APPEND_DATA (0x4), which on
 // a pipe is FILE_CREATE_PIPE_INSTANCE: the user can connect, read and write, but cannot create a

@@ -6,9 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // jsonObject parses cur as one JSON object (empty or absent is {}), runs fn, and returns the
@@ -46,7 +47,7 @@ func jsonObject(fn func(root map[string]any) error) Edit {
 // isOurs recognises a command Manar installed, by the subcommand and the program name.
 // A command that runs Manar's hook subcommand for a known tool counts as ours whatever program
 // it names, so an entry repointed at another program is found and put back.
-var reHookTool = regexp.MustCompile(`(?i)\bhook-tool\s+(claude-code|cursor|windsurf|gemini-cli|codex-cli|copilot-cli)\s+\w+`)
+var reHookTool = lazyre.New(`(?i)\bhook-tool\s+(claude-code|cursor|windsurf|gemini-cli|codex-cli|copilot-cli)\s+\w+`)
 
 func isOurs(cmd string) bool {
 	l := strings.ToLower(cmd)
@@ -78,7 +79,7 @@ type guard struct {
 
 // canonicalHook splits a command Manar writes: its program in quotes, hook-tool, the tool key and
 // one event word (an optional "& " is the PowerShell form Windsurf uses).
-var canonicalHook = regexp.MustCompile(`^(& )?"([^"\x00-\x1f]+)" hook-tool ([a-z-]+) (tool|shell|read|mcp)$`)
+var canonicalHook = lazyre.New(`^(& )?"([^"\x00-\x1f]+)" hook-tool ([a-z-]+) (tool|shell|read|mcp)$`)
 
 // sameExe compares two program paths after Clean, EvalSymlinks (when the file exists) and, on
 // Windows, case folding.
@@ -286,7 +287,7 @@ func wrapMCP(root map[string]any, key, exe, tool string) (wrapped, skipped int, 
 	return wrapped, skipped, nil
 }
 
-var topLevelBaseURL = regexp.MustCompile(`(?m)^\s*openai_base_url\s*=\s*(.*)$`)
+var topLevelBaseURL = lazyre.New(`(?m)^\s*openai_base_url\s*=\s*(.*)$`)
 
 // codexBaseURL sets openai_base_url in config.toml, only when the key is not there yet. It is
 // added at the top of the file, where a top-level key must be. The file is not parsed as TOML

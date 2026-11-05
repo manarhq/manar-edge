@@ -23,10 +23,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 const (
@@ -43,7 +44,7 @@ const (
 	maxBody = 1 << 20
 )
 
-var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+var machineIDPattern = lazyre.New(`^[A-Za-z0-9._-]{1,128}$`)
 
 // Info is host.json.
 type Info struct {
@@ -401,7 +402,7 @@ func LockedCode(stateDir string) string {
 	return l.Code
 }
 
-var lockedCodePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
+var lockedCodePattern = lazyre.New(`^[a-z_]{1,64}$`)
 
 func markLocked(stateDir, code string) error {
 	if !lockedCodePattern.MatchString(code) {
@@ -622,11 +623,11 @@ func (c *Client) Config(ctx context.Context) (*Config, error) {
 }
 
 var (
-	shortCode   = regexp.MustCompile(`^[A-HJKMNP-Z2-9]{10}$`)
-	slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	shortCode   = lazyre.New(`^[A-HJKMNP-Z2-9]{10}$`)
+	slugPattern = lazyre.New(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
-var keyPattern = regexp.MustCompile(`^mik_([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)_[A-Za-z0-9_-]{43}$`)
+var keyPattern = lazyre.New(`^mik_([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)_[A-Za-z0-9_-]{43}$`)
 
 func tenantSlugOf(installKey string) (string, bool) {
 	m := keyPattern.FindStringSubmatch(installKey)

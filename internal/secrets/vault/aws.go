@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // Entry is the manifest of one vaulted secret. It holds no secret.
@@ -65,9 +66,9 @@ func sidOf(owner string) string {
 }
 
 var (
-	sectionRe = regexp.MustCompile(`^\s*\[([^\]]+)\]\s*(?:[#;].*)?$`)
-	keyRe     = regexp.MustCompile(`(?i)^\s*(aws_access_key_id|aws_secret_access_key|aws_session_token)\s*=\s*(.*?)\s*$`)
-	profileRe = regexp.MustCompile(`^[A-Za-z0-9._@:+/-]{1,128}$`)
+	sectionRe = lazyre.New(`^\s*\[([^\]]+)\]\s*(?:[#;].*)?$`)
+	keyRe     = lazyre.New(`(?i)^\s*(aws_access_key_id|aws_secret_access_key|aws_session_token)\s*=\s*(.*?)\s*$`)
+	profileRe = lazyre.New(`^[A-Za-z0-9._@:+/-]{1,128}$`)
 )
 
 const marker = "# manar-vault: this profile's keys are held by Manar (manar-edge secret aws)"

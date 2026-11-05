@@ -6,9 +6,10 @@ import (
 	"os"
 	"path"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strings"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // The hook and settings files of the tools Manar protects. A project's own settings win over the
@@ -37,17 +38,17 @@ var guardedText = []string{
 
 var (
 	// A tool's settings folder named as a whole.
-	guardedDir = regexp.MustCompile(`(^|[\s/"'=~:(<>])\.(claude|cursor|gemini|codex|copilot|windsurf|codeium)(/|\s|$|["';&|)])`)
+	guardedDir = lazyre.New(`(^|[\s/"'=~:(<>])\.(claude|cursor|gemini|codex|copilot|windsurf|codeium)(/|\s|$|["';&|)])`)
 	// Something next to it that can replace, remove or write files: file commands, redirection,
 	// and interpreters or tools that write files themselves.
-	changeVerb  = regexp.MustCompile(`(^|[\s;&|(])(rm|rmdir|mv|cp|ln|unlink|install|rsync|tar|unzip|truncate|touch|tee|dd|awk|gawk|python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|del|erase|rd|move|ren|rename|xcopy|robocopy|mklink|remove-item|move-item|rename-item|copy-item|new-item|set-content|add-content|out-file)(\s|$)|\bsed\s+(-[a-z]*\s+)*-[a-z]*i|>`)
-	claudeFlags = regexp.MustCompile(`\bclaude(\.exe)?\b[^;&|]*\s--settings\b`)
+	changeVerb  = lazyre.New(`(^|[\s;&|(])(rm|rmdir|mv|cp|ln|unlink|install|rsync|tar|unzip|truncate|touch|tee|dd|awk|gawk|python[0-9.]*|node|nodejs|deno|bun|perl|ruby|php|lua|del|erase|rd|move|ren|rename|xcopy|robocopy|mklink|remove-item|move-item|rename-item|copy-item|new-item|set-content|add-content|out-file)(\s|$)|\bsed\s+(-[a-z]*\s+)*-[a-z]*i|>`)
+	claudeFlags = lazyre.New(`\bclaude(\.exe)?\b[^;&|]*\s--settings\b`)
 	// Any mention of a tool's settings folder, and a '..' path element: together they are refused
 	// whatever the shell would make of the rest, because collapsing '..' in text cannot follow
 	// what variables or command substitution expand to.
-	toolFolder = regexp.MustCompile(`\.(claude|cursor|gemini|codex|copilot|windsurf|codeium)\b`)
-	parentElem = regexp.MustCompile(`/\.\.(/|\s|$|["';&|)<>` + "`" + `])`)
-	dotDot     = regexp.MustCompile("(^|/)[^/\\s\"'=;&|<>()$`]+/\\.\\./")
+	toolFolder = lazyre.New(`\.(claude|cursor|gemini|codex|copilot|windsurf|codeium)\b`)
+	parentElem = lazyre.New(`/\.\.(/|\s|$|["';&|)<>` + "`" + `])`)
+	dotDot     = lazyre.New("(^|/)[^/\\s\"'=;&|<>()$`]+/\\.\\./")
 )
 
 // canonical lower-cases p, uses '/', drops Windows stream suffixes (name:stream, name::$DATA) and
@@ -264,7 +265,7 @@ var targetKeys = map[string]bool{
 
 // Patch headers that name a file: the apply_patch format (*** Add/Update/Delete File, *** Move
 // to) and unified and git diffs (---, +++, rename, copy).
-var patchTargets = regexp.MustCompile(`(?m)^(?:\*\*\* (?:Add|Update|Delete) File: |\*\*\* Move to: |(?:\+\+\+|---) |rename (?:from|to) |copy (?:from|to) )(.+?)\s*$|^diff --git (\S+) (\S+)\s*$`)
+var patchTargets = lazyre.New(`(?m)^(?:\*\*\* (?:Add|Update|Delete) File: |\*\*\* Move to: |(?:\+\+\+|---) |rename (?:from|to) |copy (?:from|to) )(.+?)\s*$|^diff --git (\S+) (\S+)\s*$`)
 
 // Limits of one argument scan. Past either, Manar cannot tell what the call names: refused.
 const (
