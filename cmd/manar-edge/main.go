@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/manarhq/manar-edge/internal/door"
+	"github.com/manarhq/manar-edge/internal/hostclient"
 	"github.com/manarhq/manar-edge/internal/protect"
 	"github.com/manarhq/manar-edge/internal/secrets/host"
 	"github.com/manarhq/manar-edge/internal/secrets/vault"
@@ -60,6 +61,7 @@ func main() {
 	}
 	cmd, rest := args[0], args[1:]
 	telemetry.Configure(base, version)
+	hostclient.SetVersion(version)
 	protect.Configure(base)
 	door.Configure(base)
 	undo.Configure(base, exeForHelpers())

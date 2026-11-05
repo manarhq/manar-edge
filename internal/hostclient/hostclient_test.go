@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -725,5 +726,41 @@ func TestAProxyRefusingConnectNeverRemovesOrLocksTheDevice(t *testing.T) {
 			t.Fatalf("CONNECT %d signalled removal", code)
 		default:
 		}
+	}
+}
+
+// Every request names the version, OS and architecture, in the form manar-api parses
+// (testdata/contract/host-contract.json, section userAgent).
+func TestRequestsCarryTheVersionUserAgent(t *testing.T) {
+	var fx struct {
+		UserAgent struct {
+			Build []struct{ Version, OS, Arch, Header string }
+		}
+	}
+	b, err := os.ReadFile("../../testdata/contract/host-contract.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(b, &fx); err != nil || len(fx.UserAgent.Build) == 0 {
+		t.Fatalf("contract: %v", err)
+	}
+	for _, c := range fx.UserAgent.Build {
+		if got := UserAgentFor(c.Version, c.OS, c.Arch); got != c.Header {
+			t.Errorf("got %q want %q", got, c.Header)
+		}
+	}
+	var seen string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.UserAgent()
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+	defer func(p string) { userAgent = p }(userAgent)
+	SetVersion("9.9.9")
+	if err := NewForTest("", srv.URL, srv.Client()).Do(context.Background(), http.MethodGet, "/config", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if want := UserAgentFor("9.9.9", runtime.GOOS, runtime.GOARCH); seen != want {
+		t.Fatalf("server saw %q, want %q", seen, want)
 	}
 }

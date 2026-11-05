@@ -25,6 +25,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -365,6 +366,17 @@ func NewForTest(stateDir, baseURL string, hc *http.Client) *Client {
 // StateDir is the state directory this client was loaded from.
 func (c *Client) StateDir() string { return c.stateDir }
 
+var userAgent = UserAgentFor("dev", runtime.GOOS, runtime.GOARCH)
+
+// UserAgentFor is what a device running this version on this OS and architecture sends. It is how
+// manar-api learns which version a device runs (shared contract: testdata/contract/host-contract.json).
+func UserAgentFor(version, goos, goarch string) string {
+	return "manar-edge/" + version + " (" + goos + "; " + goarch + ")"
+}
+
+// SetVersion sets the version every request reports. Call it once at start.
+func SetVersion(version string) { userAgent = UserAgentFor(version, runtime.GOOS, runtime.GOARCH) }
+
 // Do sends in as JSON (nil for none) and decodes the JSON reply into out (nil to ignore it).
 // path is under /host/v1, e.g. "/config".
 func (c *Client) Do(ctx context.Context, method, path string, in, out any) error {
@@ -383,6 +395,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set("User-Agent", userAgent)
 	// A locked device only polls its config (to learn when it is let back in); nothing else leaves.
 	if path != "/config" && c.stateDir != "" {
 		if code := LockedCode(c.stateDir); code != "" {
