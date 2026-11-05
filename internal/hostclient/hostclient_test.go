@@ -547,9 +547,19 @@ func TestProxyFromEnvIgnoresTheJailFilter(t *testing.T) {
 	})
 }
 
-// A local corporate proxy (for example cntlm) with a different NO_PROXY still works.
+// The Linux gateway port counts as JAIL's too.
+func TestProxyFromEnvIgnoresTheJailGatewayPort(t *testing.T) {
+	proxyScenario(t, []string{"HTTPS_PROXY=http://localhost:8480", "NO_PROXY=localhost,127.0.0.1"}, func(t *testing.T) {
+		if u, err := proxyFor(t); u != nil || err != nil {
+			t.Fatalf("proxy = %v, %v", u, err)
+		}
+	})
+}
+
+// A user's own local proxy (cntlm, px) keeps working, even with the very same NO_PROXY, because it
+// is not on one of JAIL's ports.
 func TestProxyFromEnvKeepsALocalCorporateProxy(t *testing.T) {
-	proxyScenario(t, []string{"HTTPS_PROXY=http://127.0.0.1:3128", "NO_PROXY=.corp.example"}, func(t *testing.T) {
+	proxyScenario(t, []string{"HTTPS_PROXY=http://127.0.0.1:3128", "NO_PROXY=localhost,127.0.0.1"}, func(t *testing.T) {
 		if u, err := proxyFor(t); err != nil || u == nil || u.Host != "127.0.0.1:3128" {
 			t.Fatalf("proxy = %v, %v", u, err)
 		}
@@ -638,8 +648,13 @@ func TestThroughAConnectProxyThePinnedCAAndTheDeviceCertificateStillApply(t *tes
 	if err != nil || cfg.Status != "APPROVED" {
 		t.Fatalf("cfg = %+v, err = %v", cfg, err)
 	}
-	if n := <-r.peerSeen; n != 1 {
-		t.Fatalf("Manar saw %d client certificates through the tunnel, want 1", n)
+	select {
+	case n := <-r.peerSeen:
+		if n != 1 {
+			t.Fatalf("Manar saw %d client certificates through the tunnel, want 1", n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Manar never saw the request through the tunnel")
 	}
 }
 
@@ -666,8 +681,13 @@ func TestAProxyThatOpensTheTLSSessionFailsAndNeverGetsTheClientCertificate(t *te
 	if _, err := r.client(p.URL, t.TempDir()).Config(context.Background()); err == nil {
 		t.Fatal("the device trusted a proxy that opened the TLS session")
 	}
-	if n := <-gotCert; n != 0 {
-		t.Fatalf("the proxy received %d client certificates", n)
+	select {
+	case n := <-gotCert:
+		if n != 0 {
+			t.Fatalf("the proxy received %d client certificates", n)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the intercepting proxy never finished its handshake")
 	}
 	select {
 	case <-r.peerSeen:

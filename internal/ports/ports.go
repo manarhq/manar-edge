@@ -16,6 +16,9 @@ const (
 	// tool's settings.json, so it is fixed).
 	JailWindowsProxyPort = 8491
 
+	// JailNoProxy is the NO_PROXY value JAIL sets next to its proxy variables.
+	JailNoProxy = "localhost,127.0.0.1"
+
 	DoorListen        = "127.0.0.1:" + "848"
 	DoorURL           = "http://" + DoorListen
 	JailGatewayListen = "127.0.0.1:" + "8480"
