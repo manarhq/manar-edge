@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	osuser "os/user"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strconv"
@@ -27,6 +26,8 @@ import (
 	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/wgctrl"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 const (
@@ -648,11 +649,11 @@ func verifyJail(st *State, uid int) error {
 		return errors.New("the jail's nftables rules are missing" + fix)
 	}
 	out, err = exec.Command("nft", "list", "chain", "inet", "manar_edge", "output").CombinedOutput()
-	if err != nil || !regexp.MustCompile(`meta skuid @agent_uids .*drop`).Match(out) {
+	if err != nil || !lazyre.New(`meta skuid @agent_uids .*drop`).Match(out) {
 		return errors.New("the root namespace drop rule is missing" + fix)
 	}
 	out, err = exec.Command("nft", "list", "set", "inet", "manar_edge", "agent_uids").CombinedOutput()
-	if err != nil || !regexp.MustCompile(`\b`+strconv.Itoa(uid)+`\b`).Match(out) {
+	if err != nil || !lazyre.New(`\b`+strconv.Itoa(uid)+`\b`).Match(out) {
 		return errors.New("the agent user is not in the root namespace drop set" + fix)
 	}
 	return nil

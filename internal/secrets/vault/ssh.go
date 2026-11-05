@@ -7,12 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
-var keyNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}$`)
+var keyNameRe = lazyre.New(`^[A-Za-z0-9._-]{1,100}$`)
 
 // StoreSSH loads ~/.ssh/<name> into the ssh-agent and removes the file, but only after the
 // vault holds an identical copy and the agent is seen to hold the key.
@@ -260,7 +261,7 @@ func (a ExecAgent) run(name string, args ...string) (string, error) {
 	return string(out), err
 }
 
-var fpRe = regexp.MustCompile(`SHA256:[A-Za-z0-9+/=]+`)
+var fpRe = lazyre.New(`SHA256:[A-Za-z0-9+/=]+`)
 
 func (a ExecAgent) Fingerprint(path string) (string, bool, error) {
 	if _, err := a.run("ssh-keygen", "-y", "-P", "", "-f", path); err != nil {

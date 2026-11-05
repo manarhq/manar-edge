@@ -12,7 +12,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/manarhq/manar-edge/internal/daemon"
 	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // The device service side. Hooks (running as the user) take snapshots and tell the service over
@@ -78,8 +78,8 @@ func Configure(stateDir, exe string) {
 func (s *Service) Name() string { return "undo" }
 
 var (
-	toolPattern = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
-	shaPattern  = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	toolPattern = lazyre.New(`^[a-z0-9._-]{1,64}$`)
+	shaPattern  = lazyre.New(`^[a-f0-9]{64}$`)
 )
 
 // Report accepts one record from a hook. caller is the kernel's view of who sent it. An id that

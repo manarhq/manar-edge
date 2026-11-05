@@ -20,11 +20,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // Key-less enrolment of a domain-joined Windows machine (manar-api docs/hosts.md, "Key-less
@@ -42,7 +42,7 @@ const (
 	fileHostState = "host.json"
 )
 
-var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+var machineIDPattern = lazyre.New(`^[A-Za-z0-9._-]{1,128}$`)
 
 // hostPlatform is the part that needs the OS: the certificate store and the keys.
 type hostPlatform interface {

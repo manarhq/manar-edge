@@ -2,11 +2,11 @@ package jail
 
 import (
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/manarhq/manar-edge/internal/discovery"
+	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/ports"
 	"github.com/manarhq/manar-edge/internal/protect"
 )
@@ -93,7 +93,7 @@ func planWindows(users []discovery.User, running []string, glob func(pattern str
 	return out
 }
 
-var versionName = regexp.MustCompile(`^\d+(\.\d+)+$`)
+var versionName = lazyre.New(`^\d+(\.\d+)+$`)
 
 // isExe: a program file (name.exe, or a bare version number as the native installer names the
 // files in its versions folder), not a text file that happens to sit beside them.

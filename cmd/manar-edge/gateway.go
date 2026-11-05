@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/ports"
 	"io"
 	"log"
@@ -15,7 +16,6 @@ import (
 	"net/http/httputil"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +31,7 @@ const (
 
 // idPattern bounds task and approval ids so they can go into an upstream path without escaping:
 // no '/', no '.', so no "..".
-var idPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,200}$`)
+var idPattern = lazyre.New(`^[A-Za-z0-9_-]{1,200}$`)
 
 // forwardHeaders is the allowlist of request headers sent to Manar. Everything else, every
 // X-Manar-* header and all credentials included, is dropped.

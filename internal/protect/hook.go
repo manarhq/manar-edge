@@ -9,11 +9,11 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
 
+	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/undo"
 )
 
@@ -154,7 +154,7 @@ type Relay struct {
 	Cwd string
 }
 
-var sessionOK = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+var sessionOK = lazyre.New(`^[A-Za-z0-9._:-]{1,64}$`)
 
 // SessionID is the id a tool puts in its hook input (Claude Code, Gemini, Codex, Copilot:
 // session_id; Cursor: conversation_id). Anything that is not a plain id is dropped.
