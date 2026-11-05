@@ -11,11 +11,16 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"io"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -486,5 +491,219 @@ func TestEnrolForAnotherWorkspaceNeedsConfirmationAndUsesANewKey(t *testing.T) {
 	// The new files work together.
 	if _, err := New(dir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// proxyScenario runs one proxyFromEnv check in a child process: Go reads the proxy variables once
+// per process, so each scenario needs its own.
+func proxyScenario(t *testing.T, env []string, check func(t *testing.T)) {
+	t.Helper()
+	if os.Getenv("MANAR_TEST_PROXY_CHILD") == "1" {
+		check(t)
+		return
+	}
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$")
+	cmd.Env = append(append(os.Environ(), "MANAR_TEST_PROXY_CHILD=1", "NO_PROXY=", "no_proxy="), env...)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("%v\n%s", err, out)
+	}
+}
+
+func proxyFor(t *testing.T) (*url.URL, error) {
+	req, _ := http.NewRequest(http.MethodGet, "https://manar.example/host/v1/config", nil)
+	return proxyFromEnv(req)
+}
+
+// A device behind a corporate proxy must still reach Manar (edge-case spec section 7, item 9).
+func TestProxyFromEnvUsesAnHTTPProxy(t *testing.T) {
+	proxyScenario(t, []string{"HTTPS_PROXY=http://proxy.corp.example:3128"}, func(t *testing.T) {
+		u, err := proxyFor(t)
+		if err != nil || u == nil || u.Host != "proxy.corp.example:3128" {
+			t.Fatalf("proxy = %v, %v", u, err)
+		}
+	})
+}
+
+// Only plain CONNECT proxies are supported: anything else fails the request, never unprotects.
+func TestProxyFromEnvRefusesOtherSchemes(t *testing.T) {
+	for _, v := range []string{"https://proxy.corp.example:3128", "socks5://proxy.corp.example:1080"} {
+		t.Run(v, func(t *testing.T) {
+			proxyScenario(t, []string{"HTTPS_PROXY=" + v}, func(t *testing.T) {
+				u, err := proxyFor(t)
+				if u != nil || err == nil || !strings.Contains(err.Error(), "only http:// CONNECT proxies are supported") {
+					t.Fatalf("proxy = %v, %v", u, err)
+				}
+			})
+		})
+	}
+}
+
+// The environment JAIL gives a protected tool must never route the device service's own traffic.
+func TestProxyFromEnvIgnoresTheJailFilter(t *testing.T) {
+	proxyScenario(t, []string{"HTTPS_PROXY=http://127.0.0.1:8491", "NO_PROXY=localhost,127.0.0.1"}, func(t *testing.T) {
+		if u, err := proxyFor(t); u != nil || err != nil {
+			t.Fatalf("proxy = %v, %v", u, err)
+		}
+	})
+}
+
+// A local corporate proxy (for example cntlm) with a different NO_PROXY still works.
+func TestProxyFromEnvKeepsALocalCorporateProxy(t *testing.T) {
+	proxyScenario(t, []string{"HTTPS_PROXY=http://127.0.0.1:3128", "NO_PROXY=.corp.example"}, func(t *testing.T) {
+		if u, err := proxyFor(t); err != nil || u == nil || u.Host != "127.0.0.1:3128" {
+			t.Fatalf("proxy = %v, %v", u, err)
+		}
+	})
+}
+
+// proxyRig is a real mTLS Manar behind a stand-in "corporate proxy".
+type proxyRig struct {
+	ca       *testCA
+	pool     *x509.CertPool
+	cert     tls.Certificate // the device's certificate
+	manar    *httptest.Server
+	peerSeen chan int // client certificates Manar saw per request
+}
+
+func newProxyRig(t *testing.T) *proxyRig {
+	t.Helper()
+	ca := newCA(t)
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	issue := func(sn int64, tpl *x509.Certificate) tls.Certificate {
+		k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+		tpl.SerialNumber = big.NewInt(sn)
+		tpl.NotBefore, tpl.NotAfter = time.Now().Add(-time.Minute), time.Now().Add(time.Hour)
+		tpl.KeyUsage = x509.KeyUsageDigitalSignature
+		der, _ := x509.MarshalPKCS8PrivateKey(k)
+		pair, err := tls.X509KeyPair([]byte(ca.sign(t, &k.PublicKey, tpl)), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return pair
+	}
+	r := &proxyRig{ca: ca, pool: pool, peerSeen: make(chan int, 16)}
+	r.cert = issue(10, &x509.Certificate{Subject: pkix.Name{CommonName: "host"}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}})
+	r.manar = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.peerSeen <- len(req.TLS.PeerCertificates)
+		_ = json.NewEncoder(w).Encode(Config{HostID: "h1", Status: "APPROVED", Features: []string{}})
+	}))
+	r.manar.TLS = &tls.Config{
+		Certificates: []tls.Certificate{issue(11, &x509.Certificate{Subject: pkix.Name{CommonName: "manar.test"}, DNSNames: []string{"manar.test"}, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}})},
+		ClientAuth:   tls.RequireAndVerifyClientCert, ClientCAs: pool,
+	}
+	r.manar.StartTLS()
+	t.Cleanup(r.manar.Close)
+	return r
+}
+
+func (r *proxyRig) client(proxyURL string, dir string) *Client {
+	pu, _ := url.Parse(proxyURL)
+	return &Client{Info: &Info{}, base: "https://manar.test", stateDir: dir, removed: make(chan struct{}),
+		http: mtlsHTTP(r.cert, r.pool, func(*http.Request) (*url.URL, error) { return pu, nil })}
+}
+
+// connectProxy serves CONNECT with handle; handle gets the raw client connection.
+func connectProxy(t *testing.T, handle func(c net.Conn)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method != http.MethodConnect {
+			http.Error(w, "connect only", http.StatusMethodNotAllowed)
+			return
+		}
+		c, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		_, _ = c.Write([]byte("HTTP/1.1 200 Connection established\r\n\r\n"))
+		handle(c)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestThroughAConnectProxyThePinnedCAAndTheDeviceCertificateStillApply(t *testing.T) {
+	r := newProxyRig(t)
+	p := connectProxy(t, func(c net.Conn) { // a plain tunnel to Manar
+		up, err := net.Dial("tcp", r.manar.Listener.Addr().String())
+		if err != nil {
+			_ = c.Close()
+			return
+		}
+		go func() { _, _ = io.Copy(up, c); _ = up.Close() }()
+		_, _ = io.Copy(c, up)
+		_ = c.Close()
+	})
+	cfg, err := r.client(p.URL, t.TempDir()).Config(context.Background())
+	if err != nil || cfg.Status != "APPROVED" {
+		t.Fatalf("cfg = %+v, err = %v", cfg, err)
+	}
+	if n := <-r.peerSeen; n != 1 {
+		t.Fatalf("Manar saw %d client certificates through the tunnel, want 1", n)
+	}
+}
+
+func TestAProxyThatOpensTheTLSSessionFailsAndNeverGetsTheClientCertificate(t *testing.T) {
+	r := newProxyRig(t)
+	other := newCA(t) // not the pinned CA
+	k, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	der, _ := x509.MarshalPKCS8PrivateKey(k)
+	pair, err := tls.X509KeyPair([]byte(other.sign(t, &k.PublicKey, &x509.Certificate{
+		SerialNumber: big.NewInt(20), Subject: pkix.Name{CommonName: "manar.test"}, DNSNames: []string{"manar.test"},
+		NotBefore: time.Now().Add(-time.Minute), NotAfter: time.Now().Add(time.Hour),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	})), pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotCert := make(chan int, 1)
+	p := connectProxy(t, func(c net.Conn) {
+		tc := tls.Server(c, &tls.Config{Certificates: []tls.Certificate{pair}, ClientAuth: tls.RequestClientCert})
+		_ = tc.Handshake() // fails: the device rejects the certificate and aborts
+		gotCert <- len(tc.ConnectionState().PeerCertificates)
+		_ = tc.Close()
+	})
+	if _, err := r.client(p.URL, t.TempDir()).Config(context.Background()); err == nil {
+		t.Fatal("the device trusted a proxy that opened the TLS session")
+	}
+	if n := <-gotCert; n != 0 {
+		t.Fatalf("the proxy received %d client certificates", n)
+	}
+	select {
+	case <-r.peerSeen:
+		t.Fatal("Manar was reached through the interception")
+	default:
+	}
+}
+
+// A proxy's own refusal of CONNECT is a transport failure: it says nothing about the device, so it
+// never marks it removed or locked (only Manar's 410 and 423, over the pinned channel, do).
+func TestAProxyRefusingConnectNeverRemovesOrLocksTheDevice(t *testing.T) {
+	r := newProxyRig(t)
+	for _, code := range []int{http.StatusGone, http.StatusLocked, http.StatusForbidden, http.StatusProxyAuthRequired} {
+		p := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_, _ = w.Write([]byte(`{"statusCode":` + strconv.Itoa(code) + `,"code":"device_removed"}`))
+		}))
+		dir := t.TempDir()
+		c := r.client(p.URL, dir)
+		_, err := c.Config(context.Background())
+		p.Close()
+		if err == nil || IsRemoved(err) {
+			t.Fatalf("CONNECT %d: err = %v", code, err)
+		}
+		var se *StatusError
+		if errors.As(err, &se) && se.Locked() {
+			t.Fatalf("CONNECT %d read as a lock", code)
+		}
+		if LockedCode(dir) != "" || IsMarkedRemoved(dir) {
+			t.Fatalf("CONNECT %d changed the device state", code)
+		}
+		select {
+		case <-c.removed:
+			t.Fatalf("CONNECT %d signalled removal", code)
+		default:
+		}
 	}
 }

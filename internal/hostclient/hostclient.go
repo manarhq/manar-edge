@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -299,12 +300,49 @@ func New(stateDir string) (*Client, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("host-ca.pem has no certificate")
 	}
-	return &Client{Info: &info, base: base.String(), stateDir: stateDir, removed: make(chan struct{}), http: &http.Client{
+	return &Client{Info: &info, base: base.String(), stateDir: stateDir, removed: make(chan struct{}), http: mtlsHTTP(cert, roots, proxyFromEnv)}, nil
+}
+
+// mtlsHTTP is the device's client for Manar. It follows HTTPS_PROXY / NO_PROXY through
+// proxyFromEnv: a CONNECT proxy only tunnels bytes, so the pinned CA and the device certificate
+// still decide who is trusted (a proxy that opens the TLS session fails the handshake before any
+// client certificate is sent, and the device keeps the protection it has).
+func mtlsHTTP(cert tls.Certificate, roots *x509.CertPool, proxy func(*http.Request) (*url.URL, error)) *http.Client {
+	return &http.Client{
 		Timeout: 30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		Transport: &http.Transport{Proxy: proxy, TLSClientConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert}, RootCAs: roots, MinVersion: tls.VersionTLS13,
 		}},
-	}}, nil
+	}
+}
+
+// proxyFromEnv is http.ProxyFromEnvironment with two limits. Only http:// proxies (plain CONNECT)
+// are supported; any other scheme is an error, so the request fails and the device keeps its
+// protection ("cannot sync", never "unprotected"). And the filter JAIL sets for a protected tool
+// (a loopback proxy with NO_PROXY=localhost,127.0.0.1) is not a corporate proxy: this client runs in
+// the device service, which JAIL never configures, so if that environment ever leaks into it, it is
+// ignored instead of sending Manar's own traffic through a tool's filter.
+func proxyFromEnv(req *http.Request) (*url.URL, error) {
+	u, err := http.ProxyFromEnvironment(req)
+	if err != nil || u == nil {
+		return u, err
+	}
+	if u.Scheme != "http" {
+		return nil, fmt.Errorf("proxy %s://%s: only http:// CONNECT proxies are supported (set HTTPS_PROXY=http://host:port)", u.Scheme, u.Host)
+	}
+	if ip := net.ParseIP(u.Hostname()); (ip != nil && ip.IsLoopback() || u.Hostname() == "localhost") && jailNoProxy() {
+		return nil, nil
+	}
+	return u, nil
+}
+
+func jailNoProxy() bool {
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		if v := os.Getenv(k); v == "localhost,127.0.0.1" || v == "127.0.0.1,localhost" {
+			return true
+		}
+	}
+	return false
 }
 
 // NewForTest builds a client for an already running server, with no host files. Tests only.

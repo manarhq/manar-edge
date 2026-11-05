@@ -54,6 +54,20 @@ manar-edge down <agent> [--purge]
 What the host binary enforces, the Claude Code policy it installs and the Windows limits are in
 [docs/host.md](docs/host.md).
 
+## Behind a corporate proxy
+
+The device service reaches Manar through `HTTPS_PROXY` / `NO_PROXY`. Only `http://host:port` proxies
+(plain CONNECT) are supported. An `https://` or `socks5://` proxy is refused with "only http:// CONNECT
+proxies are supported": the device cannot sync, and its protection stays as it is. A proxy that
+opens the TLS session (inspection) fails the handshake and never receives the device certificate;
+ask IT to bypass it for the Manar host.
+
+- **Linux:** put the variables in `<state dir>/proxy.env` (for example
+  `HTTPS_PROXY=http://proxy.corp.example:3128`); the systemd unit reads it, then `systemctl restart manar-edge`.
+  The installer's own run uses the shell's variables.
+- **Windows:** set `HTTPS_PROXY` (and `NO_PROXY`) as machine-wide (System) environment variables and
+  restart the Manar device service. The WinHTTP/system proxy and PAC files are not read.
+
 ## Build and test
 
 ```bash
