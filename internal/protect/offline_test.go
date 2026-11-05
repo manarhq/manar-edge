@@ -298,3 +298,48 @@ func TestOfflineReadsPolicyComesFromTheServer(t *testing.T) {
 		}
 	}
 }
+
+// An ALLOW served because of learning mode or a grant (cacheable false, or a reason that is not a
+// plain policy allow) is never kept, and it drops an older cached allow of the same action.
+func TestOfflineNeverKeepsUncacheableAllows(t *testing.T) {
+	state := offlineRig(t)
+	yes, no := true, false
+	for name, res := range map[string]*hostclient.AuthorizeResult{
+		"explicit false":     {Decision: "ALLOW", Cacheable: &no},
+		"learning mode":      {Decision: "ALLOW", Reason: "learning_mode"},
+		"grant":              {Decision: "ALLOW", Reason: "grant"},
+		"approval":           {Decision: "ALLOW", Reason: "approved"},
+		"false beats policy": {Decision: "ALLOW", Reason: "policy_allow", Cacheable: &no},
+	} {
+		if d := offlineDecision(res); d == "ALLOW" {
+			t.Errorf("%s would be cached", name)
+		}
+	}
+	for name, res := range map[string]*hostclient.AuthorizeResult{
+		"plain, field absent":    {Decision: "ALLOW"},
+		"policy reason":          {Decision: "ALLOW", Reason: "policy_allow"},
+		"explicit true":          {Decision: "ALLOW", Reason: "x", Cacheable: &yes},
+		"denial is not an ALLOW": {Decision: "DENY", Reason: "no"},
+	} {
+		d := offlineDecision(res)
+		if (d == "ALLOW") != (res.Decision == "ALLOW") {
+			t.Errorf("%s: recorded as %s", name, d)
+		}
+	}
+
+	// end to end through the recorder: a cached allow, then the same action allowed by learning mode
+	recordOfflineDecision("host.cursor", me, "bash", "make test", "", offlineDecision(&hostclient.AuthorizeResult{Decision: "ALLOW"}))
+	save(t)
+	if v, _ := offlineVerdict("cursor", "bash", "make test"); !v.Allow {
+		t.Fatal("setup: a plain allow should be cached")
+	}
+	recordOfflineDecision("host.cursor", me, "bash", "make test", "", offlineDecision(&hostclient.AuthorizeResult{Decision: "ALLOW", Reason: "learning_mode"}))
+	recordOfflineDecision("host.cursor", me, "bash", "make lint", "", offlineDecision(&hostclient.AuthorizeResult{Decision: "ALLOW", Reason: "learning_mode"}))
+	save(t)
+	for _, c := range []string{"make test", "make lint"} {
+		if v, _ := offlineVerdict("cursor", "bash", c); v.Allow {
+			t.Errorf("%q outlived the learning-mode window", c)
+		}
+	}
+	_ = state
+}

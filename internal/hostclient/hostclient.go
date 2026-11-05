@@ -588,6 +588,10 @@ type AuthorizeResult struct {
 	Decision   string `json:"decision"`
 	Reason     string `json:"reason"`
 	ApprovalID string `json:"approvalId"`
+	// Cacheable is false for an ALLOW served because of learning mode or a long grant: the device
+	// must not keep it for offline use, or it would outlive the window or the revocation. Nil from an
+	// API that does not send it (then only a plain policy allow may be kept).
+	Cacheable *bool `json:"cacheable,omitempty"`
 }
 
 func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*AuthorizeResult, error) {

@@ -324,7 +324,7 @@ func relayHandler(b backend) http.Handler {
 			return
 		}
 		recordDecision(in.ToolID, in.ActionID, in.Resource, res.Decision, caller, time.Since(t0))
-		recordOfflineDecision(in.ToolID, caller, in.ActionID, in.Resource, raw["cwd"], res.Decision)
+		recordOfflineDecision(in.ToolID, caller, in.ActionID, in.Resource, raw["cwd"], offlineDecision(res))
 		json.NewEncoder(w).Encode(res)
 	})
 	// Undo AI file changes: the hook (running as the user) tells the service what it saved. The
@@ -536,4 +536,28 @@ func enrolled(dir string) bool {
 // service puts its own entry back and reports it.
 func foreignHook(key, path string, cmds []string) {
 	reportTamper(TamperHookRemoved, "host."+key, "", path, false)
+}
+
+// plainAllowReasons are the reasons of an ALLOW that is a plain policy allow. Until the API says
+// `cacheable` on every decision, an ALLOW with any other reason (learning mode, a grant, an
+// approval) is not kept for offline use.
+var plainAllowReasons = map[string]bool{"": true, "policy_allow": true, "allowed_by_policy": true}
+
+// offlineDecision is the decision the offline snapshot records for an answer: ALLOW only for an
+// ALLOW that may be cached. An uncacheable ALLOW is recorded as such, which also drops any older
+// cached allow of the same action, so a learning-mode or grant allow can never outlive its window.
+func offlineDecision(res *hostclient.AuthorizeResult) string {
+	if res.Decision != "ALLOW" {
+		return res.Decision
+	}
+	if res.Cacheable != nil {
+		if *res.Cacheable {
+			return "ALLOW"
+		}
+		return "ALLOW_NOT_CACHEABLE"
+	}
+	if plainAllowReasons[res.Reason] {
+		return "ALLOW"
+	}
+	return "ALLOW_NOT_CACHEABLE"
 }
