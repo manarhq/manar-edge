@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/pause"
 	"github.com/manarhq/manar-edge/internal/secrets/watch"
+	"regexp"
 )
 
 // When the device service cannot be reached (it is restarting), a hook must not stop a person's
@@ -230,10 +230,10 @@ func flushOffline() {
 
 // --- sensitivity: never decided offline ---
 
-var destructive = lazyre.New(`(?i)(^|[\s;&|(])(rm\s+-[a-z]*[rf]|rmdir\s|shred\s|mkfs|dd\s+.*\bof=|truncate\s|chmod\s+-R|chown\s+-R|git\s+(push\s+.*(--force|-f\b)|reset\s+--hard|clean\s+-[a-z]*f)|drop\s+(table|database)|del\s+/[sq]|rd\s+/s|format\s|remove-item\s+.*-recurse)`)
+var destructive = regexp.MustCompile(`(?i)(^|[\s;&|(])(rm\s+-[a-z]*[rf]|rmdir\s|shred\s|mkfs|dd\s+.*\bof=|truncate\s|chmod\s+-R|chown\s+-R|git\s+(push\s+.*(--force|-f\b)|reset\s+--hard|clean\s+-[a-z]*f)|drop\s+(table|database)|del\s+/[sq]|rd\s+/s|format\s|remove-item\s+.*-recurse)`)
 
 // secretName matches files that hold secrets, keys and credentials whatever folder they are in.
-var secretName = lazyre.New(`(?i)(^|[/\\])(\.env[^/\\]*|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.pgpass|\.kube[/\\]config|kubeconfig|id_(rsa|dsa|ecdsa|ed25519)[^/\\]*|[^/\\]*\.(pem|key|p12|pfx|kdbx|jks|keystore|gpg|asc)|[^/\\]*(secret|credential|password|passwd|token|apikey|api_key)[^/\\]*)$|[/\\]\.(ssh|aws|azure|gnupg|docker)[/\\]`)
+var secretName = regexp.MustCompile(`(?i)(^|[/\\])(\.env[^/\\]*|\.netrc|\.npmrc|\.pypirc|\.git-credentials|\.pgpass|\.kube[/\\]config|kubeconfig|id_(rsa|dsa|ecdsa|ed25519)[^/\\]*|[^/\\]*\.(pem|key|p12|pfx|kdbx|jks|keystore|gpg|asc)|[^/\\]*(secret|credential|password|passwd|token|apikey|api_key)[^/\\]*)$|[/\\]\.(ssh|aws|azure|gnupg|docker)[/\\]`)
 
 // sensitive is true for an action that touches a secret or can destroy data. The service never
 // records such an action as allowed, and the hook never decides one offline.
