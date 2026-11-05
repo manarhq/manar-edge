@@ -32,6 +32,8 @@ type Ctx struct {
 	GatewayURL string // local LLM gateway base URL, e.g. http://127.0.0.1:848
 	GatewayUp  bool   // answered /healthz just now: never route a tool to a gateway that is down
 	GOOS       string // runtime.GOOS unless a test says otherwise
+	// Foreign is told about Manar-looking hook entries that are not exactly this install's own.
+	Foreign func(key, path string, cmds []string)
 }
 
 // Keys are the tool keys protect knows; the host tool id is "host." + key.
@@ -63,8 +65,14 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 	if goos == "windows" {
 		appdata = filepath.Join(h, "AppData", "Roaming")
 	}
+	var curPath string // the file whose edit is running (edits run one after the other)
+	g := &guard{exe: c.Exe, report: func(cmds []string) {
+		if c.Foreign != nil {
+			c.Foreign(key, curPath, cmds)
+		}
+	}}
 	hook := func(path string, role Role, f func(map[string]any) error) Item {
-		return Item{FileEdit{Path: path, Edit: jsonObject(f), Kind: KindJSON, Mode: 0o644}, role}
+		return Item{FileEdit{Path: path, Edit: jsonObject(func(r map[string]any) error { curPath = path; return f(r) }), Kind: KindJSON, Mode: 0o644}, role}
 	}
 	mcp := func(path, field string) Item {
 		return Item{FileEdit{Path: path, Kind: KindJSON, Mode: 0o644, Edit: jsonObject(func(r map[string]any) error {
@@ -85,7 +93,7 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 				// A hook that cannot start, crashes or times out blocks the call (Claude Code
 				// versions without onFailure ignore it and fail open).
 				"onFailure": "block",
-			}}})
+			}}}, g)
 		})}
 	case "cursor":
 		cursorHook := func(event, arg string) func(map[string]any) error {
@@ -95,7 +103,7 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 				}
 				return setFlatHook(r, event, map[string]any{
 					"command": hookCommand(c.Exe, key, arg), "timeout": json.Number("600"), "failClosed": true,
-				})
+				}, g)
 			}
 		}
 		p := filepath.Join(h, ".cursor", "hooks.json")
@@ -107,7 +115,7 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 		wh := func(event, arg string) func(map[string]any) error {
 			return func(r map[string]any) error {
 				cmd := hookCommand(c.Exe, key, arg)
-				return setFlatHook(r, event, map[string]any{"command": cmd, "powershell": "& " + cmd, "show_output": false})
+				return setFlatHook(r, event, map[string]any{"command": cmd, "powershell": "& " + cmd, "show_output": false}, g)
 			}
 		}
 		dir := filepath.Join(h, ".codeium", "windsurf")
@@ -121,7 +129,7 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 			hook(p, RoleHook, func(r map[string]any) error {
 				return setNestedHook(r, "BeforeTool", map[string]any{"matcher": "*", "hooks": []any{map[string]any{
 					"type": "command", "command": hookCommand(c.Exe, key, "tool"), "timeout": json.Number("600000"),
-				}}})
+				}}}, g)
 			}),
 			mcp(p, "mcpServers"),
 		}
@@ -129,7 +137,7 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 		items := []Item{hook(filepath.Join(h, ".codex", "hooks.json"), RoleUntrusted, func(r map[string]any) error {
 			return setNestedHook(r, "PreToolUse", map[string]any{"matcher": "*", "hooks": []any{map[string]any{
 				"type": "command", "command": hookCommand(c.Exe, key, "tool"),
-			}}})
+			}}}, g)
 		})}
 		cfg := filepath.Join(h, ".codex", "config.toml")
 		if c.GatewayUp && c.GatewayURL != "" && goos != "windows" {
@@ -149,7 +157,7 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 				}
 				return setFlatHook(r, "preToolUse", map[string]any{
 					"type": "command", "command": hookCommand(c.Exe, key, "tool"), "timeoutSec": json.Number("600"),
-				})
+				}, g)
 			}),
 			mcp(filepath.Join(h, ".copilot", "mcp-config.json"), "mcpServers"),
 		}

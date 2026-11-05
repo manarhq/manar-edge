@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 )
 
@@ -42,9 +44,100 @@ func jsonObject(fn func(root map[string]any) error) Edit {
 }
 
 // isOurs recognises a command Manar installed, by the subcommand and the program name.
+// A command that runs Manar's hook subcommand for a known tool counts as ours whatever program
+// it names, so an entry repointed at another program is found and put back.
+var reHookTool = regexp.MustCompile(`(?i)\bhook-tool\s+(claude-code|cursor|windsurf|gemini-cli|codex-cli|copilot-cli)\s+\w+`)
+
 func isOurs(cmd string) bool {
 	l := strings.ToLower(cmd)
-	return strings.Contains(l, "manar-edge") && (strings.Contains(l, "hook-tool") || strings.Contains(l, "mcp-wrap"))
+	return reHookTool.MatchString(cmd) || strings.Contains(l, "manar-edge") && (strings.Contains(l, "hook-tool") || strings.Contains(l, "mcp-wrap"))
+}
+
+// commandExe is the program a hook command runs: the quoted first word (as hookCommand writes
+// it), or the first word.
+func commandExe(cmd string) string {
+	cmd = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(cmd), "& "))
+	if strings.HasPrefix(cmd, `"`) {
+		if j := strings.Index(cmd[1:], `"`); j >= 0 {
+			return cmd[1 : j+1]
+		}
+		return ""
+	}
+	if f := strings.Fields(cmd); len(f) > 0 {
+		return f[0]
+	}
+	return ""
+}
+
+// guard knows this install's program and where to report tampering. This install owns every
+// Manar-looking hook entry in a file: nothing but its own exact entry is allowed to stay.
+type guard struct {
+	exe    string
+	report func(cmds []string)
+}
+
+// canonicalHook splits a command Manar writes: its program in quotes, hook-tool, the tool key and
+// one event word (an optional "& " is the PowerShell form Windsurf uses).
+var canonicalHook = regexp.MustCompile(`^(& )?"([^"\x00-\x1f]+)" hook-tool ([a-z-]+) (tool|shell|read|mcp)$`)
+
+// sameExe compares two program paths after Clean, EvalSymlinks (when the file exists) and, on
+// Windows, case folding.
+func sameExe(a, b string) bool {
+	norm := func(p string) string {
+		p = filepath.Clean(p)
+		if r, err := filepath.EvalSymlinks(p); err == nil {
+			p = r
+		}
+		if runtime.GOOS == "windows" {
+			p = strings.ToLower(p)
+		}
+		return p
+	}
+	return a != "" && b != "" && norm(a) == norm(b)
+}
+
+// withOwnExe returns e with every canonical hook command that runs this install's program (by
+// sameExe) written with exactly want's text for the program, so a path spelled another way for the
+// same binary still compares equal. Commands that run anything else are left as they are.
+func (g *guard) withOwnExe(e any) any {
+	switch v := e.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for k, x := range v {
+			out[k] = g.withOwnExe(x)
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, x := range v {
+			out[i] = g.withOwnExe(x)
+		}
+		return out
+	case string:
+		if m := canonicalHook.FindStringSubmatch(v); m != nil && sameExe(m[2], g.exe) {
+			return m[1] + `"` + g.exe + `" hook-tool ` + m[3] + ` ` + m[4]
+		}
+	}
+	return e
+}
+
+// entryCommands lists the command strings of one hook entry (flat or nested).
+func entryCommands(e any) []string {
+	var out []string
+	m, _ := e.(map[string]any)
+	for _, k := range []string{"command", "powershell", "bash"} {
+		if s, _ := m[k].(string); s != "" {
+			out = append(out, s)
+		}
+	}
+	hs, _ := m["hooks"].([]any)
+	for _, h := range hs {
+		hm, _ := h.(map[string]any)
+		if s, _ := hm["command"].(string); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func objAt(m map[string]any, key string) (map[string]any, error) {
@@ -81,7 +174,7 @@ func sameJSON(a, b any) bool {
 
 // setFlatHook puts entry in root.hooks[event] (a list of entries that each have "command"),
 // replacing an older Manar entry, leaving everyone else's.
-func setFlatHook(root map[string]any, event string, entry map[string]any) error {
+func setFlatHook(root map[string]any, event string, entry map[string]any, g *guard) error {
 	hooks, err := objAt(root, "hooks")
 	if err != nil {
 		return err
@@ -90,7 +183,7 @@ func setFlatHook(root map[string]any, event string, entry map[string]any) error 
 	if err != nil {
 		return err
 	}
-	return putOurs(hooks, event, list, entry, func(e any) bool {
+	return putOurs(hooks, event, list, entry, g, func(e any) bool {
 		m, _ := e.(map[string]any)
 		for _, k := range []string{"command", "powershell", "bash"} {
 			if s, _ := m[k].(string); isOurs(s) {
@@ -102,7 +195,7 @@ func setFlatHook(root map[string]any, event string, entry map[string]any) error 
 }
 
 // setNestedHook is the Claude-style shape: root.hooks[event] is a list of {matcher, hooks:[...]}.
-func setNestedHook(root map[string]any, event string, group map[string]any) error {
+func setNestedHook(root map[string]any, event string, group map[string]any, g *guard) error {
 	hooks, err := objAt(root, "hooks")
 	if err != nil {
 		return err
@@ -111,8 +204,8 @@ func setNestedHook(root map[string]any, event string, group map[string]any) erro
 	if err != nil {
 		return err
 	}
-	return putOurs(hooks, event, list, group, func(g any) bool {
-		m, _ := g.(map[string]any)
+	return putOurs(hooks, event, list, group, g, func(x any) bool {
+		m, _ := x.(map[string]any)
 		hs, _ := m["hooks"].([]any)
 		for _, h := range hs {
 			hm, _ := h.(map[string]any)
@@ -124,17 +217,34 @@ func setNestedHook(root map[string]any, event string, group map[string]any) erro
 	})
 }
 
-func putOurs(parent map[string]any, event string, list []any, want map[string]any, ours func(any) bool) error {
+// putOurs makes want the only Manar entry in list. An existing entry that is exactly want (the
+// program compared with sameExe) stays untouched; every other Manar-looking entry, a changed
+// timeout, an extra hook or field, a duplicate, another program, is removed and reported, and want
+// is put in. Entries that are not Manar's are left alone.
+func putOurs(parent map[string]any, event string, list []any, want map[string]any, g *guard, ours func(any) bool) error {
+	kept := make([]any, 0, len(list)+1)
+	exact, tampered := 0, false
 	for _, e := range list {
-		if ours(e) && sameJSON(e, want) {
-			return nil // already there, exactly
+		switch {
+		case !ours(e):
+			kept = append(kept, e)
+		case sameJSON(e, want) || (g != nil && sameJSON(g.withOwnExe(e), want)):
+			exact++
+			if exact > 1 { // a second copy is not ours to leave
+				tampered = true
+				if g != nil {
+					g.report(entryCommands(e))
+				}
+			}
+		default:
+			tampered = true
+			if g != nil {
+				g.report(entryCommands(e))
+			}
 		}
 	}
-	kept := make([]any, 0, len(list)+1)
-	for _, e := range list {
-		if !ours(e) {
-			kept = append(kept, e)
-		}
+	if exact == 1 && !tampered {
+		return nil // already there, exactly
 	}
 	parent[event] = append(kept, want)
 	return nil

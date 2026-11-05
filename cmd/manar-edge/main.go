@@ -61,6 +61,7 @@ func main() {
 	cmd, rest := args[0], args[1:]
 	telemetry.Configure(base, version)
 	protect.Configure(base)
+	protect.SystemStateDir = defaultStateBase
 	door.Configure(base)
 	undo.Configure(base, exeForHelpers())
 	protect.ClaudeSettingsPath = managedSettingsPath

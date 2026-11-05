@@ -491,6 +491,11 @@ type Config struct {
 	// VaultGrants lists the standing secret-vault grants ("8 hours", "Always") the device may keep;
 	// it drops any other. Nil from an API that does not send it: then no standing grant counts.
 	VaultGrants *[]VaultGrant `json:"vaultGrants,omitempty"`
+	// OfflineReadsAllowed is the workspace policy that reads of ordinary files keep working while
+	// the device service restarts (decision 35). Nil from an API that does not send it: no.
+	OfflineReadsAllowed *bool `json:"offlineReadsAllowed,omitempty"`
+	// OfflineReadDeny are path patterns (globs, or folders ending in a slash) never read offline.
+	OfflineReadDeny []string `json:"offlineReadDeny,omitempty"`
 }
 
 // VaultGrant is one standing grant: the console request that gave it and when it ends (nil: no end).

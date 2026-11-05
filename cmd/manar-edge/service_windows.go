@@ -83,11 +83,11 @@ func deviceServiceInstall(exe, base string) error {
 		}
 	}
 	defer s.Close()
-	// Restart on failure: 5 s, 5 s, 30 s, and reset the count after a day.
+	// Restart on failure within seconds: 2 s, 2 s, 10 s, and reset the count after a day.
 	_ = s.SetRecoveryActions([]mgr.RecoveryAction{
-		{Type: mgr.ServiceRestart, Delay: 5_000_000_000},
-		{Type: mgr.ServiceRestart, Delay: 5_000_000_000},
-		{Type: mgr.ServiceRestart, Delay: 30_000_000_000},
+		{Type: mgr.ServiceRestart, Delay: 2_000_000_000},
+		{Type: mgr.ServiceRestart, Delay: 2_000_000_000},
+		{Type: mgr.ServiceRestart, Delay: 10_000_000_000},
 	}, 86400)
 	return s.Start()
 }

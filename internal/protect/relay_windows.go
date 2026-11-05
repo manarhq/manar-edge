@@ -152,6 +152,9 @@ func openPipe() (windows.Handle, error) {
 func dialRelay(context.Context) (net.Conn, error) {
 	h, err := openPipe()
 	if err != nil {
+		if errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
+			return nil, &downError{err}
+		}
 		return nil, err
 	}
 	var pid uint32

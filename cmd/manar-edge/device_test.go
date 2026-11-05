@@ -28,7 +28,7 @@ func TestUnitTextRunsTheServiceFromTheStateDir(t *testing.T) {
 	u := unitText("/usr/local/bin/manar-edge", "/var/lib/manar-edge")
 	for _, want := range []string{
 		"ExecStart=/usr/local/bin/manar-edge --state-dir /var/lib/manar-edge service run",
-		"Restart=always", "WantedBy=multi-user.target",
+		"Restart=always", "RestartSec=2", "WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("unit lacks %q:\n%s", want, u)

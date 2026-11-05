@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -70,7 +72,7 @@ var lockedReason = func() string {
 	case "account_suspended":
 		return "device_locked (the workspace is suspended; AI actions stay blocked until it is active again)"
 	case "workspace_deleted":
-		return "device_locked (the workspace is being deleted; an administrator of this computer can uninstall Manar)"
+		return "device_locked (the workspace is being deleted; ask your administrator)"
 	case "device_revoked":
 		return "device_locked (this device was revoked by its workspace; AI actions stay blocked until an admin acts)"
 	default:
@@ -110,6 +112,7 @@ func gatewayUp() bool { return door.Routable() && door.Healthy(GatewayURL) }
 // than APPROVED (pending, revoked, rejected) leaves what is installed alone: hooks come out only
 // on the workspace's authenticated "removed" reply (the daemon's unprotect) or a local uninstall.
 func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Config) map[string]discovery.State {
+	var blocked bool
 	st := theStore()
 	states := map[string]discovery.State{}
 	if st == nil {
@@ -120,10 +123,18 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 		off[id] = true
 	}
 	approved := cfg.Status == "APPROVED"
+	setOfflineReadsPolicy(approved && cfg.OfflineReadsAllowed != nil && *cfg.OfflineReadsAllowed, cfg.OfflineReadDeny)
+	// Hooks are written only by the privileged device service of an enrolled device. A copy run by
+	// a user (or a test install on a developer machine) must not touch anyone's AI-tool settings.
+	if approved && !mayWriteHooks() {
+		logOnce("not changing any AI tool settings: " + refusal())
+		approved = false
+		blocked = true
+	}
 	if approved && !off["host.claude-code"] {
 		scanClaudeOverrides(found)
 	}
-	ctx := Ctx{Exe: exePath(), GatewayURL: GatewayURL}
+	ctx := Ctx{Exe: exePath(), GatewayURL: GatewayURL, Foreign: foreignHook}
 	if approved {
 		ctx.GatewayUp = gatewayUp()
 	}
@@ -144,7 +155,7 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 		if !known {
 			continue
 		}
-		states[f.ID] = reconcileTool(st, f, ctx, approved, off[f.ID])
+		states[f.ID] = reconcileTool(st, f, ctx, approved, off[f.ID] && !blocked)
 	}
 	return states
 }
@@ -214,7 +225,8 @@ func claudeCodeState() discovery.State {
 	return discovery.State{Protected: true, Mode: "hook", Changes: []string{ClaudeSettingsPath + " (managed settings written by install-claude-code)"}}
 }
 
-func exePath() string {
+// exePath is the running program (a var so tests can pose as an installed manar-edge).
+var exePath = func() string {
 	p, err := os.Executable()
 	if err != nil {
 		return "manar-edge"
@@ -312,6 +324,7 @@ func relayHandler(b backend) http.Handler {
 			return
 		}
 		recordDecision(in.ToolID, in.ActionID, in.Resource, res.Decision, caller, time.Since(t0))
+		recordOfflineDecision(in.ToolID, caller, in.ActionID, in.Resource, raw["cwd"], res.Decision)
 		json.NewEncoder(w).Encode(res)
 	})
 	// Undo AI file changes: the hook (running as the user) tells the service what it saved. The
@@ -468,3 +481,59 @@ func recordDecision(toolID, actionID, resource, decision, caller string, took ti
 
 // Unprotect restores every tool's settings when the device is removed from its workspace.
 func (m *relayModule) Unprotect(ctx context.Context) error { return m.Cleanup(ctx) }
+
+func stateDirNow() string {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	return stateDir
+}
+
+// SystemStateDir is the state directory of the admin-installed service; set by the command
+// package. Only a service that uses it may write hooks.
+var SystemStateDir string
+
+// mayWriteHooks is true only for the enrolled, admin-installed service: a privileged process (root,
+// SYSTEM) that is enrolled and uses the system state directory. Any other copy, such as one a user
+// runs or a test install with its own state directory, never writes or touches hook files. It is
+// a var so tests can set it.
+var mayWriteHooks = func() bool { return refusal() == "" }
+
+// privileged is a var so tests can pose as root.
+var privileged = isPrivileged
+
+// refusal says why this process may not write hooks ("" when it may).
+func refusal() string {
+	d := stateDirNow()
+	switch {
+	case !privileged():
+		return "it does not run as root or SYSTEM"
+	case SystemStateDir == "" || !sameDir(d, SystemStateDir):
+		return "its state directory is not the system one"
+	case !enrolled(d):
+		return "the device is not enrolled"
+	}
+	return ""
+}
+
+func sameDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func enrolled(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(hostclient.Dir(dir), "host.json"))
+	return err == nil
+}
+
+// foreignHook is told about Manar-looking hook entries that are not exactly this service's own.
+// One machine has one WARDEN install, so every such entry is tampering (or a stale path): the
+// service puts its own entry back and reports it.
+func foreignHook(key, path string, cmds []string) {
+	reportTamper(TamperHookRemoved, "host."+key, "", path, false)
+}

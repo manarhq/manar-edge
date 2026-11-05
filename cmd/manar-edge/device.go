@@ -366,7 +366,7 @@ After=network-online.target
 Type=simple
 ExecStart=%s --state-dir %s service run
 Restart=always
-RestartSec=5
+RestartSec=2
 # Whenever the service stops or dies, give the protected tools their network back (the filter is
 # put up again within seconds when the service restarts).
 ExecStopPost=-%s --state-dir %s jail-restore

@@ -73,15 +73,15 @@ func TestRelayRefusesASocketThatIsNotTheServices(t *testing.T) {
 	srv := newRelayServer(&fakeBackend{})
 	go srv.Serve(l)
 	defer srv.Close()
-	if v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9); v.Allow || !strings.Contains(v.Reason, "manar-edge protect restore") {
-		t.Fatalf("trusted a squatted socket, or gave no way out: %+v", v)
+	if v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9); v.Allow || !strings.Contains(v.Reason, "restart it or contact their administrator") {
+		t.Fatalf("trusted a squatted socket, or gave no hint for the person: %+v", v)
 	}
 }
 
-func TestDecideFailsClosedWithAWayOutWhenTheServiceIsGone(t *testing.T) {
+func TestDecideFailsClosedAndNamesNoCommandWhenTheServiceIsGone(t *testing.T) {
 	relayDir, relaySock, relayOwner = t.TempDir(), filepath.Join(t.TempDir(), "none.sock"), uint32(os.Geteuid())
 	v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9)
-	if v.Allow || !strings.Contains(v.Reason, "manar-edge protect restore") {
+	if v.Allow || !strings.Contains(v.Reason, "restart it or contact their administrator") {
 		t.Fatalf("%+v", v)
 	}
 }

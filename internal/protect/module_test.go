@@ -10,6 +10,8 @@ import (
 	"github.com/manarhq/manar-edge/internal/hostclient"
 )
 
+func init() { mayWriteHooks = func() bool { return true } } // tests run unprivileged and not enrolled
+
 func TestReconcileFollowsApprovalAndTheOwnersSwitch(t *testing.T) {
 	root := t.TempDir()
 	Configure(filepath.Join(root, "state"))
