@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -486,5 +487,31 @@ func TestEnrolForAnotherWorkspaceNeedsConfirmationAndUsesANewKey(t *testing.T) {
 	// The new files work together.
 	if _, err := New(dir); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A device behind a corporate proxy must still reach Manar (edge-case spec section 7, item 9).
+// Go reads the proxy variables once per process, so the check runs in a child process that has
+// them from the start.
+func TestMTLSClientFollowsTheProxyEnvironment(t *testing.T) {
+	if os.Getenv("MANAR_TEST_PROXY_CHILD") != "1" {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestMTLSClientFollowsTheProxyEnvironment$")
+		cmd.Env = append(os.Environ(), "MANAR_TEST_PROXY_CHILD=1", "HTTPS_PROXY=http://proxy.corp.example:3128", "NO_PROXY=")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v\n%s", err, out)
+		}
+		return
+	}
+	req, _ := http.NewRequest(http.MethodGet, "https://manar.example/host/v1/config", nil)
+	tr := mtlsHTTP(tls.Certificate{}, x509.NewCertPool()).Transport.(*http.Transport)
+	if tr.Proxy == nil {
+		t.Fatal("the device client ignores HTTPS_PROXY")
+	}
+	u, err := tr.Proxy(req)
+	if err != nil || u == nil || u.Host != "proxy.corp.example:3128" {
+		t.Fatalf("proxy = %v, %v", u, err)
+	}
+	if tr.TLSClientConfig.MinVersion != tls.VersionTLS13 || tr.TLSClientConfig.RootCAs == nil {
+		t.Fatal("the pinned CA and TLS 1.3 must stay")
 	}
 }

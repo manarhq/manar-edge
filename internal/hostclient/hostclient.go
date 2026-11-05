@@ -299,12 +299,19 @@ func New(stateDir string) (*Client, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("host-ca.pem has no certificate")
 	}
-	return &Client{Info: &info, base: base.String(), stateDir: stateDir, removed: make(chan struct{}), http: &http.Client{
+	return &Client{Info: &info, base: base.String(), stateDir: stateDir, removed: make(chan struct{}), http: mtlsHTTP(cert, roots)}, nil
+}
+
+// mtlsHTTP is the device's client for Manar. It follows HTTPS_PROXY / NO_PROXY: a CONNECT proxy
+// only tunnels bytes, so the pinned CA and the device certificate still decide who is trusted
+// (a proxy that opens the TLS session fails the handshake and the device keeps what it has).
+func mtlsHTTP(cert tls.Certificate, roots *x509.CertPool) *http.Client {
+	return &http.Client{
 		Timeout: 30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		Transport: &http.Transport{Proxy: http.ProxyFromEnvironment, TLSClientConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert}, RootCAs: roots, MinVersion: tls.VersionTLS13,
 		}},
-	}}, nil
+	}
 }
 
 // NewForTest builds a client for an already running server, with no host files. Tests only.
