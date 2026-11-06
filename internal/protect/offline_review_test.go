@@ -58,9 +58,8 @@ func TestOfflineHardLinkedFilesAreNotAllowed(t *testing.T) {
 	if v, ok := offlineVerdict("claude-code", "read", notes); ok && v.Allow {
 		t.Errorf("read of a hard link to ~/.ssh/id_ed25519 allowed offline: %+v", v)
 	}
-	// Package managers hard-link every file of node_modules: a hard-linked file inside the project
-	// that is not a credential file is an ordinary file (no friction). The cost: a hard link in the
-	// project to a non-credential file of another project can be read offline.
+	// A file with several names is keyed by none of them, whatever folder it is in (node_modules
+	// included: folder names are the attacker's to choose): it waits for an exact allow.
 	store := filepath.Join(userHome(), ".pnpm-store")
 	os.MkdirAll(store, 0o755)
 	os.WriteFile(filepath.Join(store, "pkg.js"), []byte("x"), 0o644)
@@ -69,8 +68,13 @@ func TestOfflineHardLinkedFilesAreNotAllowed(t *testing.T) {
 	if err := os.Link(filepath.Join(store, "pkg.js"), filepath.Join(nm, "pkg.js")); err != nil {
 		t.Skip(err)
 	}
+	if v, _ := offlineVerdict("claude-code", "read", filepath.Join(nm, "pkg.js")); v.Allow {
+		t.Errorf("a hard-linked node_modules file was read offline without an exact allow: %+v", v)
+	}
+	recordOfflineDecision("host.claude-code", me, "read", filepath.Join(nm, "pkg.js"), proj, "ALLOW")
+	save(t)
 	if v, _ := offlineVerdict("claude-code", "read", filepath.Join(nm, "pkg.js")); !v.Allow {
-		t.Errorf("a hard-linked node_modules file should be readable offline: %+v", v)
+		t.Errorf("an exact allow of the hard-linked file should count: %+v", v)
 	}
 	if v, _ := offlineVerdict("claude-code", "read", filepath.Join(proj, "other.go")); !v.Allow {
 		t.Error("an ordinary file of the project should still be readable")
@@ -100,7 +104,7 @@ func TestOfflineShellAllowIsBoundToItsWorkingFolder(t *testing.T) {
 	if v, ok := offlineVerdict("claude-code", "bash", "cat config"); ok && v.Allow {
 		t.Errorf("'cat config' allowed offline from the hook's own cwd ~/.kube: %+v", v)
 	}
-	if !commandTouchesSecretViaLink("cat config", userHome(), kube, nil) {
+	if !commandTouchesSecretViaLink("cat config", userHome(), kube) {
 		t.Error("a bare word naming ~/.kube/config was not seen")
 	}
 }

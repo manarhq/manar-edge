@@ -566,10 +566,9 @@ func isCommandSeparator(r rune) bool {
 //   - a word that exists but cannot be resolved (a link that points nowhere, a loop, a magic link)
 //     is refused: the command could write through it;
 //   - a word that resolves to a sensitive path is refused (a link to a secret behind an ordinary name);
-//   - a hard-linked file is refused when it is a credential file (same device and inode) or is not
-//     a package file (see packageFile): package managers hard-link every file of node_modules, and
-//     nothing else is let through on the strength of a folder.
-func commandTouchesSecretViaLink(cmd, home, cwd string, inRoot func(realPath string) bool) bool {
+//   - a hard-linked file waits, whatever folder it is in (folder names are the attacker's to
+//     choose): it is keyed by none of its names, so it needs an exact allow of that very path.
+func commandTouchesSecretViaLink(cmd, home, cwd string) bool {
 	n := 0
 	for _, f := range strings.FieldsFunc(cmd, isCommandSeparator) {
 		if n++; n > 64 {
@@ -602,35 +601,10 @@ func commandTouchesSecretViaLink(cmd, home, cwd string, inRoot func(realPath str
 			return true
 		}
 		if fi, err := os.Lstat(r); err == nil && fi.Mode().IsRegular() && linkCount(r, fi) > 1 {
-			if hardLinkedCredential(fi, home) || !packageFile(r, inRoot) {
-				return true
-			}
+			return true // a file with several names is keyed by none of them: it needs an exact allow, so it waits
 		}
 	}
 	return false
-}
-
-// packageFile is true for a file under a node_modules folder (inside a recorded project folder,
-// when inRoot is given) or in a known package-manager store: the only places where a hard-linked
-// file is ordinary. Everywhere else a file with several names needs an exact allow.
-func packageFile(p string, inRoot func(string) bool) bool {
-	segs := strings.Split(fold(p), "/")
-	has := func(want ...string) bool {
-		for i := 0; i+len(want) <= len(segs); i++ {
-			ok := true
-			for j, w := range want {
-				ok = ok && segs[i+j] == w
-			}
-			if ok {
-				return true
-			}
-		}
-		return false
-	}
-	if has(".pnpm-store") || has(".yarn", "cache") || has(".bun", "install", "cache") || has(".local", "share", "pnpm") {
-		return true
-	}
-	return has("node_modules") && (inRoot == nil || inRoot(p))
 }
 
 // hardLinkedCredential is true when fi is (another name for) a credential file of the person, or
@@ -778,11 +752,16 @@ func insideRecordedRoot(s *offlineSnapshot, toolID, real string) bool {
 
 // plainCommand is true for a command made only of plain words, quotes around plain words, and the
 // known separators. Offline, nothing else is replayed: a quote around a space, a backslash, a
-// variable, a glob, a brace, a backquote or a cd (which changes what later words name) makes a word
+// variable, a glob, a brace, a backquote, a cd or env -C / git -C / xargs / find (which change or
+// compute what later words name) makes a word
 // name something this check cannot see.
 func plainCommand(cmd string) bool {
+	chars := "._/+-:@,="
+	if runtime.GOOS != "windows" {
+		chars += "%" // on Windows %NAME% is a variable
+	}
 	plain := func(r rune) bool {
-		return r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._/+-:@%,=", r))
+		return r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune(chars, r))
 	}
 	var quote rune
 	for _, r := range cmd {
@@ -805,7 +784,10 @@ func plainCommand(cmd string) bool {
 	}
 	for _, w := range strings.FieldsFunc(cmd, isCommandSeparator) {
 		switch strings.Trim(w, `"'`) {
-		case "cd", "pushd", "popd":
+		case "cd", "pushd", "popd", "xargs", "find", "-exec", "-execdir", "-ok", "-C", "--chdir", "--directory":
+			return false // changes folder or computes the names the later words refer to
+		}
+		if strings.HasPrefix(strings.Trim(w, `"'`), "--chdir=") || strings.HasPrefix(strings.Trim(w, `"'`), "--directory=") {
 			return false
 		}
 	}
@@ -853,8 +835,7 @@ func offlineVerdictIn(key, action, resource, cwd string) (v Verdict, ok bool) {
 			return wait, true // quoting, escapes, variables, globs, cd: what a word names cannot be told
 		}
 		wd := canonCwd(cwd)
-		inRoot := func(r string) bool { return insideRecordedRoot(&s, tool, r) }
-		if commandTouchesSecretViaLink(resource, userHome(), wd, inRoot) {
+		if commandTouchesSecretViaLink(resource, userHome(), wd) {
 			return refuse, true
 		}
 		k := shellKey(localCaller(), action, wd, resource)
@@ -886,13 +867,8 @@ func offlineVerdictIn(key, action, resource, cwd string) (v Verdict, ok bool) {
 	}
 	if fi, err := os.Lstat(real); err == nil && fi.Mode().IsRegular() && linkCount(real, fi) > 1 {
 		// A file with several names is keyed by none of them: refusals and deny rules written for
-		// another name do not apply. Only a package file may ride on the folder rule; anything else
-		// needs an exact allow of this very path.
-		if packageFile(real, func(p string) bool { return insideRecordedRoot(&s, tool, p) }) {
-			if action == "read" && s.ReadsAllowed && !s.RefusedFull && insideRecordedRoot(&s, tool, real) {
-				return yes, true
-			}
-		}
+		// another name do not apply, and no folder rule covers it (folder names are the attacker's
+		// to choose, node_modules included). It needs an exact allow of this very path.
 		if hasEntry(t.Allowed, k) {
 			return yes, true
 		}

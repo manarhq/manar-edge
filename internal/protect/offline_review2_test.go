@@ -101,7 +101,7 @@ func TestOfflineShellRedirectWithoutSpaceThroughLink(t *testing.T) {
 		t.Errorf("'echo hi>out.txt' with out.txt -> ~/.aws/credentials allowed offline: %+v", v)
 	}
 	for _, c := range []string{"cat<out.txt", "echo x|tee out.txt", "(cat out.txt)", "cat `echo out.txt`", "cmd --out=out.txt"} {
-		if !commandTouchesSecretViaLink(c, userHome(), proj, nil) {
+		if !commandTouchesSecretViaLink(c, userHome(), proj) {
 			t.Errorf("%q: the word out.txt was not seen", c)
 		}
 	}
@@ -117,8 +117,8 @@ func TestOfflineShellDanglingLinkIsRefused(t *testing.T) {
 	}
 }
 
-// B3: a command word that is a hard link to a credential file is refused; a hard link inside the
-// project (node_modules) is fine; one outside every recorded folder is refused.
+// B3: a command word that is a hard link waits, whatever the folder (credential file, node_modules,
+// or outside every recorded folder).
 func TestOfflineShellHardLinks(t *testing.T) {
 	proj := shellRig(t, "cat notes.txt")
 	os.MkdirAll(filepath.Join(userHome(), ".ssh"), 0o700)
@@ -138,8 +138,8 @@ func TestOfflineShellHardLinks(t *testing.T) {
 	os.WriteFile(filepath.Join(store, "pkg.js"), []byte("x"), 0o644)
 	os.MkdirAll(filepath.Join(proj, "node_modules"), 0o755)
 	os.Link(filepath.Join(store, "pkg.js"), filepath.Join(proj, "node_modules", "pkg.js"))
-	if v, _ := offlineVerdict("claude-code", "bash", "cat node_modules/pkg.js"); !v.Allow {
-		t.Errorf("a hard-linked package file in the project should be fine: %+v", v)
+	if v, ok := offlineVerdict("claude-code", "bash", "cat node_modules/pkg.js"); ok && v.Allow {
+		t.Errorf("a command naming a hard-linked package file was replayed offline: %+v", v)
 	}
 	// a hard link to a file outside every recorded folder, named by an absolute path
 	elsewhere := filepath.Join(userHome(), "elsewhere")
