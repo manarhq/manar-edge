@@ -35,7 +35,7 @@ func isReparse(path string) (bool, error) {
 }
 
 // readTrusted reads the snapshot only when the file and the folders above it, up to the state
-// base, are owned by SYSTEM or Administrators with no write access for anyone else (the check the
+// folder, are owned by SYSTEM or Administrators with no write access for anyone else (the check the
 // WARDEN helper uses), neither the file nor its folder is a reparse point, and the file is opened
 // with FILE_FLAG_OPEN_REPARSE_POINT and checked on the handle. Otherwise the hook fails closed.
 var readTrusted = func(state string) ([]byte, error) {
@@ -45,7 +45,10 @@ var readTrusted = func(state string) ([]byte, error) {
 			return nil, errUnprotected
 		}
 	}
-	if err := warden.CheckProtected(f, filepath.Clean(state)); err != nil {
+	// Only the file and its folder are checked: a standard user cannot read the security descriptor
+	// of ProgramData\manar-edge above them, and need not (nobody but SYSTEM and Administrators can
+	// replace the folder, which lives in a SYSTEM/Administrators-only parent).
+	if err := warden.CheckProtected(f, offlineDir(state)); err != nil {
 		return nil, err
 	}
 	name, err := windows.UTF16PtrFromString(f)

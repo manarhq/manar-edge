@@ -211,11 +211,15 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 		var down *downError
 		if errors.As(err, &down) {
 			if v, ok := offlineVerdictFn(key, actionID, resource); ok {
+				if v.Allow {
+					queueOfflineAllow(key, actionID, resource) // told to Manar when the service is back
+				}
 				return v
 			}
 		}
 		return Verdict{false, "Manar: authorization failed." + unreachableHint}
 	}
+	r.flushOfflineAllows()
 	switch dec.Decision {
 	case "ALLOW":
 		return Verdict{true, "Manar: allowed"}

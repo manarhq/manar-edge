@@ -62,7 +62,6 @@ func reportTamper(kind, toolID, process, path string, blocked bool) {
 		tamper.seen = map[string]time.Time{}
 	}
 	tamper.seen[key] = now
-	c, send := tamper.c, tamper.send
 	tamper.mu.Unlock()
 
 	ev := map[string]any{"type": kind, "toolId": toolID, "blocked": blocked, "at": now.UTC()}
@@ -73,6 +72,15 @@ func reportTamper(kind, toolID, process, path string, blocked bool) {
 		ev["maskedPath"] = clipText(host.MaskPath(host.Homes(), path), 1024)
 	}
 	logOnce("tampering seen (" + kind + ") for " + toolID + ": reported to the console")
+	sendEvent(ev)
+}
+
+// sendEvent posts one device event to Manar (best effort, never blocks the caller). Tests replace
+// tamper.send.
+func sendEvent(ev map[string]any) {
+	tamper.mu.Lock()
+	c, send := tamper.c, tamper.send
+	tamper.mu.Unlock()
 	if send != nil {
 		send(ev)
 		return
@@ -84,7 +92,7 @@ func reportTamper(kind, toolID, process, path string, blocked bool) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		if err := c.Do(ctx, http.MethodPost, "/events", map[string]any{"events": []any{ev}}, nil); err != nil {
-			log.Printf("manar-edge: protect: tamper report: %v", err)
+			log.Printf("manar-edge: protect: event report: %v", err)
 		}
 	}()
 }

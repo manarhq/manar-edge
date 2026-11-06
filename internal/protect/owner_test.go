@@ -280,30 +280,82 @@ func TestOnlyTheExactOwnEntryStays(t *testing.T) {
 	}
 }
 
-// The exact own entry is left alone and not reported, also when it spells the same binary another
-// way (a symlink, an unclean path).
-func TestOwnEntryIsNotTamperingWhateverTheSpellingOfItsBinary(t *testing.T) {
+// The symlink-swap attack: a link in the person's own folder points at the service's binary, the
+// hook entry names the link, the service accepts it, then the link is pointed at something else.
+// The service never resolves the path in the file: any alias is replaced and reported.
+func TestAliasOfOwnBinaryIsReplacedAndReported(t *testing.T) {
 	r := newRig(t)
 	if err := os.MkdirAll(filepath.Dir(r.exe), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	write(t, r.exe, "x")
-	link := filepath.Join(r.root, "link-to-manar-edge")
+	r.reconcile(t)
+	good := read(t, r.settings)
+	link := filepath.Join(r.u.Home, "bin", "me")
+	if err := os.MkdirAll(filepath.Dir(link), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Symlink(r.exe, link); err != nil {
 		t.Skip(err)
 	}
-	r.reconcile(t)
-	good := read(t, r.settings)
-	alias := strings.ReplaceAll(good, r.exe, link)
-	write(t, r.settings, alias)
+	write(t, r.settings, strings.ReplaceAll(good, r.exe, link))
 	*r.events = nil
 	r.reconcile(t)
-	if read(t, r.settings) != alias || r.reported() {
-		t.Fatalf("an alias of the same binary was treated as tampering:\n%s", read(t, r.settings))
+	if read(t, r.settings) != good {
+		t.Fatalf("an alias of the binary was kept:\n%s", read(t, r.settings))
+	}
+	if !r.reported() {
+		t.Fatal("alias not reported")
 	}
 }
 
-func TestSameExeIgnoresCleanSymlinksAndCase(t *testing.T) {
+// Removal paths obey the same gate as writes: a copy that is not the enrolled system service
+// restores nothing on a removal.
+func TestUnprotectOnRemovalIsGated(t *testing.T) {
+	r := newRig(t)
+	if !r.reconcile(t).Protected {
+		t.Fatal("setup")
+	}
+	hooked := read(t, r.settings)
+	privileged = func() bool { return false }
+	if err := (&relayModule{}).Unprotect(context.Background()); err == nil {
+		t.Fatal("a copy that may not write hooks restored settings")
+	}
+	if read(t, r.settings) != hooked {
+		t.Fatal("hooks removed by a copy that may not write them")
+	}
+	privileged = func() bool { return true }
+	if err := (&relayModule{}).Unprotect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, r.settings) == hooked {
+		t.Fatal("the system service did not restore on removal")
+	}
+}
+
+// Tampering is judged against what the service last wrote, not by looking for a program name: a
+// hook rewritten to a command that still contains "manar-edge" is reported too.
+func TestTamperIsJudgedByTheStoredChecksum(t *testing.T) {
+	r := newRig(t)
+	r.reconcile(t)
+	got := read(t, r.settings)
+	write(t, r.settings, strings.ReplaceAll(got, "hook-tool claude-code tool", "hook-tool claude-code tool; manar-edge")) // still says manar-edge
+	*r.events = nil
+	r.reconcile(t)
+	if !r.reported() {
+		t.Fatal("a rewrite that still mentions manar-edge was not reported")
+	}
+	// the person editing an unrelated setting is not tampering and not rewritten
+	good := read(t, r.settings)
+	write(t, r.settings, strings.Replace(good, `"model": "opus"`, `"model": "sonnet"`, 1))
+	*r.events = nil
+	r.reconcile(t)
+	if r.reported() || !strings.Contains(read(t, r.settings), `"sonnet"`) {
+		t.Fatal("an unrelated edit was treated as tampering or undone")
+	}
+}
+
+func TestSameExeComparesTextOnly(t *testing.T) {
 	dir := t.TempDir()
 	real := filepath.Join(dir, "manar-edge")
 	write(t, real, "x")
@@ -311,8 +363,11 @@ func TestSameExeIgnoresCleanSymlinksAndCase(t *testing.T) {
 	if err := os.Symlink(real, link); err != nil {
 		t.Skip(err)
 	}
-	if !sameExe(real, link) || !sameExe(real, filepath.Join(dir, "x", "..", "manar-edge")) {
-		t.Fatal("same binary not recognised")
+	if sameExe(real, link) {
+		t.Fatal("a symlink was resolved to the binary")
+	}
+	if !sameExe(real, filepath.Join(dir, "x", "..", "manar-edge")) {
+		t.Fatal("an unclean spelling of the same path should match")
 	}
 	if sameExe(real, filepath.Join(dir, "other")) || sameExe("", "") {
 		t.Fatal("different programs compared equal")

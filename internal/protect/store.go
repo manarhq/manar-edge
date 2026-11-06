@@ -145,8 +145,10 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 			continue
 		}
 		ent := findEntry(m.Tools[key], fe.Path)
-		// Every edit Manar makes names its own binary (hook command, MCP wrapper).
-		oc.Repaired = ent != nil && !bytes.Contains(cur, []byte("manar-edge"))
+		// The file is not what the service last wrote, and it needs fixing: something changed Manar's
+		// part (not just the person editing their own settings, which needs no fix). Judged by what
+		// the service wrote (its stored checksum), never by searching the file for a program name.
+		oc.Repaired = ent != nil && ent.AfterSHA != "" && sha(cur) != ent.AfterSHA
 		if ent == nil {
 			e, berr := s.backup(tool, fe, cur, existed, curMode, owner)
 			if berr != nil {

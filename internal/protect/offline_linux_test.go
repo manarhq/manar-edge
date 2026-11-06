@@ -199,3 +199,54 @@ func TestReadTrustedRefusesLinksAndUnprotectedFiles(t *testing.T) {
 		t.Error("the service wrote through a linked folder")
 	}
 }
+
+// An allow made from the saved policy is queued by the hook and told to Manar once the service is
+// back; a command is never sent, a file path is masked.
+func TestOfflineAllowsAreQueuedThenReportedWhenTheServiceReturns(t *testing.T) {
+	proj := relayRig(t)
+	saveQ := offlineQueuePath
+	q := filepath.Join(t.TempDir(), "queue.jsonl")
+	offlineQueuePath = func() string { return q }
+	t.Cleanup(func() { offlineQueuePath = saveQ })
+	var evs []map[string]any
+	tamper.mu.Lock()
+	tamper.send = func(ev map[string]any) { evs = append(evs, ev) }
+	tamper.mu.Unlock()
+	t.Cleanup(func() { tamper.mu.Lock(); tamper.send = nil; tamper.mu.Unlock() })
+
+	if v := decide("read", filepath.Join(proj, "other.go")); !v.Allow { // service down: saved policy
+		t.Fatalf("setup: %+v", v)
+	}
+	if v := decide("shell", "go build ./..."); !v.Allow {
+		t.Fatalf("setup: %+v", v)
+	}
+	b, err := os.ReadFile(q)
+	if err != nil || strings.Count(string(b), "\n") != 2 || strings.Contains(string(b), "go build") {
+		t.Fatalf("queue: %v %q (a command must never be queued)", err, b)
+	}
+
+	l, err := listenRelay() // the service comes back
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := newRelayServer(&fakeBackend{})
+	go srv.Serve(l)
+	defer srv.Close()
+	saveP := protectedUID
+	protectedUID = func(string) bool { return true }
+	defer func() { protectedUID = saveP }()
+	if v := decide("shell", "ls"); !v.Allow {
+		t.Fatalf("%+v", v)
+	}
+	if len(evs) != 2 || evs[0]["type"] != "hook.offline_allowed" || evs[0]["toolId"] != "host.cursor" {
+		t.Fatalf("events: %v", evs)
+	}
+	for _, e := range evs {
+		if s, _ := e["maskedPath"].(string); strings.Contains(s, "go build") {
+			t.Fatalf("a command was sent: %v", e)
+		}
+	}
+	if _, err := os.Stat(q); err == nil {
+		t.Fatal("the queue was not cleared")
+	}
+}

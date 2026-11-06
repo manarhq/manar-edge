@@ -81,14 +81,12 @@ type guard struct {
 // one event word (an optional "& " is the PowerShell form Windsurf uses).
 var canonicalHook = lazyre.New(`^(& )?"([^"\x00-\x1f]+)" hook-tool ([a-z-]+) (tool|shell|read|mcp)$`)
 
-// sameExe compares two program paths after Clean, EvalSymlinks (when the file exists) and, on
-// Windows, case folding.
+// sameExe compares two program paths as cleaned text (case-folded on Windows). It never resolves
+// symlinks: the path in the file is user-writable, so a link that points at the service's binary
+// today can point at anything tomorrow. The service passes its own already-resolved path (exePath).
 func sameExe(a, b string) bool {
 	norm := func(p string) string {
 		p = filepath.Clean(p)
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			p = r
-		}
 		if runtime.GOOS == "windows" {
 			p = strings.ToLower(p)
 		}
@@ -98,8 +96,8 @@ func sameExe(a, b string) bool {
 }
 
 // withOwnExe returns e with every canonical hook command that runs this install's program (by
-// sameExe) written with exactly want's text for the program, so a path spelled another way for the
-// same binary still compares equal. Commands that run anything else are left as they are.
+// sameExe, so only a case or clean-up difference) written with exactly want's text for the program.
+// Commands that run anything else, including any link to this program, are left as they are.
 func (g *guard) withOwnExe(e any) any {
 	switch v := e.(type) {
 	case map[string]any:

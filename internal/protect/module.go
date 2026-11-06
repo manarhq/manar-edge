@@ -124,6 +124,9 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 	}
 	approved := cfg.Status == "APPROVED"
 	setOfflineReadsPolicy(approved && cfg.OfflineReadsAllowed != nil && *cfg.OfflineReadsAllowed, cfg.OfflineReadDeny)
+	if d := stateDirNow(); d != "" {
+		setOfflineState(cfg.Paused, hostclient.LockedCode(d))
+	}
 	// Hooks are written only by the privileged device service of an enrolled device. A copy run by
 	// a user (or a test install on a developer machine) must not touch anyone's AI-tool settings.
 	if approved && !mayWriteHooks() {
@@ -231,6 +234,10 @@ var exePath = func() string {
 	if err != nil {
 		return "manar-edge"
 	}
+	// Resolved once, here, on the service's side: this is the only path a hook entry may name.
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
+	}
 	return p
 }
 
@@ -271,12 +278,30 @@ func (m *relayModule) Start(ctx context.Context, c *hostclient.Client) error {
 		return err
 	}
 	setTamperClient(c)
+	go keepOfflineStateFresh(ctx)
 	srv := newRelayServer(c)
 	go func() { <-ctx.Done(); srv.Close() }()
 	if err := srv.Serve(l); err != nil && ctx.Err() == nil {
 		return err
 	}
 	return nil
+}
+
+// keepOfflineStateFresh copies "paused" and "locked" into the saved policy, the only place a hook
+// reads them while the service is away. It runs every 10 s and writes only when something changed.
+func keepOfflineStateFresh(ctx context.Context) {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		if d := stateDirNow(); d != "" {
+			setOfflineState(pause.Paused(d), hostclient.LockedCode(d))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // relayHandler serves /v1/authorize and /v1/approvals/<id>. It only passes the three fields on;
@@ -360,6 +385,16 @@ func relayHandler(b backend) http.Handler {
 			return
 		}
 		reportTamper(TamperSettingsWrite, in.ToolID, in.Action, in.Path, true)
+		w.Write([]byte("{}"))
+	})
+	// Allows a hook made from the saved policy while the service was away: told to Manar now.
+	mux.HandleFunc("POST /v1/offline-allows", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 128<<10))
+		reportOfflineAllows(decodeOfflineAllows(body))
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("GET /v1/approvals/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -479,8 +514,20 @@ func recordDecision(toolID, actionID, resource, decision, caller string, took ti
 	telemetry.Record("warden", strings.TrimPrefix(toolID, "host."), d, kind, text, caller, took)
 }
 
-// Unprotect restores every tool's settings when the device is removed from its workspace.
-func (m *relayModule) Unprotect(ctx context.Context) error { return m.Cleanup(ctx) }
+// Unprotect restores every tool's settings when the device is removed from its workspace. Only the
+// enrolled system service may do it, like every other change to hook files.
+func (m *relayModule) Unprotect(ctx context.Context) error {
+	if !mayWriteHooks() {
+		logOnce("not restoring any AI tool settings: " + refusal())
+		return errors.New("only the enrolled system service restores AI tool settings")
+	}
+	return m.Cleanup(ctx)
+}
+
+// MayWriteHooks is true only for the enrolled, admin-installed service (root/SYSTEM, the system
+// state directory, enrolled). Every path that changes or removes hooks or Manar's managed
+// settings checks it.
+func MayWriteHooks() bool { return mayWriteHooks() }
 
 func stateDirNow() string {
 	cfgMu.Lock()

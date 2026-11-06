@@ -392,6 +392,15 @@ func removeClaudeSettings(existing []byte) (out []byte, changed, empty bool, err
 	return append(b, '\n'), true, false, err
 }
 
+// removeClaudePolicy is the device-removal step: it takes Manar's managed policy out only when this
+// is the enrolled system service (the same gate as every other change to hook files).
+func removeClaudePolicy() error {
+	if !protect.MayWriteHooks() {
+		return errors.New("only the enrolled system service removes Manar's managed settings")
+	}
+	return uninstallClaudeCode()
+}
+
 // uninstallClaudeCode takes Manar's policy out of the managed settings file (and the file if
 // nothing else is in it).
 func uninstallClaudeCode() error {
