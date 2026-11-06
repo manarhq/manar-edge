@@ -30,6 +30,7 @@ func offlineRig(t *testing.T) string {
 		home = r
 	}
 	userHome = func() string { return home }
+	resetCredentialIDs()
 	rec.mu.Lock()
 	rec.snap, rec.dirty = offlineSnapshot{}, false
 	rec.mu.Unlock()

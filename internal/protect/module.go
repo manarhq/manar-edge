@@ -285,7 +285,7 @@ func newRelayServer(b backend) *http.Server {
 }
 
 type backend interface {
-	Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*hostclient.AuthorizeResult, error)
+	Authorize(ctx context.Context, toolID, actionID, resource, caller, resolvedPath string) (*hostclient.AuthorizeResult, error)
 	ApprovalStatus(ctx context.Context, id string) (string, error)
 }
 
@@ -360,7 +360,11 @@ func relayHandler(b backend) http.Handler {
 			caller += "|s:" + sid
 		}
 		t0 := time.Now()
-		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller)
+		resolved := ""
+		if p := raw["resolvedPath"]; pathActions[in.ActionID] && filepath.IsAbs(p) && len(p) <= 4096 && !strings.ContainsRune(p, 0) {
+			resolved = p // the hook's own resolution of the target; the API compares it with the requested path
+		}
+		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller, resolved)
 		if err != nil {
 			http.Error(w, "upstream", 502)
 			return
@@ -402,6 +406,27 @@ func relayHandler(b backend) http.Handler {
 			return
 		}
 		reportTamper(TamperSettingsWrite, in.ToolID, in.Action, in.Path, true)
+		w.Write([]byte("{}"))
+	})
+	// `manar-edge protect restore` (an administrator at a terminal) tells the service before it
+	// takes hooks out, so the console hears about it.
+	mux.HandleFunc("POST /v1/restored", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var in struct {
+			Tools []string `json:"tools"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in) != nil || len(in.Tools) > len(Keys) {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		for _, k := range in.Tools {
+			if validTool("host." + k) {
+				reportTamper(TamperHookRemoved, "host."+k, "protect_restore", "", false)
+			}
+		}
 		w.Write([]byte("{}"))
 	})
 	// Allows a hook made from the saved policy while the service was away: told to Manar now.
@@ -472,12 +497,29 @@ func RestoreEverything() []error {
 	if st == nil {
 		return []error{errors.New("protect is not configured")}
 	}
+	var tools []string
 	for _, k := range st.Tools() {
 		if tool, _, ok := strings.Cut(k, "|"); ok {
-			st.NoteCLIRestore(tool)
+			tools = append(tools, tool)
 		}
 	}
+	tellRestore(st, tools)
 	return st.RestoreAll()
+}
+
+// tellRestore tells the running service that these tools are about to be restored by hand, so it
+// reports it. If the service cannot be reached, a marker is left and the service reports it when it
+// puts the hooks back.
+func tellRestore(st *Store, tools []string) {
+	if len(tools) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var ignore map[string]any
+	if NewRelay().call(ctx, http.MethodPost, "/v1/restored", map[string]any{"tools": tools}, &ignore) != nil {
+		st.NoteCLIRestore(tools...)
+	}
 }
 
 // RestoreTool restores one tool (by key, e.g. cursor) for every account.
@@ -489,7 +531,7 @@ func RestoreTool(key string) error {
 	var errs []error
 	for _, k := range st.Tools() {
 		if tool, user, ok := strings.Cut(k, "|"); ok && tool == key {
-			st.NoteCLIRestore(tool)
+			tellRestore(st, []string{tool})
 			errs = append(errs, st.Restore(tool, user))
 		}
 	}

@@ -58,13 +58,19 @@ func TestOfflineHardLinkedFilesAreNotAllowed(t *testing.T) {
 	if v, ok := offlineVerdict("claude-code", "read", notes); ok && v.Allow {
 		t.Errorf("read of a hard link to ~/.ssh/id_ed25519 allowed offline: %+v", v)
 	}
-	other := filepath.Join(userHome(), "other-proj")
-	os.MkdirAll(other, 0o755)
-	os.WriteFile(filepath.Join(other, "customers.csv"), []byte("x"), 0o644)
-	cl := filepath.Join(proj, "c.csv")
-	os.Link(filepath.Join(other, "customers.csv"), cl)
-	if v, ok := offlineVerdict("claude-code", "read", cl); ok && v.Allow {
-		t.Errorf("read of a hard link to a file outside every root allowed offline: %+v", v)
+	// Package managers hard-link every file of node_modules: a hard-linked file inside the project
+	// that is not a credential file is an ordinary file (no friction). The cost: a hard link in the
+	// project to a non-credential file of another project can be read offline.
+	store := filepath.Join(userHome(), ".pnpm-store")
+	os.MkdirAll(store, 0o755)
+	os.WriteFile(filepath.Join(store, "pkg.js"), []byte("x"), 0o644)
+	nm := filepath.Join(proj, "node_modules")
+	os.MkdirAll(nm, 0o755)
+	if err := os.Link(filepath.Join(store, "pkg.js"), filepath.Join(nm, "pkg.js")); err != nil {
+		t.Skip(err)
+	}
+	if v, _ := offlineVerdict("claude-code", "read", filepath.Join(nm, "pkg.js")); !v.Allow {
+		t.Errorf("a hard-linked node_modules file should be readable offline: %+v", v)
 	}
 	if v, _ := offlineVerdict("claude-code", "read", filepath.Join(proj, "other.go")); !v.Allow {
 		t.Error("an ordinary file of the project should still be readable")
@@ -94,7 +100,7 @@ func TestOfflineShellAllowIsBoundToItsWorkingFolder(t *testing.T) {
 	if v, ok := offlineVerdict("claude-code", "bash", "cat config"); ok && v.Allow {
 		t.Errorf("'cat config' allowed offline from the hook's own cwd ~/.kube: %+v", v)
 	}
-	if !commandTouchesSecretViaLink("cat config", userHome(), kube) {
+	if !commandTouchesSecretViaLink("cat config", userHome(), kube, nil) {
 		t.Error("a bare word naming ~/.kube/config was not seen")
 	}
 }

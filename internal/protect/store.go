@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,6 +39,9 @@ type FileEdit struct {
 	Kind string
 	// Mode is used when the file is created; an existing file keeps its own.
 	Mode os.FileMode
+	// Exe is the program whose hook and MCP entries the file holds ("" for a file with none): it
+	// lets Apply tell what Manar wrote from words that merely look like it.
+	Exe string
 }
 
 // Outcome of one FileEdit.
@@ -63,9 +68,9 @@ type entry struct {
 	GID      int    `json:"gid"`
 	Home     string `json:"home"`
 	AfterSHA string `json:"afterSha"`
-	// Marks counts the Manar entries in the file as Manar last wrote it (see manarMarks).
-	Marks int    `json:"marks,omitempty"`
-	At    string `json:"at"`
+	// Owned names the Manar entries in the file as Manar last wrote it (see ownedItems).
+	Owned []string `json:"owned,omitempty"`
+	At    string   `json:"at"`
 }
 
 func (e entry) owner() Owner { return Owner{UID: e.UID, GID: e.GID, Home: e.Home} }
@@ -149,9 +154,11 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 		if bytes.Equal(next, cur) || (!existed && len(next) == 0) {
 			// Nothing to write. Keep the count honest if the person removed a wrapped server
 			// themselves, so a later server they add is not mistaken for a repair.
-			if ent != nil && ent.Marks != manarMarks(cur) {
-				ent.Marks = manarMarks(cur)
-				_ = s.save(m)
+			if ent != nil && fe.Exe != "" {
+				if o, _ := ownedItems(cur, fe.Exe); !equalStrings(o, ent.Owned) {
+					ent.Owned = o
+					_ = s.save(m)
+				}
 			}
 			out = append(out, oc)
 			continue
@@ -160,7 +167,7 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 		// part (not just the person editing their own settings, which needs no fix). Judged by what
 		// the service wrote (its stored checksum), never by searching the file for a program name.
 		oc.Repaired = ent != nil && ent.AfterSHA != "" && sha(cur) != ent.AfterSHA
-		oc.Lost = oc.Repaired && ent.Marks > manarMarks(cur)
+		oc.Lost = oc.Repaired && fe.Exe != "" && lostItems(ent.Owned, cur, fe.Exe)
 		if ent == nil {
 			e, berr := s.backup(tool, fe, cur, existed, curMode, owner)
 			if berr != nil {
@@ -183,7 +190,9 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 			continue
 		}
 		ent.AfterSHA = sha(next)
-		ent.Marks = manarMarks(next)
+		if fe.Exe != "" {
+			ent.Owned, _ = ownedItems(next, fe.Exe)
+		}
 		if err := s.save(m); err != nil {
 			return out, err
 		}
@@ -193,9 +202,92 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 	return out, nil
 }
 
-// manarMarks counts the Manar entries in a settings file: hook commands and wrapped MCP servers.
-func manarMarks(b []byte) int {
-	return bytes.Count(b, []byte("hook-tool ")) + bytes.Count(b, []byte("mcp-wrap"))
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ownedItems lists the Manar entries in a settings file, structurally: a canonical hook command
+// that runs this program, inside the file's "hooks" (named by event, tool and event word), and an
+// MCP server whose command is this program running mcp-wrap (named by server). The second result is
+// every MCP server name in the file, wrapped or not. Words left lying around elsewhere in the file
+// count for nothing.
+func ownedItems(b []byte, exe string) (owned []string, servers map[string]bool) {
+	var root map[string]any
+	if json.Unmarshal(b, &root) != nil {
+		return nil, nil
+	}
+	servers = map[string]bool{}
+	seen := map[string]bool{}
+	var walk func(event string, v any)
+	walk = func(event string, v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, c := range x {
+				if str, ok := c.(string); ok && (k == "command" || k == "powershell" || k == "bash") {
+					if m := canonicalHook.FindStringSubmatch(str); m != nil && sameExe(m[2], exe) {
+						seen["hook:"+event+":"+m[3]+":"+m[4]] = true
+					}
+					continue
+				}
+				walk(event, c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(event, c)
+			}
+		}
+	}
+	if hooks, ok := root["hooks"].(map[string]any); ok {
+		for ev, v := range hooks {
+			walk(ev, v)
+		}
+	}
+	for _, key := range []string{"mcpServers", "servers"} {
+		m, _ := root[key].(map[string]any)
+		for name, raw := range m {
+			servers[name] = true
+			srv, _ := raw.(map[string]any)
+			cmd, _ := srv["command"].(string)
+			args, _ := srv["args"].([]any)
+			if sameExe(cmd, exe) && len(args) > 0 && args[0] == "mcp-wrap" {
+				seen["mcp:"+name] = true
+			}
+		}
+	}
+	for k := range seen {
+		owned = append(owned, k)
+	}
+	sort.Strings(owned)
+	return owned, servers
+}
+
+// lostItems is true when something Manar wrote (prev) is gone from cur: a hook entry that is not
+// there any more, or an MCP server that is still there but no longer wrapped. A server the person
+// removed (or swapped for another) is not lost.
+func lostItems(prev []string, cur []byte, exe string) bool {
+	now, servers := ownedItems(cur, exe)
+	have := map[string]bool{}
+	for _, o := range now {
+		have[o] = true
+	}
+	for _, p := range prev {
+		if have[p] {
+			continue
+		}
+		if name, ok := strings.CutPrefix(p, "mcp:"); ok && !servers[name] {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func findEntry(es []entry, path string) *entry {

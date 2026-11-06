@@ -199,6 +199,13 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	defer cancel()
 	var dec authorizeReply
 	body := map[string]string{"toolId": "host." + key, "actionId": actionID, "resource": resource}
+	if pathActions[actionID] {
+		// The target with its links resolved (a not-yet-existing file: its existing folder plus the
+		// name). Left out when it cannot be resolved.
+		if real, ok := resolveTarget(resource); ok {
+			body["resolvedPath"] = real
+		}
+	}
 	if r.Session != "" {
 		body["session"] = r.Session
 	}

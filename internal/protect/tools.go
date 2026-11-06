@@ -74,10 +74,10 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 		}
 	}}
 	hook := func(path string, role Role, f func(map[string]any) error) Item {
-		return Item{FileEdit{Path: path, Edit: jsonObject(func(r map[string]any) error { curPath = path; return f(r) }), Kind: KindJSON, Mode: 0o644}, role}
+		return Item{FileEdit{Path: path, Edit: jsonObject(func(r map[string]any) error { curPath = path; return f(r) }), Kind: KindJSON, Mode: 0o644, Exe: c.Exe}, role}
 	}
 	mcp := func(path, field string) Item {
-		return Item{FileEdit{Path: path, Kind: KindJSON, Mode: 0o644, Edit: jsonObject(func(r map[string]any) error {
+		return Item{FileEdit{Path: path, Kind: KindJSON, Mode: 0o644, Exe: c.Exe, Edit: jsonObject(func(r map[string]any) error {
 			_, _, err := wrapMCP(r, field, c.Exe, key)
 			return err
 		})}, RoleMCP}

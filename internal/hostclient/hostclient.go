@@ -598,9 +598,15 @@ type AuthorizeResult struct {
 	Cacheable *bool `json:"cacheable,omitempty"`
 }
 
-func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*AuthorizeResult, error) {
+// Authorize asks for a decision. resolvedPath, when not empty, is the target of a file action with
+// its links resolved; the API refuses learning and folder scopes when it differs from resource.
+func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource, caller, resolvedPath string) (*AuthorizeResult, error) {
 	var out AuthorizeResult
-	err := c.Do(ctx, http.MethodPost, "/authorize", map[string]string{"toolId": toolID, "actionId": actionID, "resource": resource, "caller": caller}, &out)
+	body := map[string]string{"toolId": toolID, "actionId": actionID, "resource": resource, "caller": caller}
+	if resolvedPath != "" {
+		body["resolvedPath"] = resolvedPath
+	}
+	err := c.Do(ctx, http.MethodPost, "/authorize", body, &out)
 	if err != nil {
 		return nil, err
 	}

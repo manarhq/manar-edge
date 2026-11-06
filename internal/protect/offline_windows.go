@@ -132,3 +132,6 @@ func linkCount(path string, _ os.FileInfo) uint64 {
 	}
 	return uint64(info.NumberOfLinks)
 }
+
+// fileID: not available here, so a hard-linked file is treated as a possible credential.
+func fileID(os.FileInfo) (string, bool) { return "", false }

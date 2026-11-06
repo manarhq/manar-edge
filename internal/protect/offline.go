@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/secrets/watch"
@@ -38,11 +39,15 @@ import (
 
 const (
 	// offlineMaxAge is a working day: a snapshot older than this is not used and hooks fail closed.
-	offlineMaxAge  = 8 * time.Hour
-	offlineKeep    = 400 // exact allowed actions kept per tool
-	offlineFlush   = 5 * time.Second
-	offlineTouch   = 30 * time.Minute // how often an unchanged policy refreshes the snapshot's age
-	offlineVersion = 2
+	offlineMaxAge = 8 * time.Hour
+	offlineKeep   = 400 // exact allowed actions kept per tool (oldest dropped: safe, it only asks again)
+	// offlineRefusedKeep is how many refusals are kept per tool. They are never evicted and never
+	// age out: a refusal must outlive the project folder rule that would otherwise allow the file.
+	// When the list is full the project-folder read rule is turned off (RefusedFull).
+	offlineRefusedKeep = 1000
+	offlineFlush       = 5 * time.Second
+	offlineTouch       = 30 * time.Minute // how often an unchanged policy refreshes the snapshot's age
+	offlineVersion     = 2
 )
 
 // RestartingText is what the person sees while the service is restarting.
@@ -90,8 +95,9 @@ type offlineTool struct {
 	// Allowed holds each exact (caller, action, resolved resource or folder+command) Manar ALLOWed
 	// and that may be replayed.
 	Allowed entryList `json:"allowed,omitempty"`
-	// Denied holds what Manar answered with a DENY, an approval request or an ALLOW that must not be
-	// replayed. It is checked before any project-folder rule: a refusal is never undone offline.
+	// Denied holds what Manar answered with a DENY or an approval request. It has no age and is
+	// never evicted; it is checked before any project-folder rule, so a refusal is never undone
+	// offline. An ALLOW that must not be cached is stored nowhere.
 	Denied entryList `json:"denied,omitempty"`
 }
 
@@ -102,6 +108,9 @@ type offlineSnapshot struct {
 	// hook reads them here and nowhere else.
 	Paused bool   `json:"paused"`
 	Locked string `json:"locked,omitempty"`
+	// RefusedFull: a tool's refusal list overflowed, so reads in project folders are not allowed
+	// offline (an unrecorded refusal could be covered by the folder rule).
+	RefusedFull bool `json:"refusedFull,omitempty"`
 	// PolicyVersion is the workspace policy version the answers below were given under; a new one
 	// drops every allow and project folder.
 	PolicyVersion string `json:"policyVersion,omitempty"`
@@ -231,10 +240,10 @@ func setOfflinePolicyVersion(v string) {
 	}
 	if rec.snap.PolicyVersion != "" {
 		for k, t := range rec.snap.Tools {
-			t.Allowed = ""
+			t.Allowed, t.Denied = "", ""
 			rec.snap.Tools[k] = t
 		}
-		rec.snap.Roots = nil
+		rec.snap.Roots, rec.snap.RefusedFull = nil, false
 	}
 	rec.snap.PolicyVersion = v
 	markDirty()
@@ -349,15 +358,24 @@ func recordOfflineDecision(toolID, caller, action, resource, cwd, decision strin
 	}
 	t := rec.snap.Tools[toolID]
 	allowed := dropEntry(pruneEntries(splitEntries(t.Allowed), now), k)
-	denied := dropEntry(pruneEntries(splitEntries(t.Denied), now), k)
+	denied := splitEntries(t.Denied)
 	switch {
 	case decision == "ALLOW" && !sens:
 		if pathActions[action] && resolved {
 			noteRoot(&rec.snap, toolID, caller, real, cwd, now)
 		}
 		allowed = capEntries(append(allowed, offlineEntry{k, now.Unix()}))
-	case !sens:
-		denied = capEntries(append(denied, offlineEntry{k, now.Unix()}))
+		denied = dropEntry(denied, k) // a later plain ALLOW is a change of policy
+	case decision == "ALLOW_NOT_CACHEABLE":
+		// Allowed now, but never replayed: stored nowhere, and an older refusal stays.
+	case decision != "ALLOW" && !sens:
+		if !hasEntryAny(t.Denied, k) {
+			if len(denied) < offlineRefusedKeep {
+				denied = append(denied, offlineEntry{k, now.Unix()})
+			} else {
+				rec.snap.RefusedFull = true
+			}
+		}
 	}
 	t.Allowed, t.Denied = joinEntries(allowed), joinEntries(denied)
 	rec.snap.Tools[toolID] = t
@@ -392,15 +410,39 @@ func dropEntry(l []offlineEntry, k string) []offlineEntry {
 	return out
 }
 
+// entryTime finds k in l without allocating: its time, and whether it is there.
+func entryTime(l entryList, k string) (int64, bool) {
+	s, key := string(l), k+":"
+	for i := 0; i < len(s); {
+		j := strings.Index(s[i:], key)
+		if j < 0 {
+			return 0, false
+		}
+		j += i
+		if j == 0 || s[j-1] == ' ' {
+			end := strings.IndexByte(s[j:], ' ')
+			if end < 0 {
+				end = len(s) - j
+			}
+			t, err := strconv.ParseInt(s[j+len(key):j+end], 10, 64)
+			return t, err == nil
+		}
+		i = j + 1
+	}
+	return 0, false
+}
+
 // hasEntry is true when l holds k, given within offlineMaxAge (and not from the future).
 func hasEntry(l entryList, k string) bool {
+	at, ok := entryTime(l, k)
 	now := time.Now().Unix()
-	for _, e := range splitEntries(l) {
-		if e.H == k && now-e.At <= int64(offlineMaxAge/time.Second) && e.At <= now+300 {
-			return true
-		}
-	}
-	return false
+	return ok && now-at <= int64(offlineMaxAge/time.Second) && at <= now+300
+}
+
+// hasEntryAny is true when l holds k, whatever its age (refusals do not expire).
+func hasEntryAny(l entryList, k string) bool {
+	_, ok := entryTime(l, k)
+	return ok
 }
 
 func flushOffline() {
@@ -466,16 +508,28 @@ func sensitive(action, resource string) bool {
 	return false
 }
 
+// commandSeparators split a command into words the way a shell does before it opens any file:
+// white space, redirections, pipes, lists, subshells, backquotes and "=" (so --config=path and
+// FOO=path give the path as a word). `echo hi>out.txt` has the word out.txt.
+func isCommandSeparator(r rune) bool {
+	return unicode.IsSpace(r) || strings.ContainsRune("<>|;&()`=", r)
+}
+
 // commandTouchesSecretViaLink resolves every word of a command that names an existing path (a bare
-// word is taken relative to the working folder) and reports whether any resolves to a sensitive one:
-// a link to a secret hidden behind an ordinary name, or `cat config` run inside ~/.kube.
-func commandTouchesSecretViaLink(cmd, home, cwd string) bool {
+// word is taken relative to the working folder) and reports whether the command may reach a secret:
+//   - a word that exists but cannot be resolved (a link that points nowhere, a loop, a magic link)
+//     is refused: the command could write through it;
+//   - a word that resolves to a sensitive path is refused (a link to a secret behind an ordinary name);
+//   - a hard-linked file is refused when it is a credential file (same device and inode), or when
+//     it lies outside the recorded project folders (inRoot, when given). A hard-linked file inside
+//     a project folder is fine: package managers hard-link every file of node_modules.
+func commandTouchesSecretViaLink(cmd, home, cwd string, inRoot func(realPath string) bool) bool {
 	n := 0
-	for _, f := range strings.Fields(cmd) {
+	for _, f := range strings.FieldsFunc(cmd, isCommandSeparator) {
 		if n++; n > 64 {
 			break
 		}
-		f = strings.Trim(f, `"';&|()<>`)
+		f = strings.Trim(f, `"'`)
 		if strings.HasPrefix(f, "~/") && home != "" {
 			f = filepath.Join(home, f[2:])
 		}
@@ -489,17 +543,102 @@ func commandTouchesSecretViaLink(cmd, home, cwd string) bool {
 			f = filepath.Join(cwd, f)
 		}
 		if _, err := os.Lstat(f); err != nil {
-			continue
+			if os.IsNotExist(err) {
+				continue
+			}
+			return true // exists but cannot be looked at
 		}
-		r, err := filepath.EvalSymlinks(f)
+		r, err := realPath(f)
 		if err != nil {
-			continue
-		}
-		if abs, err := filepath.Abs(r); err == nil && (watch.ClassOf(abs) != "" || secretName.MatchString(abs)) {
 			return true
+		}
+		if watch.ClassOf(r) != "" || secretName.MatchString(r) {
+			return true
+		}
+		if fi, err := os.Lstat(r); err == nil && fi.Mode().IsRegular() && linkCount(r, fi) > 1 {
+			if hardLinkedCredential(fi, home) || (inRoot != nil && !inRoot(r)) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// hardLinkedCredential is true when fi is (another name for) a credential file of the person, or
+// when that cannot be told (Windows has no inode here: fail safe).
+func hardLinkedCredential(fi os.FileInfo, home string) bool {
+	id, ok := fileID(fi)
+	if !ok {
+		return true
+	}
+	return credentialIDs(home)[id]
+}
+
+var credCache struct {
+	mu   sync.Mutex
+	home string
+	ids  map[string]bool
+}
+
+// resetCredentialIDs forgets the cached list (tests, and a changed home).
+func resetCredentialIDs() {
+	credCache.mu.Lock()
+	credCache.home, credCache.ids = "", nil
+	credCache.mu.Unlock()
+}
+
+// credentialIDs is the set of (device, inode) of the person's credential files: everything in the
+// folders Manar watches for secrets (.ssh, .aws, .kube, ...) and the single credential files named
+// in secretName. It is read once per process, and only when a hard-linked file shows up, so the
+// common offline path never pays for it.
+func credentialIDs(home string) map[string]bool {
+	credCache.mu.Lock()
+	defer credCache.mu.Unlock()
+	if credCache.ids != nil && credCache.home == home {
+		return credCache.ids
+	}
+	ids := map[string]bool{}
+	add := func(p string) {
+		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
+			if id, ok := fileID(fi); ok {
+				ids[id] = true
+			}
+		}
+	}
+	budget := 4000
+	var walk func(dir string, recursive bool, depth int)
+	walk = func(dir string, recursive bool, depth int) {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			return
+		}
+		for _, e := range ents {
+			if budget--; budget < 0 {
+				return
+			}
+			p := filepath.Join(dir, e.Name())
+			if e.IsDir() {
+				if recursive && depth < 3 {
+					walk(p, true, depth+1)
+				}
+				continue
+			}
+			add(p)
+		}
+	}
+	for _, t := range watch.Targets(home) {
+		if t.Dir {
+			walk(t.Path, true, 0)
+		} else {
+			add(t.Path)
+		}
+	}
+	for _, rel := range []string{".netrc", ".pgpass", ".s3cfg", ".claude.json", ".codex/auth.json", ".gemini/oauth_creds.json",
+		".config/rclone/rclone.conf", ".m2/settings.xml", ".m2/settings-security.xml", ".config/github-copilot/apps.json", ".config/github-copilot/hosts.json"} {
+		add(filepath.Join(home, filepath.FromSlash(rel)))
+	}
+	credCache.home, credCache.ids = home, ids
+	return ids
 }
 
 // --- hook side ---
@@ -588,11 +727,12 @@ func offlineVerdictIn(key, action, resource, cwd string) (v Verdict, ok bool) {
 	t := s.Tools[tool]
 	if !pathActions[action] {
 		wd := canonCwd(cwd)
-		if commandTouchesSecretViaLink(resource, userHome(), wd) {
+		inRoot := func(r string) bool { return insideRecordedRoot(&s, tool, r) }
+		if commandTouchesSecretViaLink(resource, userHome(), wd, inRoot) {
 			return refuse, true
 		}
 		k := shellKey(localCaller(), action, wd, resource)
-		if hasEntry(t.Denied, k) {
+		if hasEntryAny(t.Denied, k) {
 			return notBefore, true
 		}
 		if hasEntry(t.Allowed, k) {
@@ -608,32 +748,26 @@ func offlineVerdictIn(key, action, resource, cwd string) (v Verdict, ok bool) {
 	if sensitive(action, real) {
 		return refuse, true
 	}
-	if multiplyLinked(real) {
-		return wait, true // a second name for a file may be a name for something else
+	if fi, err := os.Lstat(real); err == nil && fi.Mode().IsRegular() && linkCount(real, fi) > 1 && hardLinkedCredential(fi, userHome()) {
+		return refuse, true // another name for a credential file (or Windows, where that cannot be told)
 	}
 	if action == "read" && (denyRule(s.ReadDeny, resource) || denyRule(s.ReadDeny, real)) {
 		return Verdict{false, "Manar denied: this file is protected by your workspace's rules."}, true
 	}
 	k := actionKey(localCaller(), action, real)
-	if hasEntry(t.Denied, k) {
+	if hasEntryAny(t.Denied, k) {
 		return notBefore, true
 	}
 	if !insideRecordedRoot(&s, tool, real) {
 		return wait, true
 	}
-	if action == "read" && s.ReadsAllowed {
+	if action == "read" && s.ReadsAllowed && !s.RefusedFull {
 		return yes, true
 	}
 	if hasEntry(t.Allowed, k) {
 		return yes, true
 	}
 	return wait, true
-}
-
-// multiplyLinked is true for a regular file with more than one hard link.
-func multiplyLinked(p string) bool {
-	fi, err := os.Lstat(p)
-	return err == nil && fi.Mode().IsRegular() && linkCount(p, fi) > 1
 }
 
 // denyRule matches the workspace's read-deny patterns against a path: "**" crosses folders, "*" and
