@@ -274,11 +274,16 @@ func (*relayModule) Cleanup(context.Context) error {
 
 type callerKey struct{}
 
+// adminKey says the connection came from an administrator (root; on Windows an elevated
+// Administrators member or SYSTEM).
+type adminKey struct{}
+
 func newRelayServer(b backend) *http.Server {
 	return &http.Server{
 		Handler:           relayHandler(b),
 		ReadHeaderTimeout: 5 * time.Second,
 		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			ctx = context.WithValue(ctx, adminKey{}, callerIsAdmin(conn))
 			return context.WithValue(ctx, callerKey{}, callerOf(conn))
 		},
 	}
@@ -360,9 +365,15 @@ func relayHandler(b backend) http.Handler {
 			caller += "|s:" + sid
 		}
 		t0 := time.Now()
+		// The target with its links resolved, worked out here by the service (the hook is the
+		// user's process and its word counts for nothing). A file that does not exist yet is its
+		// existing folder plus the name. Nothing is sent when it cannot be resolved: the API then
+		// cannot tell and refuses learning and folder scopes.
 		resolved := ""
-		if p := raw["resolvedPath"]; pathActions[in.ActionID] && filepath.IsAbs(p) && len(p) <= 4096 && !strings.ContainsRune(p, 0) {
-			resolved = p // the hook's own resolution of the target; the API compares it with the requested path
+		if pathActions[in.ActionID] {
+			if p, ok := resolveTarget(in.Resource); ok {
+				resolved = p
+			}
 		}
 		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller, resolved)
 		if err != nil {
@@ -411,7 +422,8 @@ func relayHandler(b backend) http.Handler {
 	// `manar-edge protect restore` (an administrator at a terminal) tells the service before it
 	// takes hooks out, so the console hears about it.
 	mux.HandleFunc("POST /v1/restored", func(w http.ResponseWriter, r *http.Request) {
-		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+		c, _ := r.Context().Value(callerKey{}).(string)
+		if admin, _ := r.Context().Value(adminKey{}).(bool); !admin {
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -424,7 +436,7 @@ func relayHandler(b backend) http.Handler {
 		}
 		for _, k := range in.Tools {
 			if validTool("host." + k) {
-				reportTamper(TamperHookRemoved, "host."+k, "protect_restore", "", false)
+				reportTamperBy(c, TamperHookRemoved, "host."+k, "protect_restore", "", false)
 			}
 		}
 		w.Write([]byte("{}"))

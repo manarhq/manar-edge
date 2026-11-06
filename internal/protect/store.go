@@ -220,11 +220,30 @@ func equalStrings(a, b []string) bool {
 // every MCP server name in the file, wrapped or not. Words left lying around elsewhere in the file
 // count for nothing.
 func ownedItems(b []byte, exe string) (owned []string, servers map[string]bool) {
+	owned, servers, _ = ownedForms(b, exe)
+	return owned, servers
+}
+
+// mcpForm names a server by what it runs (command and arguments), not by its name.
+func mcpForm(cmd string, args []any) string {
+	h := sha256.New()
+	h.Write([]byte(cmd))
+	for _, a := range args {
+		str, _ := a.(string)
+		h.Write([]byte{0})
+		h.Write([]byte(str))
+	}
+	return hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+// ownedForms is ownedItems plus the forms (see mcpForm) of the servers that are not wrapped. A
+// wrapped server also adds "mcpform:<form>", the form of the command it wraps.
+func ownedForms(b []byte, exe string) (owned []string, servers map[string]bool, plain map[string]bool) {
 	var root map[string]any
 	if json.Unmarshal(b, &root) != nil {
-		return nil, nil
+		return nil, nil, nil
 	}
-	servers = map[string]bool{}
+	servers, plain = map[string]bool{}, map[string]bool{}
 	seen := map[string]bool{}
 	var walk func(event string, v any)
 	walk = func(event string, v any) {
@@ -259,6 +278,12 @@ func ownedItems(b []byte, exe string) (owned []string, servers map[string]bool) 
 			args, _ := srv["args"].([]any)
 			if sameExe(cmd, exe) && len(args) > 0 && args[0] == "mcp-wrap" {
 				seen["mcp:"+name] = true
+				if len(args) >= 5 && args[3] == "--" {
+					inner, _ := args[4].(string)
+					seen["mcpform:"+mcpForm(inner, args[5:])] = true
+				}
+			} else {
+				plain[mcpForm(cmd, args)] = true
 			}
 		}
 	}
@@ -266,14 +291,14 @@ func ownedItems(b []byte, exe string) (owned []string, servers map[string]bool) 
 		owned = append(owned, k)
 	}
 	sort.Strings(owned)
-	return owned, servers
+	return owned, servers, plain
 }
 
 // lostItems is true when something Manar wrote (prev) is gone from cur: a hook entry that is not
 // there any more, or an MCP server that is still there but no longer wrapped. A server the person
 // removed (or swapped for another) is not lost.
 func lostItems(prev []string, cur []byte, exe string) bool {
-	now, servers := ownedItems(cur, exe)
+	now, servers, plain := ownedForms(cur, exe)
 	have := map[string]bool{}
 	for _, o := range now {
 		have[o] = true
@@ -283,6 +308,10 @@ func lostItems(prev []string, cur []byte, exe string) bool {
 			continue
 		}
 		if name, ok := strings.CutPrefix(p, "mcp:"); ok && !servers[name] {
+			continue
+		}
+		// A wrapped server renamed to unwrap it: a server of another name now runs what it wrapped.
+		if form, ok := strings.CutPrefix(p, "mcpform:"); ok && !plain[form] {
 			continue
 		}
 		return true

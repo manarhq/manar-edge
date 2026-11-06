@@ -131,13 +131,14 @@ func TestOfflineShellHardLinks(t *testing.T) {
 		t.Errorf("'cat notes.txt' (hard link to ~/.ssh/id_ed25519) allowed offline: %+v", v)
 	}
 	recordOfflineDecision("host.claude-code", me, "read", filepath.Join(proj, "a.go"), proj, "ALLOW") // the project folder is recorded
-	recordOfflineDecision("host.claude-code", me, "bash", "cat pkg.js", proj, "ALLOW")
+	recordOfflineDecision("host.claude-code", me, "bash", "cat node_modules/pkg.js", proj, "ALLOW")
 	save(t)
 	store := filepath.Join(userHome(), ".pnpm-store")
 	os.MkdirAll(store, 0o755)
 	os.WriteFile(filepath.Join(store, "pkg.js"), []byte("x"), 0o644)
-	os.Link(filepath.Join(store, "pkg.js"), filepath.Join(proj, "pkg.js"))
-	if v, _ := offlineVerdict("claude-code", "bash", "cat pkg.js"); !v.Allow {
+	os.MkdirAll(filepath.Join(proj, "node_modules"), 0o755)
+	os.Link(filepath.Join(store, "pkg.js"), filepath.Join(proj, "node_modules", "pkg.js"))
+	if v, _ := offlineVerdict("claude-code", "bash", "cat node_modules/pkg.js"); !v.Allow {
 		t.Errorf("a hard-linked package file in the project should be fine: %+v", v)
 	}
 	// a hard link to a file outside every recorded folder, named by an absolute path

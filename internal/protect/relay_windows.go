@@ -197,3 +197,35 @@ func callerOf(c net.Conn) string {
 	}
 	return "unknown"
 }
+
+// callerIsAdmin: the other end runs as SYSTEM, or with an elevated token of a member of the
+// Administrators group.
+func callerIsAdmin(c net.Conn) bool {
+	pc, ok := c.(*pipeConn)
+	if !ok {
+		return false
+	}
+	var pid uint32
+	if err := windows.GetNamedPipeClientProcessId(pc.h, &pid); err != nil {
+		return false
+	}
+	p, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	if err != nil {
+		return false
+	}
+	defer windows.CloseHandle(p)
+	var tok windows.Token
+	if err := windows.OpenProcessToken(p, windows.TOKEN_QUERY, &tok); err != nil {
+		return false
+	}
+	defer tok.Close()
+	if u, err := tok.GetTokenUser(); err == nil && u.User.Sid.String() == "S-1-5-18" {
+		return true
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return false
+	}
+	member, err := tok.IsMember(admins)
+	return err == nil && member && tok.IsElevated()
+}

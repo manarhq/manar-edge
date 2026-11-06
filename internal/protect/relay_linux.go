@@ -101,3 +101,9 @@ func callerOf(c net.Conn) string {
 	}
 	return "uid:" + strconv.Itoa(int(cred.Uid))
 }
+
+// callerIsAdmin: the other end of the connection is root.
+func callerIsAdmin(c net.Conn) bool {
+	cred, err := peerCred(c)
+	return err == nil && cred.Uid == 0
+}

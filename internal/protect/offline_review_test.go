@@ -145,7 +145,7 @@ func TestOfflineAllowsExpireAndAPolicyChangeDropsThem(t *testing.T) {
 	}
 
 	// a new policy version
-	resetRec()
+	freshRec()
 	setOfflineReadsPolicy(true, nil)
 	setOfflinePolicyVersion("v1")
 	recordOfflineDecision("host.claude-code", me, "bash", "make test", proj, "ALLOW")

@@ -32,15 +32,23 @@ func offlineRig(t *testing.T) string {
 	userHome = func() string { return home }
 	resetCredentialIDs()
 	rec.mu.Lock()
-	rec.snap, rec.dirty = offlineSnapshot{}, false
+	rec.snap, rec.dirty, rec.loaded = offlineSnapshot{}, false, true
 	rec.mu.Unlock()
 	t.Cleanup(func() { readTrusted, localCaller, userHome = saveRead, saveCaller, saveHome })
 	return state
 }
 
+// freshRec starts the recorder empty and does not read the saved file.
+func freshRec() {
+	rec.mu.Lock()
+	rec.snap, rec.dirty, rec.loaded = offlineSnapshot{}, false, true
+	rec.mu.Unlock()
+}
+
+// resetRec is a service restart: memory is empty and the saved file is read back on first use.
 func resetRec() {
 	rec.mu.Lock()
-	rec.snap, rec.dirty = offlineSnapshot{}, false
+	rec.snap, rec.dirty, rec.loaded = offlineSnapshot{}, false, false
 	rec.mu.Unlock()
 }
 
@@ -218,7 +226,7 @@ func TestOfflineRootsMustBeInsideHomeAndDeepEnough(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dot, "x.txt"), []byte("x"), 0o644)
 	setOfflineReadsPolicy(true, nil)
 	for name, cwd := range map[string]string{"home": home, "above home": filepath.Dir(home), "slash": "/", "dot folder": filepath.Join(home, ".config")} {
-		resetRec() // fresh snapshot each time, same home
+		freshRec() // fresh snapshot each time, same home
 		setOfflineReadsPolicy(true, nil)
 		recordOfflineDecision("host.claude-code", me, "read", f, cwd, "ALLOW")
 		recordOfflineDecision("host.claude-code", me, "read", filepath.Join(dot, "x.txt"), cwd, "ALLOW")
@@ -229,7 +237,7 @@ func TestOfflineRootsMustBeInsideHomeAndDeepEnough(t *testing.T) {
 		}
 	}
 	// the legitimate shape
-	resetRec()
+	freshRec()
 	setOfflineReadsPolicy(true, nil)
 	recordOfflineDecision("host.claude-code", me, "read", f, proj, "ALLOW")
 	save(t)

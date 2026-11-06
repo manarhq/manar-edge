@@ -89,14 +89,17 @@ func TestCLIRestoreMarkerIsPrivate(t *testing.T) {
 func TestRestoredEndpointReportsTheTool(t *testing.T) {
 	r := newRig(t)
 	h := relayHandler(nil)
-	post := func(caller string) int {
+	post := func(caller string, admin bool) int {
 		req := httptest.NewRequest(http.MethodPost, "/v1/restored", strings.NewReader(`{"tools":["claude-code","nonsense"]}`))
-		req = req.WithContext(context.WithValue(req.Context(), callerKey{}, caller))
+		req = req.WithContext(context.WithValue(context.WithValue(req.Context(), callerKey{}, caller), adminKey{}, admin))
 		w := httptest.NewRecorder()
 		h.ServeHTTP(w, req)
 		return w.Code
 	}
-	if post("uid:0") != 200 {
+	if post("uid:1000", false) != http.StatusForbidden || len(*r.events) != 0 {
+		t.Fatal("a protected user who is not an administrator was accepted")
+	}
+	if post("uid:0", true) != 200 {
 		t.Fatal("root refused")
 	}
 	n := 0
@@ -108,7 +111,10 @@ func TestRestoredEndpointReportsTheTool(t *testing.T) {
 	if n != 1 || len(*r.events) != 1 {
 		t.Errorf("events: %v", *r.events)
 	}
-	if post("unknown") != http.StatusForbidden {
+	if (*r.events)[0]["caller"] != "uid:0" {
+		t.Errorf("the event does not name the caller: %v", (*r.events)[0])
+	}
+	if post("unknown", false) != http.StatusForbidden {
 		t.Error("an unknown caller was accepted")
 	}
 }

@@ -189,10 +189,47 @@ func rootHash(caller, tool, root string) string {
 // --- service side ---
 
 var rec struct {
-	mu    sync.Mutex
-	snap  offlineSnapshot
-	dirty bool
-	timer *time.Timer
+	mu     sync.Mutex
+	snap   offlineSnapshot
+	dirty  bool
+	timer  *time.Timer
+	loaded bool
+}
+
+// loadSaved (rec.mu held) reads the snapshot the service saved before it last stopped, through the
+// same ownership and checksum checks the hook uses, the first time anything is recorded. Refusals
+// (and the folders and allows, still subject to their expiry) survive a restart: a restarted
+// service must not forget what Manar refused.
+func loadSaved() {
+	if rec.loaded {
+		return
+	}
+	rec.loaded = true
+	state := stateDirNow()
+	if state == "" {
+		return
+	}
+	b, err := readTrusted(state)
+	if err != nil {
+		return
+	}
+	var s offlineSnapshot
+	if json.Unmarshal(b, &s) != nil || s.Version != offlineVersion || s.Sum != s.sum() {
+		return
+	}
+	now := time.Now()
+	for k, t := range s.Tools {
+		t.Allowed = joinEntries(pruneEntries(splitEntries(t.Allowed), now))
+		s.Tools[k] = t
+	}
+	kept := s.Roots[:0:0]
+	for _, r := range s.Roots {
+		if now.Sub(r.At) <= offlineMaxAge {
+			kept = append(kept, r)
+		}
+	}
+	s.Roots = kept
+	rec.snap = s
 }
 
 func callerID(caller string) string {
@@ -215,6 +252,7 @@ func markDirty() {
 func setOfflineReadsPolicy(on bool, deny []string) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	loadSaved()
 	if rec.snap.ReadsAllowed == on && slicesEqual(rec.snap.ReadDeny, deny) && !rec.snap.SavedAt.IsZero() {
 		// The config poll confirmed the policy again: keep the snapshot's age honest without a
 		// write on every poll.
@@ -235,6 +273,7 @@ func setOfflinePolicyVersion(v string) {
 	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	loadSaved()
 	if rec.snap.PolicyVersion == v {
 		return
 	}
@@ -252,6 +291,7 @@ func setOfflinePolicyVersion(v string) {
 // setOfflineState records "Pause all AI" and a lock (the reason code, "" when not locked).
 func setOfflineState(paused bool, locked string) {
 	rec.mu.Lock()
+	loadSaved()
 	if rec.snap.Paused == paused && rec.snap.Locked == locked && !rec.snap.SavedAt.IsZero() {
 		rec.mu.Unlock()
 		return
@@ -344,6 +384,9 @@ func recordOfflineDecision(toolID, caller, action, resource, cwd, decision strin
 		}
 	}
 	sens := sensitive(action, resource) || sensitive(action, target)
+	// An answer about a link's name says nothing about its target: an ALLOW is recorded (and a
+	// refusal dropped) only when the requested path already is the resolved target.
+	direct := !pathActions[action] || (resolved && filepath.Clean(resource) == real)
 	var k string
 	if pathActions[action] {
 		k = actionKey(caller, action, target)
@@ -353,6 +396,7 @@ func recordOfflineDecision(toolID, caller, action, resource, cwd, decision strin
 	now := time.Now()
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
+	loadSaved()
 	if rec.snap.Tools == nil {
 		rec.snap.Tools = map[string]offlineTool{}
 	}
@@ -360,6 +404,8 @@ func recordOfflineDecision(toolID, caller, action, resource, cwd, decision strin
 	allowed := dropEntry(pruneEntries(splitEntries(t.Allowed), now), k)
 	denied := splitEntries(t.Denied)
 	switch {
+	case decision == "ALLOW" && !sens && !direct:
+		// judged by name only: nothing recorded
 	case decision == "ALLOW" && !sens:
 		if pathActions[action] && resolved {
 			noteRoot(&rec.snap, toolID, caller, real, cwd, now)
@@ -520,9 +566,9 @@ func isCommandSeparator(r rune) bool {
 //   - a word that exists but cannot be resolved (a link that points nowhere, a loop, a magic link)
 //     is refused: the command could write through it;
 //   - a word that resolves to a sensitive path is refused (a link to a secret behind an ordinary name);
-//   - a hard-linked file is refused when it is a credential file (same device and inode), or when
-//     it lies outside the recorded project folders (inRoot, when given). A hard-linked file inside
-//     a project folder is fine: package managers hard-link every file of node_modules.
+//   - a hard-linked file is refused when it is a credential file (same device and inode) or is not
+//     a package file (see packageFile): package managers hard-link every file of node_modules, and
+//     nothing else is let through on the strength of a folder.
 func commandTouchesSecretViaLink(cmd, home, cwd string, inRoot func(realPath string) bool) bool {
 	n := 0
 	for _, f := range strings.FieldsFunc(cmd, isCommandSeparator) {
@@ -556,12 +602,35 @@ func commandTouchesSecretViaLink(cmd, home, cwd string, inRoot func(realPath str
 			return true
 		}
 		if fi, err := os.Lstat(r); err == nil && fi.Mode().IsRegular() && linkCount(r, fi) > 1 {
-			if hardLinkedCredential(fi, home) || (inRoot != nil && !inRoot(r)) {
+			if hardLinkedCredential(fi, home) || !packageFile(r, inRoot) {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// packageFile is true for a file under a node_modules folder (inside a recorded project folder,
+// when inRoot is given) or in a known package-manager store: the only places where a hard-linked
+// file is ordinary. Everywhere else a file with several names needs an exact allow.
+func packageFile(p string, inRoot func(string) bool) bool {
+	segs := strings.Split(fold(p), "/")
+	has := func(want ...string) bool {
+		for i := 0; i+len(want) <= len(segs); i++ {
+			ok := true
+			for j, w := range want {
+				ok = ok && segs[i+j] == w
+			}
+			if ok {
+				return true
+			}
+		}
+		return false
+	}
+	if has(".pnpm-store") || has(".yarn", "cache") || has(".bun", "install", "cache") || has(".local", "share", "pnpm") {
+		return true
+	}
+	return has("node_modules") && (inRoot == nil || inRoot(p))
 }
 
 // hardLinkedCredential is true when fi is (another name for) a credential file of the person, or
@@ -571,33 +640,49 @@ func hardLinkedCredential(fi os.FileInfo, home string) bool {
 	if !ok {
 		return true
 	}
-	return credentialIDs(home)[id]
+	ids, complete := credentialIDs(home)
+	return !complete || ids[id]
 }
 
 var credCache struct {
-	mu   sync.Mutex
-	home string
-	ids  map[string]bool
+	mu       sync.Mutex
+	home     string
+	ids      map[string]bool
+	complete bool
+	at       time.Time
 }
+
+// credentialTTL is how long the list is trusted: mcp-wrap and other long-lived programs call this
+// for hours.
+const credentialTTL = 3 * time.Minute
 
 // resetCredentialIDs forgets the cached list (tests, and a changed home).
 func resetCredentialIDs() {
 	credCache.mu.Lock()
-	credCache.home, credCache.ids = "", nil
+	credCache.home, credCache.ids, credCache.complete = "", nil, false
 	credCache.mu.Unlock()
 }
 
-// credentialIDs is the set of (device, inode) of the person's credential files: everything in the
-// folders Manar watches for secrets (.ssh, .aws, .kube, ...) and the single credential files named
-// in secretName. It is read once per process, and only when a hard-linked file shows up, so the
-// common offline path never pays for it.
-func credentialIDs(home string) map[string]bool {
+// credentialFolderBudget is how many entries one watched folder may cost.
+const credentialFolderBudget = 1500
+
+// skipCredentialDir: folders of logs and caches never hold the credentials themselves and can be huge.
+var skipCredentialDir = map[string]bool{"logs": true, "log": true, "cache": true, ".cache": true, "tmp": true, "node_modules": true, "cached": true}
+
+// credentialIDs is the set of (device, inode) of the person's credential files, and whether it is
+// complete. Fixed credential files come first; then each watched folder (.ssh, .aws, .kube, ...)
+// is walked with its own budget (recursively only where the watcher says so), skipping log and cache
+// folders. A folder whose budget runs out makes the list incomplete: the caller then cannot tell
+// and treats the file as a credential. Rebuilt when older than credentialTTL; built only when a
+// hard-linked file shows up, so the common offline path never pays for it.
+func credentialIDs(home string) (map[string]bool, bool) {
 	credCache.mu.Lock()
 	defer credCache.mu.Unlock()
-	if credCache.ids != nil && credCache.home == home {
-		return credCache.ids
+	if credCache.ids != nil && credCache.home == home && time.Since(credCache.at) < credentialTTL {
+		return credCache.ids, credCache.complete
 	}
 	ids := map[string]bool{}
+	complete := true
 	add := func(p string) {
 		if fi, err := os.Stat(p); err == nil && fi.Mode().IsRegular() {
 			if id, ok := fileID(fi); ok {
@@ -605,21 +690,26 @@ func credentialIDs(home string) map[string]bool {
 			}
 		}
 	}
-	budget := 4000
-	var walk func(dir string, recursive bool, depth int)
-	walk = func(dir string, recursive bool, depth int) {
+	for _, rel := range []string{".kube/config", ".aws/credentials", ".aws/config", ".docker/config.json", ".netrc", ".pgpass", ".npmrc", ".pypirc",
+		".git-credentials", ".s3cfg", ".claude.json", ".codex/auth.json", ".gemini/oauth_creds.json", ".config/gh/hosts.yml",
+		".config/rclone/rclone.conf", ".m2/settings.xml", ".m2/settings-security.xml", ".config/github-copilot/apps.json", ".config/github-copilot/hosts.json"} {
+		add(filepath.Join(home, filepath.FromSlash(rel)))
+	}
+	var walk func(dir string, recursive bool, depth int, budget *int)
+	walk = func(dir string, recursive bool, depth int, budget *int) {
 		ents, err := os.ReadDir(dir)
 		if err != nil {
 			return
 		}
 		for _, e := range ents {
-			if budget--; budget < 0 {
+			if *budget--; *budget < 0 {
+				complete = false
 				return
 			}
 			p := filepath.Join(dir, e.Name())
 			if e.IsDir() {
-				if recursive && depth < 3 {
-					walk(p, true, depth+1)
+				if recursive && depth < 3 && !skipCredentialDir[strings.ToLower(e.Name())] {
+					walk(p, true, depth+1, budget)
 				}
 				continue
 			}
@@ -628,17 +718,14 @@ func credentialIDs(home string) map[string]bool {
 	}
 	for _, t := range watch.Targets(home) {
 		if t.Dir {
-			walk(t.Path, true, 0)
+			budget := credentialFolderBudget
+			walk(t.Path, t.Recursive, 0, &budget)
 		} else {
 			add(t.Path)
 		}
 	}
-	for _, rel := range []string{".netrc", ".pgpass", ".s3cfg", ".claude.json", ".codex/auth.json", ".gemini/oauth_creds.json",
-		".config/rclone/rclone.conf", ".m2/settings.xml", ".m2/settings-security.xml", ".config/github-copilot/apps.json", ".config/github-copilot/hosts.json"} {
-		add(filepath.Join(home, filepath.FromSlash(rel)))
-	}
-	credCache.home, credCache.ids = home, ids
-	return ids
+	credCache.home, credCache.ids, credCache.complete, credCache.at = home, ids, complete, time.Now()
+	return ids, complete
 }
 
 // --- hook side ---
@@ -689,6 +776,42 @@ func insideRecordedRoot(s *offlineSnapshot, toolID, real string) bool {
 	return false
 }
 
+// plainCommand is true for a command made only of plain words, quotes around plain words, and the
+// known separators. Offline, nothing else is replayed: a quote around a space, a backslash, a
+// variable, a glob, a brace, a backquote or a cd (which changes what later words name) makes a word
+// name something this check cannot see.
+func plainCommand(cmd string) bool {
+	plain := func(r rune) bool {
+		return r < 128 && (r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._/+-:@%,=", r))
+	}
+	var quote rune
+	for _, r := range cmd {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else if !plain(r) {
+				return false
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		case plain(r), unicode.IsSpace(r), strings.ContainsRune("<>|;&()", r):
+		default:
+			return false
+		}
+	}
+	if quote != 0 {
+		return false
+	}
+	for _, w := range strings.FieldsFunc(cmd, isCommandSeparator) {
+		switch strings.Trim(w, `"'`) {
+		case "cd", "pushd", "popd":
+			return false
+		}
+	}
+	return true
+}
+
 // offlineVerdict decides without the service, in the hook's own working folder.
 func offlineVerdict(key, action, resource string) (Verdict, bool) {
 	return offlineVerdictIn(key, action, resource, "")
@@ -726,6 +849,9 @@ func offlineVerdictIn(key, action, resource, cwd string) (v Verdict, ok bool) {
 	yes := Verdict{true, "Manar: allowed (last policy)"}
 	t := s.Tools[tool]
 	if !pathActions[action] {
+		if !plainCommand(resource) {
+			return wait, true // quoting, escapes, variables, globs, cd: what a word names cannot be told
+		}
 		wd := canonCwd(cwd)
 		inRoot := func(r string) bool { return insideRecordedRoot(&s, tool, r) }
 		if commandTouchesSecretViaLink(resource, userHome(), wd, inRoot) {
@@ -757,6 +883,20 @@ func offlineVerdictIn(key, action, resource, cwd string) (v Verdict, ok bool) {
 	k := actionKey(localCaller(), action, real)
 	if hasEntryAny(t.Denied, k) {
 		return notBefore, true
+	}
+	if fi, err := os.Lstat(real); err == nil && fi.Mode().IsRegular() && linkCount(real, fi) > 1 {
+		// A file with several names is keyed by none of them: refusals and deny rules written for
+		// another name do not apply. Only a package file may ride on the folder rule; anything else
+		// needs an exact allow of this very path.
+		if packageFile(real, func(p string) bool { return insideRecordedRoot(&s, tool, p) }) {
+			if action == "read" && s.ReadsAllowed && !s.RefusedFull && insideRecordedRoot(&s, tool, real) {
+				return yes, true
+			}
+		}
+		if hasEntry(t.Allowed, k) {
+			return yes, true
+		}
+		return wait, true
 	}
 	if !insideRecordedRoot(&s, tool, real) {
 		return wait, true

@@ -57,7 +57,7 @@ func BenchmarkOfflineVerdict(b *testing.B) {
 	readTrusted = func(s string) ([]byte, error) { return readFileForBench(offlineFile(s)) }
 	defer func() { readTrusted = save }()
 	rec.mu.Lock()
-	rec.snap = offlineSnapshot{}
+	rec.snap, rec.loaded = offlineSnapshot{}, true
 	rec.mu.Unlock()
 	for i := 0; i < offlineKeep; i++ {
 		recordOfflineDecision("host.claude-code", "uid:1", "bash", "cmd "+string(rune('a'+i%26))+time.Duration(i).String(), "", "ALLOW")

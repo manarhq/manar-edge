@@ -48,6 +48,12 @@ func setTamperClient(c *hostclient.Client) {
 // reportTamper sends one event, at most once per tamperEvery for the same kind, tool and place.
 // Best effort: it never blocks the caller and never decides anything.
 func reportTamper(kind, toolID, process, path string, blocked bool) {
+	reportTamperBy("", kind, toolID, process, path, blocked)
+}
+
+// reportTamperBy is reportTamper for something a person did: the event names who (caller, as the
+// kernel gave it).
+func reportTamperBy(caller, kind, toolID, process, path string, blocked bool) {
 	key := kind + "\x00" + toolID + "\x00" + process + "\x00" + path
 	now := time.Now()
 	tamper.mu.Lock()
@@ -65,6 +71,9 @@ func reportTamper(kind, toolID, process, path string, blocked bool) {
 	tamper.mu.Unlock()
 
 	ev := map[string]any{"type": kind, "toolId": toolID, "blocked": blocked, "at": now.UTC()}
+	if caller != "" {
+		ev["caller"] = callerID(caller)
+	}
 	if process != "" {
 		ev["process"] = clipText(process, 128)
 	}

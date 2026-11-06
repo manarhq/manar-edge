@@ -140,9 +140,10 @@ func TestTamperReportOnlyFromProtectedAccounts(t *testing.T) {
 	}
 }
 
-// The hook sends the target with its links resolved (a file that does not exist yet: its existing
-// folder plus the name), only for file actions, and leaves it out when it cannot be resolved.
-func TestHookSendsTheResolvedPathOfAFileAction(t *testing.T) {
+// The service works out the target with its links resolved itself (a file that does not exist yet:
+// its existing folder plus the name), only for file actions, sends nothing when it cannot, and
+// ignores what the client claims.
+func TestRelayComputesTheResolvedPathAndIgnoresTheClients(t *testing.T) {
 	dir := t.TempDir()
 	relayDir, relaySock, relayOwner = dir, filepath.Join(dir, "relay.sock"), uint32(os.Geteuid())
 	l, err := listenRelay()
@@ -175,7 +176,11 @@ func TestHookSendsTheResolvedPathOfAFileAction(t *testing.T) {
 		"not a file action":            {"shell", "ls " + docs, ""},
 	} {
 		b.resolved = "unset"
-		r.Decide(context.Background(), "cursor", c.action, c.res, 5e9)
+		var out map[string]any
+		body := map[string]string{"toolId": "host.cursor", "actionId": c.action, "resource": c.res, "resolvedPath": "/etc/passwd"} // a lie
+		if err := r.call(context.Background(), "POST", "/v1/authorize", body, &out); err != nil {
+			t.Fatal(err)
+		}
 		if b.resolved != c.want {
 			t.Errorf("%s: resolvedPath %q, want %q", name, b.resolved, c.want)
 		}
