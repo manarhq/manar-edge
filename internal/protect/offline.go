@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/secrets/watch"
@@ -543,8 +542,8 @@ func sensitive(action, resource string) bool {
 		if destructive.MatchString(resource) || GuardedCommand(resource) {
 			return true
 		}
-		for _, f := range strings.Fields(resource) {
-			f = strings.Trim(f, `"'`)
+		for _, f := range strings.FieldsFunc(resource, isShellSpace) {
+			f = unquote(f)
 			if watch.ClassOf(f) != "" || secretName.MatchString(f) {
 				return true
 			}
@@ -558,8 +557,18 @@ func sensitive(action, resource string) bool {
 // white space, redirections, pipes, lists, subshells, backquotes and "=" (so --config=path and
 // FOO=path give the path as a word). `echo hi>out.txt` has the word out.txt.
 func isCommandSeparator(r rune) bool {
-	return unicode.IsSpace(r) || strings.ContainsRune("<>|;&()`=", r)
+	return isShellSpace(r) || strings.ContainsRune("<>|;&()`=", r)
 }
+
+// isShellSpace: the shell splits words on a space or a tab only. Any other white space (a no-break
+// space, a line separator) belongs to the word it is in, so it must not split one here.
+func isShellSpace(r rune) bool { return r == ' ' || r == '\t' }
+
+var quoteRemover = strings.NewReplacer(`"`, "", `'`, "")
+
+// unquote removes every quote character, wherever it is in the word, as the shell does:
+// c"d" is cd, "x".txt is x.txt.
+func unquote(w string) string { return quoteRemover.Replace(w) }
 
 // commandTouchesSecretViaLink resolves every word of a command that names an existing path (a bare
 // word is taken relative to the working folder) and reports whether the command may reach a secret:
@@ -574,7 +583,7 @@ func commandTouchesSecretViaLink(cmd, home, cwd string) bool {
 		if n++; n > 64 {
 			break
 		}
-		f = strings.Trim(f, `"'`)
+		f = unquote(f)
 		if strings.HasPrefix(f, "~/") && home != "" {
 			f = filepath.Join(home, f[2:])
 		}
@@ -774,7 +783,7 @@ func plainCommand(cmd string) bool {
 			}
 		case r == '"' || r == '\'':
 			quote = r
-		case plain(r), unicode.IsSpace(r), strings.ContainsRune("<>|;&()", r):
+		case plain(r), isShellSpace(r), strings.ContainsRune("<>|;&()", r):
 		default:
 			return false
 		}
@@ -811,26 +820,26 @@ func changesFolderOrRunsOthers(cmd string) bool {
 	if strings.ContainsAny(cmd, "\n\r") {
 		return true
 	}
-	for _, w := range strings.FieldsFunc(cmd, func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune(";&|()<>`", r) }) {
-		if commandRunners[strings.Trim(w, `"'`)] {
+	for _, w := range strings.FieldsFunc(cmd, func(r rune) bool { return isShellSpace(r) || strings.ContainsRune(";&|()<>`", r) }) {
+		if commandRunners[strings.ToLower(unquote(w))] {
 			return true
 		}
 	}
 	for _, seg := range strings.FieldsFunc(cmd, func(r rune) bool { return strings.ContainsRune(";&|()", r) }) {
-		words := strings.FieldsFunc(seg, func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("<>`", r) })
+		words := strings.FieldsFunc(seg, func(r rune) bool { return isShellSpace(r) || strings.ContainsRune("<>`", r) })
 		for len(words) > 0 && strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-") {
 			words = words[1:] // FOO=bar make: the assignment is not the command
 		}
 		if len(words) == 0 {
 			continue
 		}
-		lead := strings.Trim(words[0], `"'`)
+		lead := unquote(words[0])
 		prog := strings.TrimSuffix(strings.ToLower(path.Base(fold(lead))), ".exe")
 		if shellReserved[lead] || commandRunners[prog] {
 			return true
 		}
 		for _, w := range words[1:] {
-			w = strings.Trim(w, `"'`)
+			w = unquote(w)
 			switch {
 			case strings.HasPrefix(w, "-C"), strings.HasPrefix(w, "--chdir"), strings.HasPrefix(w, "--directory"),
 				strings.HasPrefix(w, "--git-dir"), strings.HasPrefix(w, "--work-tree"), strings.HasPrefix(w, "-chdir"):
