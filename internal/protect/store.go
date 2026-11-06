@@ -48,6 +48,9 @@ type Outcome struct {
 	// Repaired: Manar had edited this file before, and everything of Manar's had been taken out of
 	// it since; Apply put it back.
 	Repaired bool
+	// Lost: Apply wrote the file back and it held fewer Manar entries (hook commands, wrapped MCP
+	// servers) than Manar last wrote: something of Manar's was taken out.
+	Lost bool
 }
 
 type entry struct {
@@ -60,7 +63,9 @@ type entry struct {
 	GID      int    `json:"gid"`
 	Home     string `json:"home"`
 	AfterSHA string `json:"afterSha"`
-	At       string `json:"at"`
+	// Marks counts the Manar entries in the file as Manar last wrote it (see manarMarks).
+	Marks int    `json:"marks,omitempty"`
+	At    string `json:"at"`
 }
 
 func (e entry) owner() Owner { return Owner{UID: e.UID, GID: e.GID, Home: e.Home} }
@@ -140,15 +145,22 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 			out = append(out, oc)
 			continue
 		}
+		ent := findEntry(m.Tools[key], fe.Path)
 		if bytes.Equal(next, cur) || (!existed && len(next) == 0) {
+			// Nothing to write. Keep the count honest if the person removed a wrapped server
+			// themselves, so a later server they add is not mistaken for a repair.
+			if ent != nil && ent.Marks != manarMarks(cur) {
+				ent.Marks = manarMarks(cur)
+				_ = s.save(m)
+			}
 			out = append(out, oc)
 			continue
 		}
-		ent := findEntry(m.Tools[key], fe.Path)
 		// The file is not what the service last wrote, and it needs fixing: something changed Manar's
 		// part (not just the person editing their own settings, which needs no fix). Judged by what
 		// the service wrote (its stored checksum), never by searching the file for a program name.
 		oc.Repaired = ent != nil && ent.AfterSHA != "" && sha(cur) != ent.AfterSHA
+		oc.Lost = oc.Repaired && ent.Marks > manarMarks(cur)
 		if ent == nil {
 			e, berr := s.backup(tool, fe, cur, existed, curMode, owner)
 			if berr != nil {
@@ -171,6 +183,7 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 			continue
 		}
 		ent.AfterSHA = sha(next)
+		ent.Marks = manarMarks(next)
 		if err := s.save(m); err != nil {
 			return out, err
 		}
@@ -178,6 +191,11 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 		out = append(out, oc)
 	}
 	return out, nil
+}
+
+// manarMarks counts the Manar entries in a settings file: hook commands and wrapped MCP servers.
+func manarMarks(b []byte) int {
+	return bytes.Count(b, []byte("hook-tool ")) + bytes.Count(b, []byte("mcp-wrap"))
 }
 
 func findEntry(es []entry, path string) *entry {
@@ -393,4 +411,56 @@ func (s *Store) Describe(tool, user string) []string {
 		}
 	}
 	return out
+}
+
+// A person (an administrator at a terminal) can run `manar-edge protect restore`, which takes the
+// hooks out. The service then puts them back, and that must not look like a first install: the CLI
+// leaves a marker per tool, and the service reports the re-add once.
+func (s *Store) restoredPath() string { return filepath.Join(s.dir, "protect", "cli-restored.json") }
+
+func (s *Store) readRestored() []string {
+	var l []string
+	if b, err := os.ReadFile(s.restoredPath()); err == nil {
+		_ = json.Unmarshal(b, &l)
+	}
+	return l
+}
+
+// NoteCLIRestore records that the CLI restored these tools (keys such as claude-code).
+func (s *Store) NoteCLIRestore(tools ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.readRestored()
+	for _, t := range tools {
+		found := false
+		for _, x := range l {
+			found = found || x == t
+		}
+		if !found {
+			l = append(l, t)
+		}
+	}
+	b, _ := json.Marshal(l)
+	_ = writeState(s.restoredPath(), b, 0o600)
+}
+
+// TakeCLIRestore reports whether the CLI restored the tool since the service last looked, and clears it.
+func (s *Store) TakeCLIRestore(tool string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.readRestored()
+	var keep []string
+	hit := false
+	for _, x := range l {
+		if x == tool {
+			hit = true
+		} else {
+			keep = append(keep, x)
+		}
+	}
+	if hit {
+		b, _ := json.Marshal(keep)
+		_ = writeState(s.restoredPath(), b, 0o600)
+	}
+	return hit
 }

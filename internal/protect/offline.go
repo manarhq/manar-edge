@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,7 +41,8 @@ const (
 	offlineMaxAge  = 8 * time.Hour
 	offlineKeep    = 400 // exact allowed actions kept per tool
 	offlineFlush   = 5 * time.Second
-	offlineVersion = 1
+	offlineTouch   = 30 * time.Minute // how often an unchanged policy refreshes the snapshot's age
+	offlineVersion = 2
 )
 
 // RestartingText is what the person sees while the service is restarting.
@@ -49,9 +51,48 @@ const RestartingText = "Manar is restarting. Try again in a moment."
 // unreachableHint ends a message when there is no usable snapshot (fail closed).
 const unreachableHint = " The Manar device service is not running. The person using this computer should restart it or contact their administrator."
 
+// offlineEntry is the hash of one exact answer and when Manar gave it; the hook ignores an entry
+// older than offlineMaxAge whatever the age of the snapshot.
+type offlineEntry struct {
+	H  string `json:"h"`
+	At int64  `json:"t"` // unix seconds (cheap to read: the hook parses every entry)
+}
+
+// entryList is a list of entries as one string, "hash:unix hash:unix", oldest first: the hook reads
+// the whole snapshot on every call while the service is away, and one string decodes far faster
+// than hundreds of objects.
+type entryList string
+
+func splitEntries(l entryList) []offlineEntry {
+	var out []offlineEntry
+	for _, f := range strings.Fields(string(l)) {
+		if h, ts, ok := strings.Cut(f, ":"); ok {
+			if t, err := strconv.ParseInt(ts, 10, 64); err == nil {
+				out = append(out, offlineEntry{h, t})
+			}
+		}
+	}
+	return out
+}
+
+func joinEntries(es []offlineEntry) entryList {
+	var b strings.Builder
+	for i, e := range es {
+		if i > 0 {
+			b.WriteByte(' ')
+		}
+		b.WriteString(e.H + ":" + strconv.FormatInt(e.At, 10))
+	}
+	return entryList(b.String())
+}
+
 type offlineTool struct {
-	// Allowed holds, oldest first, a hash of each exact (caller, action, resolved resource) Manar ALLOWed.
-	Allowed []string `json:"allowed,omitempty"`
+	// Allowed holds each exact (caller, action, resolved resource or folder+command) Manar ALLOWed
+	// and that may be replayed.
+	Allowed entryList `json:"allowed,omitempty"`
+	// Denied holds what Manar answered with a DENY, an approval request or an ALLOW that must not be
+	// replayed. It is checked before any project-folder rule: a refusal is never undone offline.
+	Denied entryList `json:"denied,omitempty"`
 }
 
 type offlineSnapshot struct {
@@ -61,6 +102,9 @@ type offlineSnapshot struct {
 	// hook reads them here and nowhere else.
 	Paused bool   `json:"paused"`
 	Locked string `json:"locked,omitempty"`
+	// PolicyVersion is the workspace policy version the answers below were given under; a new one
+	// drops every allow and project folder.
+	PolicyVersion string `json:"policyVersion,omitempty"`
 	// ReadsAllowed is the workspace policy "reads of ordinary files keep working while Manar
 	// restarts" (offlineReadsAllowed in GET /host/v1/config). Sensitive paths never qualify.
 	ReadsAllowed bool `json:"readsAllowed"`
@@ -106,9 +150,27 @@ func hashOf(parts ...string) string {
 	return hex.EncodeToString(h[:16])
 }
 
-// actionKey binds an allowed action to the person (caller, without the session part) who made it.
+// actionKey binds an allowed file action to the person (caller, without the session part) who made
+// it; resource is the resolved path.
 func actionKey(caller, action, resource string) string {
 	return hashOf(callerID(caller), action, fold(resource))
+}
+
+// shellKey binds a command (or MCP call) to the person and the folder it ran in; the command text
+// is hashed byte for byte (a command is not a path: case and separators matter).
+func shellKey(caller, action, cwd, resource string) string {
+	return hashOf("sh", callerID(caller), action, fold(cwd), resource)
+}
+
+// canonCwd is a working folder resolved the same way on both sides ("" when it cannot be).
+func canonCwd(cwd string) string {
+	if cwd == "" {
+		cwd, _ = os.Getwd()
+	}
+	if r, ok := resolveTarget(cwd); ok {
+		return r
+	}
+	return ""
 }
 
 func rootHash(caller, tool, root string) string {
@@ -132,6 +194,7 @@ func callerID(caller string) string {
 }
 
 func markDirty() {
+	rec.snap.SavedAt = time.Now()
 	rec.dirty = true
 	if rec.timer == nil {
 		rec.timer = time.AfterFunc(offlineFlush, flushOffline)
@@ -144,23 +207,50 @@ func setOfflineReadsPolicy(on bool, deny []string) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if rec.snap.ReadsAllowed == on && slicesEqual(rec.snap.ReadDeny, deny) && !rec.snap.SavedAt.IsZero() {
+		// The config poll confirmed the policy again: keep the snapshot's age honest without a
+		// write on every poll.
+		if time.Since(rec.snap.SavedAt) > offlineTouch {
+			markDirty()
+		}
 		return
 	}
 	rec.snap.ReadsAllowed, rec.snap.ReadDeny = on, append([]string(nil), deny...)
-	rec.snap.SavedAt = time.Now()
+	markDirty()
+}
+
+// setOfflinePolicyVersion records the workspace policy version; a different one than before drops
+// every allow and project folder (what was allowed under the old policy may not be now).
+func setOfflinePolicyVersion(v string) {
+	if v == "" {
+		return
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.snap.PolicyVersion == v {
+		return
+	}
+	if rec.snap.PolicyVersion != "" {
+		for k, t := range rec.snap.Tools {
+			t.Allowed = ""
+			rec.snap.Tools[k] = t
+		}
+		rec.snap.Roots = nil
+	}
+	rec.snap.PolicyVersion = v
 	markDirty()
 }
 
 // setOfflineState records "Pause all AI" and a lock (the reason code, "" when not locked).
 func setOfflineState(paused bool, locked string) {
 	rec.mu.Lock()
-	defer rec.mu.Unlock()
 	if rec.snap.Paused == paused && rec.snap.Locked == locked && !rec.snap.SavedAt.IsZero() {
+		rec.mu.Unlock()
 		return
 	}
 	rec.snap.Paused, rec.snap.Locked = paused, locked
-	rec.snap.SavedAt = time.Now()
 	markDirty()
+	rec.mu.Unlock()
+	flushOffline() // a pause or a lock reaches the hooks now, not at the next timer
 }
 
 func slicesEqual(a, b []string) bool {
@@ -178,20 +268,23 @@ func slicesEqual(a, b []string) bool {
 // pathActions are the actions whose resource is a file path.
 var pathActions = map[string]bool{"read": true, "edit": true, "write": true, "multiedit": true, "notebookedit": true}
 
-// resolveTarget resolves symlinks in a path. A file that does not exist yet (a write) resolves
-// through its folder. ok is false when it cannot be resolved or is not absolute.
+// resolveTarget resolves a path the way the kernel walks it (realPath): a link that points nowhere,
+// loops or is a magic link is "cannot tell". A file that does not exist yet (a write) is judged by
+// its folder, which must exist. ok is false when it cannot be resolved or is not absolute.
 func resolveTarget(p string) (string, bool) {
 	if !filepath.IsAbs(p) || strings.ContainsRune(p, 0) {
 		return "", false
 	}
-	if r, err := filepath.EvalSymlinks(p); err == nil {
-		return r, true
-	}
-	d, err := filepath.EvalSymlinks(filepath.Dir(p))
+	r, err := realPath(p)
 	if err != nil {
 		return "", false
 	}
-	return filepath.Join(d, filepath.Base(p)), true
+	if _, err := os.Lstat(r); err != nil {
+		if fi, err := os.Stat(filepath.Dir(r)); err != nil || !fi.IsDir() {
+			return "", false
+		}
+	}
+	return r, true
 }
 
 // noteRoot remembers the resolved project folder cwd where a file action was allowed just now: it
@@ -227,7 +320,9 @@ func within(root, p string) bool {
 
 // recordOfflineDecision remembers what Manar answered, for the offline snapshot. Only the service
 // calls it. A path is resolved first; an action on a sensitive path (as given or resolved) is never
-// recorded.
+// recorded as allowed. decision is ALLOW only for an answer that may be replayed; every other answer
+// (DENY, an approval request, an ALLOW that must not be cached) is remembered as a refusal, which
+// the hook checks before any project-folder rule.
 func recordOfflineDecision(toolID, caller, action, resource, cwd, decision string) {
 	if action == "" || resource == "" {
 		return
@@ -239,36 +334,73 @@ func recordOfflineDecision(toolID, caller, action, resource, cwd, decision strin
 			target = real
 		}
 	}
-	ok := decision == "ALLOW" && !sensitive(action, resource) && !sensitive(action, target)
-	k := actionKey(caller, action, target)
+	sens := sensitive(action, resource) || sensitive(action, target)
+	var k string
+	if pathActions[action] {
+		k = actionKey(caller, action, target)
+	} else {
+		k = shellKey(caller, action, canonCwd(cwd), resource)
+	}
+	now := time.Now()
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	if rec.snap.Tools == nil {
 		rec.snap.Tools = map[string]offlineTool{}
 	}
 	t := rec.snap.Tools[toolID]
-	t.Allowed = removeKey(t.Allowed, k)
-	if ok {
+	allowed := dropEntry(pruneEntries(splitEntries(t.Allowed), now), k)
+	denied := dropEntry(pruneEntries(splitEntries(t.Denied), now), k)
+	switch {
+	case decision == "ALLOW" && !sens:
 		if pathActions[action] && resolved {
-			noteRoot(&rec.snap, toolID, caller, real, cwd, time.Now())
+			noteRoot(&rec.snap, toolID, caller, real, cwd, now)
 		}
-		t.Allowed = append(t.Allowed, k)
-		if len(t.Allowed) > offlineKeep {
-			t.Allowed = t.Allowed[len(t.Allowed)-offlineKeep:]
-		}
+		allowed = capEntries(append(allowed, offlineEntry{k, now.Unix()}))
+	case !sens:
+		denied = capEntries(append(denied, offlineEntry{k, now.Unix()}))
 	}
+	t.Allowed, t.Denied = joinEntries(allowed), joinEntries(denied)
 	rec.snap.Tools[toolID] = t
 	markDirty()
 }
 
-func removeKey(l []string, k string) []string {
-	out := l[:0]
-	for _, v := range l {
-		if v != k {
-			out = append(out, v)
+func capEntries(l []offlineEntry) []offlineEntry {
+	if len(l) > offlineKeep {
+		l = l[len(l)-offlineKeep:]
+	}
+	return l
+}
+
+// pruneEntries drops entries older than offlineMaxAge.
+func pruneEntries(l []offlineEntry, now time.Time) []offlineEntry {
+	out := l[:0:0]
+	for _, e := range l {
+		if now.Unix()-e.At <= int64(offlineMaxAge/time.Second) {
+			out = append(out, e)
 		}
 	}
 	return out
+}
+
+func dropEntry(l []offlineEntry, k string) []offlineEntry {
+	out := l[:0:0]
+	for _, e := range l {
+		if e.H != k {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// hasEntry is true when l holds k, given within offlineMaxAge (and not from the future).
+func hasEntry(l entryList, k string) bool {
+	now := time.Now().Unix()
+	for _, e := range splitEntries(l) {
+		if e.H == k && now-e.At <= int64(offlineMaxAge/time.Second) && e.At <= now+300 {
+			return true
+		}
+	}
+	return false
 }
 
 func flushOffline() {
@@ -281,13 +413,12 @@ func flushOffline() {
 	s := rec.snap
 	s.Tools = make(map[string]offlineTool, len(rec.snap.Tools))
 	for k, v := range rec.snap.Tools {
-		v.Allowed = append([]string(nil), v.Allowed...)
 		s.Tools[k] = v
 	}
 	s.Roots = append([]offlineRoot(nil), rec.snap.Roots...)
 	rec.dirty = false
 	rec.mu.Unlock()
-	s.Version, s.SavedAt = offlineVersion, time.Now().UTC() // saved now: it is only as old as the last answer it holds
+	s.Version = offlineVersion // SavedAt stays what the last change set: a flush does not make old answers young
 	s.Sum = s.sum()
 	b, _ := json.Marshal(&s)
 	state := stateDirNow()
@@ -335,9 +466,10 @@ func sensitive(action, resource string) bool {
 	return false
 }
 
-// commandTouchesSecretViaLink resolves every word of a command that names an existing path and
-// reports whether any resolves to a sensitive one (a link to a secret hidden behind an ordinary name).
-func commandTouchesSecretViaLink(cmd, home string) bool {
+// commandTouchesSecretViaLink resolves every word of a command that names an existing path (a bare
+// word is taken relative to the working folder) and reports whether any resolves to a sensitive one:
+// a link to a secret hidden behind an ordinary name, or `cat config` run inside ~/.kube.
+func commandTouchesSecretViaLink(cmd, home, cwd string) bool {
 	n := 0
 	for _, f := range strings.Fields(cmd) {
 		if n++; n > 64 {
@@ -347,16 +479,24 @@ func commandTouchesSecretViaLink(cmd, home string) bool {
 		if strings.HasPrefix(f, "~/") && home != "" {
 			f = filepath.Join(home, f[2:])
 		}
-		if f == "" || !strings.ContainsAny(f, `/\.`) {
+		if f == "" || strings.HasPrefix(f, "-") {
 			continue
+		}
+		if !filepath.IsAbs(f) {
+			if cwd == "" {
+				continue
+			}
+			f = filepath.Join(cwd, f)
 		}
 		if _, err := os.Lstat(f); err != nil {
 			continue
 		}
-		if r, err := filepath.EvalSymlinks(f); err == nil {
-			if abs, err := filepath.Abs(r); err == nil && (watch.ClassOf(abs) != "" || secretName.MatchString(abs)) {
-				return true
-			}
+		r, err := filepath.EvalSymlinks(f)
+		if err != nil {
+			continue
+		}
+		if abs, err := filepath.Abs(r); err == nil && (watch.ClassOf(abs) != "" || secretName.MatchString(abs)) {
+			return true
 		}
 	}
 	return false
@@ -410,9 +550,14 @@ func insideRecordedRoot(s *offlineSnapshot, toolID, real string) bool {
 	return false
 }
 
-// offlineVerdict decides without the service. ok is false when there is no usable snapshot: the
-// caller then fails closed.
-func offlineVerdict(key, action, resource string) (v Verdict, ok bool) {
+// offlineVerdict decides without the service, in the hook's own working folder.
+func offlineVerdict(key, action, resource string) (Verdict, bool) {
+	return offlineVerdictIn(key, action, resource, "")
+}
+
+// offlineVerdictIn decides without the service. cwd is the tool's working folder ("" for this
+// process's). ok is false when there is no usable snapshot: the caller then fails closed.
+func offlineVerdictIn(key, action, resource, cwd string) (v Verdict, ok bool) {
 	state := stateDirNow()
 	if state == "" {
 		return Verdict{}, false
@@ -435,24 +580,22 @@ func offlineVerdict(key, action, resource string) (v Verdict, ok bool) {
 	tool := "host." + key
 	refuse := Verdict{false, "Manar: this touches a secret or can delete data, so it needs a live check and Manar is restarting. Try again in a moment."}
 	wait := Verdict{false, "Manar: " + RestartingText}
+	notBefore := Verdict{false, "Manar: this was not allowed the last time Manar checked it, and Manar is restarting. Try again in a moment."}
 	if sensitive(action, resource) {
 		return refuse, true
 	}
-	allowed := func(target string) bool {
-		k := actionKey(localCaller(), action, target)
-		for _, a := range s.Tools[tool].Allowed {
-			if a == k {
-				return true
-			}
-		}
-		return false
-	}
 	yes := Verdict{true, "Manar: allowed (last policy)"}
+	t := s.Tools[tool]
 	if !pathActions[action] {
-		if commandTouchesSecretViaLink(resource, userHome()) {
+		wd := canonCwd(cwd)
+		if commandTouchesSecretViaLink(resource, userHome(), wd) {
 			return refuse, true
 		}
-		if allowed(resource) {
+		k := shellKey(localCaller(), action, wd, resource)
+		if hasEntry(t.Denied, k) {
+			return notBefore, true
+		}
+		if hasEntry(t.Allowed, k) {
 			return yes, true
 		}
 		return wait, true
@@ -465,8 +608,15 @@ func offlineVerdict(key, action, resource string) (v Verdict, ok bool) {
 	if sensitive(action, real) {
 		return refuse, true
 	}
+	if multiplyLinked(real) {
+		return wait, true // a second name for a file may be a name for something else
+	}
 	if action == "read" && (denyRule(s.ReadDeny, resource) || denyRule(s.ReadDeny, real)) {
 		return Verdict{false, "Manar denied: this file is protected by your workspace's rules."}, true
+	}
+	k := actionKey(localCaller(), action, real)
+	if hasEntry(t.Denied, k) {
+		return notBefore, true
 	}
 	if !insideRecordedRoot(&s, tool, real) {
 		return wait, true
@@ -474,25 +624,29 @@ func offlineVerdict(key, action, resource string) (v Verdict, ok bool) {
 	if action == "read" && s.ReadsAllowed {
 		return yes, true
 	}
-	if allowed(real) {
+	if hasEntry(t.Allowed, k) {
 		return yes, true
 	}
 	return wait, true
 }
 
+// multiplyLinked is true for a regular file with more than one hard link.
+func multiplyLinked(p string) bool {
+	fi, err := os.Lstat(p)
+	return err == nil && fi.Mode().IsRegular() && linkCount(p, fi) > 1
+}
+
 // denyRule matches the workspace's read-deny patterns against a path: "**" crosses folders, "*" and
 // "?" do not, separators and (on Windows) case are normalised, a pattern without a slash matches the
-// file name, one ending in a slash is a folder prefix, and a pattern that cannot be parsed denies.
+// file name, one ending in a slash is that folder and everything below it, and a pattern that cannot be parsed denies.
 func denyRule(patterns []string, p string) bool {
 	p = fold(p)
 	for _, pat := range patterns {
 		pat = fold(pat)
+		if strings.HasSuffix(pat, "/") {
+			pat += "**" // a folder: everything below it, through the same glob
+		}
 		switch {
-		case strings.HasSuffix(pat, "/"):
-			if strings.HasPrefix(p, pat) {
-				return true
-			}
-			continue
 		case !strings.Contains(pat, "/"):
 			ok, err := path.Match(pat, path.Base(p))
 			if err != nil || ok {

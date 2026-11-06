@@ -497,6 +497,9 @@ type Config struct {
 	OfflineReadsAllowed *bool `json:"offlineReadsAllowed,omitempty"`
 	// OfflineReadDeny are path patterns (globs, or folders ending in a slash) never read offline.
 	OfflineReadDeny []string `json:"offlineReadDeny,omitempty"`
+	// PolicyVersion identifies the workspace policy in force. A different value than before drops
+	// every allow the device kept for offline use. Empty from an API that does not send it.
+	PolicyVersion string `json:"policyVersion,omitempty"`
 }
 
 // VaultGrant is one standing grant: the console request that gave it and when it ends (nil: no end).

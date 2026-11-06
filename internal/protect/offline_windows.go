@@ -113,3 +113,22 @@ var localCaller = func() string {
 	}
 	return "sid:" + u.User.Sid.String()
 }
+
+// linkCount is the number of hard links to a file (2 when it cannot be told: refuse rather than guess).
+func linkCount(path string, _ os.FileInfo) uint64 {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return 2
+	}
+	h, err := windows.CreateFile(p, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil,
+		windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return 2
+	}
+	defer windows.CloseHandle(h)
+	var info windows.ByHandleFileInformation
+	if windows.GetFileInformationByHandle(h, &info) != nil {
+		return 2
+	}
+	return uint64(info.NumberOfLinks)
+}

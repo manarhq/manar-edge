@@ -28,7 +28,7 @@ type offlineAllow struct {
 	Tool   string    `json:"toolId"`
 	Action string    `json:"action"`
 	Path   string    `json:"path,omitempty"` // only for file actions; a command is never sent
-	At     time.Time `json:"at"`
+	At     time.Time `json:"at"`             // the hook's clock: clamped by the service
 }
 
 // offlineQueuePath is the queue file (a var so tests can set it).
@@ -98,8 +98,11 @@ func (r *Relay) flushOfflineAllows() {
 }
 
 // reportOfflineAllows sends the events a hook queued. The service takes the person from the kernel
-// (the caller), checks the tool, and masks the path; the hook only names what it allowed.
-func reportOfflineAllows(evs []offlineAllow) {
+// (the caller), checks the tool, and masks the path; the hook only names what it allowed. The event
+// carries the caller, says it was reported by the device, and its time is the hook's clock clamped
+// to the last offlineMaxAge, so a hook cannot backdate or postdate the audit trail.
+func reportOfflineAllows(evs []offlineAllow, caller string) {
+	now := time.Now().UTC()
 	for _, e := range evs {
 		if !validTool(e.Tool) || e.Action == "" || len(e.Action) > 32 || len(e.Path) > 2048 {
 			continue
@@ -108,8 +111,16 @@ func reportOfflineAllows(evs []offlineAllow) {
 		if e.Path != "" {
 			path = host.MaskPath(host.Homes(), e.Path)
 		}
+		at := e.At.UTC()
+		if at.Before(now.Add(-offlineMaxAge)) {
+			at = now.Add(-offlineMaxAge)
+		}
+		if at.After(now) {
+			at = now
+		}
 		sendEvent(map[string]any{"type": "hook.offline_allowed", "toolId": e.Tool, "process": e.Action,
-			"maskedPath": clipText(path, 1024), "blocked": false, "at": e.At})
+			"maskedPath": clipText(path, 1024), "blocked": false, "at": at,
+			"caller": callerID(caller), "deviceReported": true})
 	}
 }
 

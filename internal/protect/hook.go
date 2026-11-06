@@ -183,7 +183,7 @@ type authorizeReply struct {
 	ApprovalID string `json:"approvalId"`
 }
 
-var offlineVerdictFn = offlineVerdict
+var offlineVerdictFn = offlineVerdictIn
 
 // downError means nothing is listening where the service should be: the socket is missing, the
 // connection is refused or the connect timed out. It is not returned when something answered, or
@@ -210,7 +210,7 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 		// service that answered with any error, or an answer that cannot be read, fails closed.
 		var down *downError
 		if errors.As(err, &down) {
-			if v, ok := offlineVerdictFn(key, actionID, resource); ok {
+			if v, ok := offlineVerdictFn(key, actionID, resource, r.Cwd); ok {
 				if v.Allow {
 					queueOfflineAllow(key, actionID, resource) // told to Manar when the service is back
 				}

@@ -34,6 +34,8 @@ type Ctx struct {
 	GOOS       string // runtime.GOOS unless a test says otherwise
 	// Foreign is told about Manar-looking hook entries that are not exactly this install's own.
 	Foreign func(key, path string, cmds []string)
+	// HooksDisabled is told when a settings file had "disableAllHooks" switched on; the edit removes it.
+	HooksDisabled func(key, path string)
 }
 
 // Keys are the tool keys protect knows; the host tool id is "host." + key.
@@ -88,6 +90,13 @@ func Plan(key string, u discovery.User, c Ctx) []Item {
 		// CLAUDE_CONFIG_DIR can still switch this hook off: the hooks refuse AI tools' changes to
 		// those files, and the service reports what it sees (tamper.go).
 		return []Item{hook(filepath.Join(h, ".claude", "settings.json"), RoleHook, func(r map[string]any) error {
+			// "disableAllHooks" in the same file switches every hook off: take it out and say so.
+			if v, ok := r["disableAllHooks"]; ok && v != false {
+				delete(r, "disableAllHooks")
+				if c.HooksDisabled != nil {
+					c.HooksDisabled(key, curPath)
+				}
+			}
 			return setNestedHook(r, "PreToolUse", map[string]any{"matcher": "*", "hooks": []any{map[string]any{
 				"type": "command", "command": hookCommand(c.Exe, key, "tool"), "timeout": json.Number("600"),
 				// A hook that cannot start, crashes or times out blocks the call (Claude Code

@@ -97,7 +97,7 @@ func TestOfflineAllowsExactAllowedActionsAndReadsInsideAllowedRootsOnly(t *testi
 		{"bash", "rm -rf /work", false, "secret or can delete"},
 		{"bash", "cat ~/.ssh/id_ed25519", false, "secret or can delete"},
 	} {
-		v, ok := offlineVerdict("claude-code", c.action, c.res)
+		v, ok := offlineVerdictIn("claude-code", c.action, c.res, proj)
 		if !ok || v.Allow != c.allow || !strings.Contains(v.Reason, c.want) {
 			t.Errorf("%s %q: %+v ok=%v", c.action, c.res, v, ok)
 		}
@@ -326,7 +326,7 @@ func TestOfflineDoesNotGeneraliseOneAllowedRead(t *testing.T) {
 	for _, c := range []struct{ action, res string }{
 		{"read", filepath.Join(proj, "other.go")}, {"bash", "make"}, {"read", "/etc/shadow"},
 	} {
-		if v, ok := offlineVerdict("claude-code", c.action, c.res); !ok || v.Allow {
+		if v, ok := offlineVerdictIn("claude-code", c.action, c.res, proj); !ok || v.Allow {
 			t.Errorf("%s %q allowed offline: %+v", c.action, c.res, v)
 		}
 	}
@@ -367,7 +367,7 @@ func TestOfflineSnapshotTamperingFailsClosed(t *testing.T) {
 	// edited: grants everything for another tool
 	var s offlineSnapshot
 	_ = json.Unmarshal(good, &s)
-	s.Tools["host.cursor"] = offlineTool{Allowed: []string{actionKey(me, "read", f0)}}
+	s.Tools["host.cursor"] = offlineTool{Allowed: joinEntries([]offlineEntry{{H: actionKey(me, "read", f0), At: time.Now().Unix()}})}
 	edited, _ := json.Marshal(s)
 	_ = os.WriteFile(f, edited, 0o644)
 	if _, ok := offlineVerdict("cursor", "read", f0); ok {
@@ -474,18 +474,18 @@ func TestOfflineNeverKeepsUncacheableAllows(t *testing.T) {
 	state := offlineRig(t)
 	yes, no := true, false
 	for name, res := range map[string]*hostclient.AuthorizeResult{
-		"explicit false":     {Decision: "ALLOW", Cacheable: &no},
-		"learning mode":      {Decision: "ALLOW", Reason: "learning_mode"},
-		"grant":              {Decision: "ALLOW", Reason: "grant"},
-		"approval":           {Decision: "ALLOW", Reason: "approved"},
-		"false beats policy": {Decision: "ALLOW", Reason: "policy_allow", Cacheable: &no},
+		"field and reason absent": {Decision: "ALLOW"},
+		"explicit false":          {Decision: "ALLOW", Cacheable: &no},
+		"learning mode":           {Decision: "ALLOW", Reason: "learning_mode"},
+		"grant":                   {Decision: "ALLOW", Reason: "grant"},
+		"approval":                {Decision: "ALLOW", Reason: "approved"},
+		"false beats policy":      {Decision: "ALLOW", Reason: "policy_allow", Cacheable: &no},
 	} {
 		if d := offlineDecision(res); d == "ALLOW" {
 			t.Errorf("%s would be cached", name)
 		}
 	}
 	for name, res := range map[string]*hostclient.AuthorizeResult{
-		"plain, field absent":    {Decision: "ALLOW"},
 		"policy reason":          {Decision: "ALLOW", Reason: "policy_allow"},
 		"explicit true":          {Decision: "ALLOW", Reason: "x", Cacheable: &yes},
 		"denial is not an ALLOW": {Decision: "DENY", Reason: "no"},
@@ -497,7 +497,7 @@ func TestOfflineNeverKeepsUncacheableAllows(t *testing.T) {
 	}
 
 	// end to end through the recorder: a cached allow, then the same action allowed by learning mode
-	recordOfflineDecision("host.cursor", me, "bash", "make test", "", offlineDecision(&hostclient.AuthorizeResult{Decision: "ALLOW"}))
+	recordOfflineDecision("host.cursor", me, "bash", "make test", "", offlineDecision(&hostclient.AuthorizeResult{Decision: "ALLOW", Reason: "policy_allow"}))
 	save(t)
 	if v, _ := offlineVerdict("cursor", "bash", "make test"); !v.Allow {
 		t.Fatal("setup: a plain allow should be cached")
@@ -514,14 +514,14 @@ func TestOfflineNeverKeepsUncacheableAllows(t *testing.T) {
 }
 
 // The wire shape from POST /host/v1/authorize: `cacheable:false` is never kept; a missing field is
-// kept only for a plain policy allow (no reason, or a policy reason).
+// kept only for a policy allow with a policy reason.
 func TestCacheableFieldOnTheWire(t *testing.T) {
 	for body, want := range map[string]string{
 		`{"decision":"ALLOW","cacheable":false}`:                               "ALLOW_NOT_CACHEABLE",
 		`{"decision":"ALLOW","reason":"policy_allow","cacheable":false}`:       "ALLOW_NOT_CACHEABLE",
 		`{"decision":"ALLOW","reason":"learning_mode"}`:                        "ALLOW_NOT_CACHEABLE",
 		`{"decision":"ALLOW","reason":"grant_8h"}`:                             "ALLOW_NOT_CACHEABLE",
-		`{"decision":"ALLOW"}`:                                                 "ALLOW",
+		`{"decision":"ALLOW"}`:                                                 "ALLOW_NOT_CACHEABLE",
 		`{"decision":"ALLOW","reason":"policy_allow"}`:                         "ALLOW",
 		`{"decision":"ALLOW","cacheable":true}`:                                "ALLOW",
 		`{"decision":"DENY","reason":"policy_deny","cacheable":false}`:         "DENY",

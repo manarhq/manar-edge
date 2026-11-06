@@ -123,6 +123,7 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 		off[id] = true
 	}
 	approved := cfg.Status == "APPROVED"
+	setOfflinePolicyVersion(cfg.PolicyVersion)
 	setOfflineReadsPolicy(approved && cfg.OfflineReadsAllowed != nil && *cfg.OfflineReadsAllowed, cfg.OfflineReadDeny)
 	if d := stateDirNow(); d != "" {
 		setOfflineState(cfg.Paused, hostclient.LockedCode(d))
@@ -137,7 +138,7 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 	if approved && !off["host.claude-code"] {
 		scanClaudeOverrides(found)
 	}
-	ctx := Ctx{Exe: exePath(), GatewayURL: GatewayURL, Foreign: foreignHook}
+	ctx := Ctx{Exe: exePath(), GatewayURL: GatewayURL, Foreign: foreignHook, HooksDisabled: hooksDisabledFound}
 	if approved {
 		ctx.GatewayUp = gatewayUp()
 	}
@@ -169,6 +170,15 @@ func reconcileTool(st *Store, f discovery.Found, ctx Ctx, approved, off bool) di
 		res.Mode = "none"
 	}
 	rank := map[string]int{"hook": 3, "gateway": 2, "mcp": 1}
+	// Taken before the users are looked at: a restore from the command line is told to the console
+	// once, when the service puts the hooks back.
+	cliRestored := false
+	if approved && !off {
+		cliRestored = st.TakeCLIRestore(f.Key)
+	} else if off {
+		st.TakeCLIRestore(f.Key) // switched off in the console: nothing to report when it comes back
+	}
+	reportedRestore := false
 	for _, u := range f.Users {
 		if off || !approved {
 			if st.Has(f.Key, u.Name) && off {
@@ -193,8 +203,15 @@ func reconcileTool(st *Store, f discovery.Found, ctx Ctx, approved, off bool) di
 			continue
 		}
 		for i, o := range out {
-			if o.Repaired && o.Changed && items[i].Role == RoleHook {
+			// A repair of any Manar-owned item is told to the console: a hook entry put back
+			// (whatever the tool trusts), or a wrapped MCP server or other Manar entry that was
+			// taken out. The person adding their own MCP server is not a repair.
+			if o.Changed && ((o.Repaired && items[i].Role == RoleHook) || o.Lost) {
 				reportTamper(TamperHookRemoved, "host."+f.Key, "", o.Path, false)
+			}
+			if cliRestored && !reportedRestore && o.Changed && items[i].Role == RoleHook {
+				reportedRestore = true
+				reportTamper(TamperHookRemoved, "host."+f.Key, "protect_restore", o.Path, false)
 			}
 			if o.Warning != "" {
 				logOnce("WARNING " + f.Name + " " + o.Path + ": " + o.Warning)
@@ -394,7 +411,8 @@ func relayHandler(b backend) http.Handler {
 			return
 		}
 		body, _ := io.ReadAll(io.LimitReader(r.Body, 128<<10))
-		reportOfflineAllows(decodeOfflineAllows(body))
+		caller, _ := r.Context().Value(callerKey{}).(string)
+		reportOfflineAllows(decodeOfflineAllows(body), caller)
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("GET /v1/approvals/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -454,6 +472,11 @@ func RestoreEverything() []error {
 	if st == nil {
 		return []error{errors.New("protect is not configured")}
 	}
+	for _, k := range st.Tools() {
+		if tool, _, ok := strings.Cut(k, "|"); ok {
+			st.NoteCLIRestore(tool)
+		}
+	}
 	return st.RestoreAll()
 }
 
@@ -466,6 +489,7 @@ func RestoreTool(key string) error {
 	var errs []error
 	for _, k := range st.Tools() {
 		if tool, user, ok := strings.Cut(k, "|"); ok && tool == key {
+			st.NoteCLIRestore(tool)
 			errs = append(errs, st.Restore(tool, user))
 		}
 	}
@@ -578,6 +602,12 @@ func enrolled(dir string) bool {
 	return err == nil
 }
 
+// hooksDisabledFound is told that a settings file Manar writes had "disableAllHooks" set (it is
+// taken out again): tampering, reported to the console.
+func hooksDisabledFound(key, path string) {
+	reportTamper(TamperHooksDisabled, "host."+key, "user_settings", path, false)
+}
+
 // foreignHook is told about Manar-looking hook entries that are not exactly this service's own.
 // One machine has one WARDEN install, so every such entry is tampering (or a stale path): the
 // service puts its own entry back and reports it.
@@ -588,7 +618,7 @@ func foreignHook(key, path string, cmds []string) {
 // plainAllowReasons are the reasons of an ALLOW that is a plain policy allow. Until the API says
 // `cacheable` on every decision, an ALLOW with any other reason (learning mode, a grant, an
 // approval) is not kept for offline use.
-var plainAllowReasons = map[string]bool{"": true, "policy_allow": true, "allowed_by_policy": true}
+var plainAllowReasons = map[string]bool{"policy_allow": true, "allowed_by_policy": true}
 
 // offlineDecision is the decision the offline snapshot records for an answer: ALLOW only for an
 // ALLOW that may be cached. An uncacheable ALLOW is recorded as such, which also drops any older
