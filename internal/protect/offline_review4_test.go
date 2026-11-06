@@ -48,6 +48,11 @@ func TestPlainCommandTable(t *testing.T) {
 		"env FOO=1 cat x", "sudo cat x", "doas cat x", "sh -c ls", "bash script.sh", "zsh x", "dash x", "fish x", "nohup make",
 		"timeout 5 make", "nice make", "watch ls", "eval ls", "exec ls", "command ls", "builtin cd", "source env.sh", ". env.sh",
 		"/usr/bin/env cat x", "/bin/bash x", "cd sub", "pushd sub", "echo hi && bash x", "ls | xargs cat", "FOO=1 bash x",
+		// found by the reviewer: a line break, a leading reserved word, runners anywhere in the command
+		"ls\ncd ~/.ssh && cat id_rsa", "ls\r\ncat x", "if true; then cd ..; fi", "! cd x", "time cd x", "while true; do cd x; done",
+		"for f in a; do cat $f; done", "case x in x) cat y;; esac", "ls && cd sub", "ls; popd", "echo x | setsid cat y", "stdbuf -o0 cat x",
+		"ionice cat x", "chrt 1 cat x", "taskset 1 cat x", "flock f cat x", "unbuffer cat x", "chroot / cat x", "su -c ls", "pkexec ls",
+		"parallel cat", "busybox cat x", "echo x && exec ls", "ls | command cat", "ls ; builtin cd x", "ls ; source x", "time make", "then ls", "do ls", ". x",
 	}
 	for _, c := range wait {
 		if plainCommand(c) {
@@ -56,7 +61,7 @@ func TestPlainCommandTable(t *testing.T) {
 	}
 	replay := []string{"go test ./...", "make test", "make", "make -j4", "git status", "git log --oneline", "git diff HEAD", "ls src", "ls -la",
 		"cat src/a.go", "echo hi>out.txt", `git log "--oneline"`, "pnpm test", "npm run build", "tar -xf a.tar", "tar -czf out.tgz src", "ls -l | wc -l",
-		"cargo build --release", "terraform plan", "FOO=1 go test ./..."}
+		"cargo build --release", "terraform plan", "FOO=1 go test ./...", "ls .", "git add .", "grep -r x ."}
 	for _, c := range replay {
 		if !plainCommand(c) {
 			t.Errorf("%q should replay", c)

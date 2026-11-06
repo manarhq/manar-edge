@@ -785,20 +785,37 @@ func plainCommand(cmd string) bool {
 	return !changesFolderOrRunsOthers(cmd)
 }
 
-// commandRunners run other programs or compute names: a command led by one cannot be judged by
-// its own words.
+// commandRunners run other programs or compute names: a command with one anywhere in it cannot be
+// judged by its own words.
 var commandRunners = map[string]bool{"env": true, "sudo": true, "doas": true, "sh": true, "bash": true, "zsh": true, "dash": true,
 	"fish": true, "xargs": true, "find": true, "nohup": true, "timeout": true, "nice": true, "watch": true, "eval": true,
-	"exec": true, "command": true, "builtin": true, "source": true, ".": true, "cd": true, "pushd": true, "popd": true}
+	"exec": true, "command": true, "builtin": true, "source": true, "cd": true, "pushd": true, "popd": true,
+	"setsid": true, "stdbuf": true, "ionice": true, "chrt": true, "taskset": true, "flock": true, "unbuffer": true, "chroot": true,
+	"su": true, "pkexec": true, "parallel": true, "busybox": true, "-exec": true, "-execdir": true, "-ok": true}
+
+// shellReserved are words that, leading a segment, start or continue a compound command, so the
+// real command is hidden behind them.
+var shellReserved = map[string]bool{"if": true, "then": true, "else": true, "elif": true, "fi": true, "do": true, "done": true,
+	"while": true, "until": true, "for": true, "case": true, "esac": true, "time": true, "!": true, "coproc": true,
+	"function": true, "{": true, "}": true, ".": true}
 
 // folderOptionTools take -C to mean "change folder first" (and -f to name the makefile for make).
 var folderOptionTools = map[string]bool{"git": true, "make": true, "gmake": true, "tar": true, "env": true, "ninja": true}
 
-// changesFolderOrRunsOthers is true when a plain-looking command changes folder or runs another
-// program: a command runner leads a command, or a word is a folder option (-C, -Cdir, a cluster
-// containing C for git, make, tar, env, ninja, --chdir, --directory, --git-dir, --work-tree,
-// -chdir), or make is told which makefile to use.
+// changesFolderOrRunsOthers is true (fail closed) when a command may change folder or run another
+// program: it has a line break; any word is a command runner or cd; a segment is led by a shell
+// reserved word or "."; or a word is a folder option (-C, -Cdir, a cluster containing C for git,
+// make, tar, env, ninja, --chdir, --directory, --git-dir, --work-tree, -chdir), or make is told
+// which makefile to use.
 func changesFolderOrRunsOthers(cmd string) bool {
+	if strings.ContainsAny(cmd, "\n\r") {
+		return true
+	}
+	for _, w := range strings.FieldsFunc(cmd, func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune(";&|()<>`", r) }) {
+		if commandRunners[strings.Trim(w, `"'`)] {
+			return true
+		}
+	}
 	for _, seg := range strings.FieldsFunc(cmd, func(r rune) bool { return strings.ContainsRune(";&|()", r) }) {
 		words := strings.FieldsFunc(seg, func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("<>`", r) })
 		for len(words) > 0 && strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-") {
@@ -807,17 +824,16 @@ func changesFolderOrRunsOthers(cmd string) bool {
 		if len(words) == 0 {
 			continue
 		}
-		prog := strings.ToLower(path.Base(fold(strings.Trim(words[0], `"'`))))
-		prog = strings.TrimSuffix(prog, ".exe")
-		if commandRunners[prog] {
+		lead := strings.Trim(words[0], `"'`)
+		prog := strings.TrimSuffix(strings.ToLower(path.Base(fold(lead))), ".exe")
+		if shellReserved[lead] || commandRunners[prog] {
 			return true
 		}
 		for _, w := range words[1:] {
 			w = strings.Trim(w, `"'`)
 			switch {
 			case strings.HasPrefix(w, "-C"), strings.HasPrefix(w, "--chdir"), strings.HasPrefix(w, "--directory"),
-				strings.HasPrefix(w, "--git-dir"), strings.HasPrefix(w, "--work-tree"), strings.HasPrefix(w, "-chdir"),
-				w == "-exec" || w == "-execdir" || w == "-ok":
+				strings.HasPrefix(w, "--git-dir"), strings.HasPrefix(w, "--work-tree"), strings.HasPrefix(w, "-chdir"):
 				return true
 			case folderOptionTools[prog] && len(w) > 2 && w[0] == '-' && w[1] != '-' && strings.Contains(w, "C"):
 				return true // a cluster such as -xC
