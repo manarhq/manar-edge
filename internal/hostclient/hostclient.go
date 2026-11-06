@@ -19,15 +19,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/manarhq/manar-edge/internal/lazyre"
+	"github.com/manarhq/manar-edge/internal/ports"
 )
 
 const (
@@ -300,12 +304,58 @@ func New(stateDir string) (*Client, error) {
 	if !roots.AppendCertsFromPEM(caPEM) {
 		return nil, errors.New("host-ca.pem has no certificate")
 	}
-	return &Client{Info: &info, base: base.String(), stateDir: stateDir, removed: make(chan struct{}), http: &http.Client{
+	return &Client{Info: &info, base: base.String(), stateDir: stateDir, removed: make(chan struct{}), http: mtlsHTTP(cert, roots, proxyFromEnv)}, nil
+}
+
+// mtlsHTTP is the device's client for Manar. It follows HTTPS_PROXY / NO_PROXY through
+// proxyFromEnv: a CONNECT proxy only tunnels bytes, so the pinned CA and the device certificate
+// still decide who is trusted (a proxy that opens the TLS session fails the handshake before any
+// client certificate is sent, and the device keeps the protection it has).
+func mtlsHTTP(cert tls.Certificate, roots *x509.CertPool, proxy func(*http.Request) (*url.URL, error)) *http.Client {
+	return &http.Client{
 		Timeout: 30 * time.Second,
-		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+		Transport: &http.Transport{Proxy: proxy, TLSClientConfig: &tls.Config{
 			Certificates: []tls.Certificate{cert}, RootCAs: roots, MinVersion: tls.VersionTLS13,
 		}},
-	}}, nil
+	}
+}
+
+// proxyFromEnv is http.ProxyFromEnvironment with two limits. Only http:// proxies (plain CONNECT)
+// are supported; any other scheme is an error, so the request fails and the device keeps its
+// protection ("cannot sync", never "unprotected"). And the filter JAIL sets for a protected tool
+// (a loopback proxy with NO_PROXY=localhost,127.0.0.1) is not a corporate proxy: this client runs in
+// the device service, which JAIL never configures, so if that environment ever leaks into it, it is
+// ignored instead of sending Manar's own traffic through a tool's filter.
+func proxyFromEnv(req *http.Request) (*url.URL, error) {
+	u, err := http.ProxyFromEnvironment(req)
+	if err != nil || u == nil {
+		return u, err
+	}
+	if u.Scheme != "http" {
+		return nil, fmt.Errorf("proxy %s://%s: only http:// CONNECT proxies are supported (set HTTPS_PROXY=http://host:port)", u.Scheme, u.Host)
+	}
+	if isJailFilter(u) {
+		return nil, nil
+	}
+	return u, nil
+}
+
+// isJailFilter recognises the proxy JAIL names in a protected tool's environment: loopback, one of
+// JAIL's own ports, together with JAIL's NO_PROXY. A user's own local proxy (cntlm, px) on any other
+// port, or with another NO_PROXY, is not matched.
+func isJailFilter(u *url.URL) bool {
+	if ip := net.ParseIP(u.Hostname()); !(ip != nil && ip.IsLoopback()) && u.Hostname() != "localhost" {
+		return false
+	}
+	if p := u.Port(); p != strconv.Itoa(ports.JailWindowsProxyPort) && p != strconv.Itoa(ports.JailGatewayPort) {
+		return false
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		if os.Getenv(k) == ports.JailNoProxy {
+			return true
+		}
+	}
+	return false
 }
 
 // NewForTest builds a client for an already running server, with no host files. Tests only.
@@ -315,6 +365,17 @@ func NewForTest(stateDir, baseURL string, hc *http.Client) *Client {
 
 // StateDir is the state directory this client was loaded from.
 func (c *Client) StateDir() string { return c.stateDir }
+
+var userAgent = UserAgentFor("dev", runtime.GOOS, runtime.GOARCH)
+
+// UserAgentFor is what a device running this version on this OS and architecture sends. It is how
+// manar-api learns which version a device runs (shared contract: testdata/contract/host-contract.json).
+func UserAgentFor(version, goos, goarch string) string {
+	return "manar-edge/" + version + " (" + goos + "; " + goarch + ")"
+}
+
+// SetVersion sets the version every request reports. Call it once at start.
+func SetVersion(version string) { userAgent = UserAgentFor(version, runtime.GOOS, runtime.GOARCH) }
 
 // Do sends in as JSON (nil for none) and decodes the JSON reply into out (nil to ignore it).
 // path is under /host/v1, e.g. "/config".
@@ -334,6 +395,7 @@ func (c *Client) Do(ctx context.Context, method, path string, in, out any) error
 	if in != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	req.Header.Set("User-Agent", userAgent)
 	// A locked device only polls its config (to learn when it is let back in); nothing else leaves.
 	if path != "/config" && c.stateDir != "" {
 		if code := LockedCode(c.stateDir); code != "" {

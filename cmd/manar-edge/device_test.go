@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -28,7 +29,7 @@ func TestUnitTextRunsTheServiceFromTheStateDir(t *testing.T) {
 	u := unitText("/usr/local/bin/manar-edge", "/var/lib/manar-edge")
 	for _, want := range []string{
 		"ExecStart=/usr/local/bin/manar-edge --state-dir /var/lib/manar-edge service run",
-		"Restart=always", "RestartSec=2", "StartLimitIntervalSec=0", "WantedBy=multi-user.target",
+		"EnvironmentFile=-/var/lib/manar-edge/proxy.env", "Restart=always", "RestartSec=2", "StartLimitIntervalSec=0", "WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("unit lacks %q:\n%s", want, u)
@@ -203,5 +204,36 @@ func TestKeylessEnrolRefusesAComputerOfAnotherWorkspace(t *testing.T) {
 func TestRemoveClaudePolicyIsGated(t *testing.T) {
 	if err := removeClaudePolicy(); err == nil {
 		t.Fatal("a process that is not the enrolled system service removed managed settings")
+	}
+}
+
+// hostclient.New (and with it the proxy variables it reads) runs only in the device service, which
+// JAIL never configures: JAIL's HTTPS_PROXY goes to a protected tool's settings and child
+// processes (cmd.Env), never into this process. This fails if either stops being true.
+func TestTheDeviceClientIsBuiltOnlyInTheServiceAndNoCodeSetsProxyVariablesForItself(t *testing.T) {
+	var newCalls []string
+	err := filepath.WalkDir("../..", func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".go") || strings.HasSuffix(p, "_test.go") {
+			return err
+		}
+		b, _ := os.ReadFile(p)
+		src := string(b)
+		if strings.Contains(src, "hostclient.New(") {
+			newCalls = append(newCalls, filepath.ToSlash(p))
+		}
+		for _, call := range []string{"os.Setenv(", "os.Unsetenv(", "os.Clearenv("} {
+			for _, at := range strings.Split(src, call)[1:] {
+				if line, _, _ := strings.Cut(at, "\n"); strings.Contains(strings.ToUpper(line), "PROXY") {
+					t.Errorf("%s sets a proxy variable for the process itself: %s%s", p, call, line)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(newCalls) != 1 || newCalls[0] != "../../cmd/manar-edge/device.go" {
+		t.Fatalf("hostclient.New is called from %v, want only device.go (serveDevice)", newCalls)
 	}
 }

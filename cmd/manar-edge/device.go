@@ -367,6 +367,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 ExecStart=%s --state-dir %s service run
+# Behind a corporate proxy, put HTTPS_PROXY=http://host:port (and NO_PROXY) in <state dir>/proxy.env.
+# A systemd service does not inherit a login shell's variables. Only http:// CONNECT proxies work.
+EnvironmentFile=-%s/proxy.env
 Restart=always
 RestartSec=2
 # Whenever the service stops or dies, give the protected tools their network back (the filter is
@@ -375,7 +378,7 @@ ExecStopPost=-%s --state-dir %s jail-restore
 
 [Install]
 WantedBy=multi-user.target
-`, filepath.ToSlash(exe), base, filepath.ToSlash(exe), base)
+`, filepath.ToSlash(exe), base, base, filepath.ToSlash(exe), base)
 }
 
 // jailRestore removes the egress filter's rules and cgroups (nothing happens if there are none).

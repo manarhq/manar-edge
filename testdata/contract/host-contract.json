@@ -276,6 +276,78 @@
       }
     ]
   },
+  "serviceEvents": {
+    "_comment": "POST /host/v1/events lifecycle events (the device service came back after a crash or kill). downtimeSeconds: how long it was away (at most a day).",
+    "events": [
+      {
+        "type": "service.restarted",
+        "downtimeSeconds": 7,
+        "at": "2026-11-05T09:00:00Z"
+      }
+    ]
+  },
+  "userAgent": {
+    "_comment": "Every /host/v1 request carries User-Agent: manar-edge/<version> (<os>; <arch>). build: what the device sends for these inputs; parse: what manar-api stores for a header (null: it stores nothing and keeps the last known value). Old devices send Go-http-client/1.1.",
+    "build": [
+      {
+        "version": "0.4.2",
+        "os": "linux",
+        "arch": "amd64",
+        "header": "manar-edge/0.4.2 (linux; amd64)"
+      },
+      {
+        "version": "dev",
+        "os": "windows",
+        "arch": "arm64",
+        "header": "manar-edge/dev (windows; arm64)"
+      }
+    ],
+    "parse": [
+      {
+        "header": "manar-edge/0.4.2 (linux; amd64)",
+        "version": "0.4.2",
+        "os": "linux",
+        "arch": "amd64"
+      },
+      {
+        "header": "manar-edge/0.4.3-rc.1+abc (windows; arm64)",
+        "version": "0.4.3-rc.1+abc",
+        "os": "windows",
+        "arch": "arm64"
+      },
+      {
+        "header": "manar-edge/dev (linux; arm64)",
+        "version": "dev",
+        "os": "linux",
+        "arch": "arm64"
+      },
+      {
+        "header": "Go-http-client/1.1",
+        "version": null,
+        "os": null,
+        "arch": null
+      },
+      { "header": "", "version": null, "os": null, "arch": null },
+      {
+        "header": "manar-edge/ (linux; amd64)",
+        "version": null,
+        "os": null,
+        "arch": null
+      },
+      {
+        "header": "manar-edge/1.0 (plan9; amd64)",
+        "version": null,
+        "os": null,
+        "arch": null
+      },
+      {
+        "header": "manar-edge/<script> (linux; amd64)",
+        "version": null,
+        "os": null,
+        "arch": null
+      }
+    ]
+  },
   "redact": {
     "_comment": "Commands as stored for the Sessions view: the edge's telemetry redaction without the machine's own user and host names (manar-edge internal/telemetry redactPortable, manar-api src/contract/redact.ts).",
     "cases": [
