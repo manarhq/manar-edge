@@ -165,17 +165,24 @@ func scrubMachine(s string) string {
 	if h, err := os.UserHomeDir(); err == nil && len(h) > 1 {
 		s = strings.ReplaceAll(s, h, "~")
 	}
+	name := ""
 	if u, err := user.Current(); err == nil {
-		name := u.Username
+		name = u.Username
 		if i := strings.LastIndex(name, `\`); i >= 0 {
 			name = name[i+1:]
 		}
-		s = replaceWord(s, name, "<user>")
 	}
-	if h, err := os.Hostname(); err == nil {
-		s = replaceWord(s, h, "<host>")
+	host, _ := os.Hostname()
+	return scrubNames(s, name, host)
+}
+
+// scrubNames replaces the host name and the user name, the longer first: a user name that is part
+// of the host name ("lab" on "agent-lab") must not eat half of it.
+func scrubNames(s, user, host string) string {
+	if len(host) >= len(user) {
+		return replaceWord(replaceWord(s, host, "<host>"), user, "<user>")
 	}
-	return s
+	return replaceWord(replaceWord(s, user, "<user>"), host, "<host>")
 }
 
 // replaceWord replaces name where it is not part of a longer word. Names under 3 characters
