@@ -782,16 +782,53 @@ func plainCommand(cmd string) bool {
 	if quote != 0 {
 		return false
 	}
-	for _, w := range strings.FieldsFunc(cmd, isCommandSeparator) {
-		switch strings.Trim(w, `"'`) {
-		case "cd", "pushd", "popd", "xargs", "find", "-exec", "-execdir", "-ok", "-C", "--chdir", "--directory":
-			return false // changes folder or computes the names the later words refer to
+	return !changesFolderOrRunsOthers(cmd)
+}
+
+// commandRunners run other programs or compute names: a command led by one cannot be judged by
+// its own words.
+var commandRunners = map[string]bool{"env": true, "sudo": true, "doas": true, "sh": true, "bash": true, "zsh": true, "dash": true,
+	"fish": true, "xargs": true, "find": true, "nohup": true, "timeout": true, "nice": true, "watch": true, "eval": true,
+	"exec": true, "command": true, "builtin": true, "source": true, ".": true, "cd": true, "pushd": true, "popd": true}
+
+// folderOptionTools take -C to mean "change folder first" (and -f to name the makefile for make).
+var folderOptionTools = map[string]bool{"git": true, "make": true, "gmake": true, "tar": true, "env": true, "ninja": true}
+
+// changesFolderOrRunsOthers is true when a plain-looking command changes folder or runs another
+// program: a command runner leads a command, or a word is a folder option (-C, -Cdir, a cluster
+// containing C for git, make, tar, env, ninja, --chdir, --directory, --git-dir, --work-tree,
+// -chdir), or make is told which makefile to use.
+func changesFolderOrRunsOthers(cmd string) bool {
+	for _, seg := range strings.FieldsFunc(cmd, func(r rune) bool { return strings.ContainsRune(";&|()", r) }) {
+		words := strings.FieldsFunc(seg, func(r rune) bool { return unicode.IsSpace(r) || strings.ContainsRune("<>`", r) })
+		for len(words) > 0 && strings.Contains(words[0], "=") && !strings.HasPrefix(words[0], "-") {
+			words = words[1:] // FOO=bar make: the assignment is not the command
 		}
-		if strings.HasPrefix(strings.Trim(w, `"'`), "--chdir=") || strings.HasPrefix(strings.Trim(w, `"'`), "--directory=") {
-			return false
+		if len(words) == 0 {
+			continue
+		}
+		prog := strings.ToLower(path.Base(fold(strings.Trim(words[0], `"'`))))
+		prog = strings.TrimSuffix(prog, ".exe")
+		if commandRunners[prog] {
+			return true
+		}
+		for _, w := range words[1:] {
+			w = strings.Trim(w, `"'`)
+			switch {
+			case strings.HasPrefix(w, "-C"), strings.HasPrefix(w, "--chdir"), strings.HasPrefix(w, "--directory"),
+				strings.HasPrefix(w, "--git-dir"), strings.HasPrefix(w, "--work-tree"), strings.HasPrefix(w, "-chdir"),
+				w == "-exec" || w == "-execdir" || w == "-ok":
+				return true
+			case folderOptionTools[prog] && len(w) > 2 && w[0] == '-' && w[1] != '-' && strings.Contains(w, "C"):
+				return true // a cluster such as -xC
+			case (prog == "make" || prog == "gmake") && (strings.HasPrefix(w, "-f") || strings.HasPrefix(w, "--file") || strings.HasPrefix(w, "--makefile")):
+				return true
+			case (prog == "make" || prog == "gmake") && len(w) > 2 && w[0] == '-' && w[1] != '-' && strings.Contains(w, "f"):
+				return true // a cluster such as -kf
+			}
 		}
 	}
-	return true
+	return false
 }
 
 // offlineVerdict decides without the service, in the hook's own working folder.

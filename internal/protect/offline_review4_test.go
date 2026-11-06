@@ -37,18 +37,29 @@ func TestOfflineHardLinkUnderNodeModulesIsNotACarveOut(t *testing.T) {
 	}
 }
 
-// Commands that change folder or compute names without a cd wait (env -C, git -C, make -C, xargs,
-// find, -exec, --chdir); the plain ones still run.
-func TestPlainCommandRefusesFolderChangingAndNameComputingCommands(t *testing.T) {
-	for _, c := range []string{"env -C sub cat x.txt", "find sub -name x.txt | xargs cat", "git -C sub show HEAD:x.txt",
-		"make -C sub all", "tar --directory=sub -xf a.tar", "env --chdir sub cat x", "find . -exec cat {} ;", "xargs cat"} {
+// Commands that change folder, run another program or compute names wait; the plain ones replay.
+func TestPlainCommandTable(t *testing.T) {
+	wait := []string{
+		"env -C sub cat x.txt", "env --chdir sub cat x", "find sub -name x.txt | xargs cat", "git -C sub show HEAD:x.txt",
+		"make -C sub all", "make -Csub all", "tar -xC dir -f a.tar", "tar --directory=sub -xf a.tar", "git -xC sub status",
+		"git --git-dir=other/.git log", "git --work-tree=other status", "terraform -chdir=infra plan", "ninja -C build",
+		"make -f other/Makefile all", "make -kf other/Makefile", "make --file=other/Makefile", "make --makefile other/Makefile",
+		"find . -exec cat {} ;", "xargs cat",
+		"env FOO=1 cat x", "sudo cat x", "doas cat x", "sh -c ls", "bash script.sh", "zsh x", "dash x", "fish x", "nohup make",
+		"timeout 5 make", "nice make", "watch ls", "eval ls", "exec ls", "command ls", "builtin cd", "source env.sh", ". env.sh",
+		"/usr/bin/env cat x", "/bin/bash x", "cd sub", "pushd sub", "echo hi && bash x", "ls | xargs cat", "FOO=1 bash x",
+	}
+	for _, c := range wait {
 		if plainCommand(c) {
-			t.Errorf("%q counted as plain", c)
+			t.Errorf("%q must wait", c)
 		}
 	}
-	for _, c := range []string{"go test ./...", "make test", "git status", "cat src/a.go", "echo hi>out.txt", `git log "--oneline"`} {
+	replay := []string{"go test ./...", "make test", "make", "make -j4", "git status", "git log --oneline", "git diff HEAD", "ls src", "ls -la",
+		"cat src/a.go", "echo hi>out.txt", `git log "--oneline"`, "pnpm test", "npm run build", "tar -xf a.tar", "tar -czf out.tgz src", "ls -l | wc -l",
+		"cargo build --release", "terraform plan", "FOO=1 go test ./..."}
+	for _, c := range replay {
 		if !plainCommand(c) {
-			t.Errorf("%q should be plain", c)
+			t.Errorf("%q should replay", c)
 		}
 	}
 	if plainCommand("echo 100%") == (runtime.GOOS == "windows") {
