@@ -14,13 +14,14 @@ import (
 )
 
 type fakeBackend struct {
-	calls  int
-	caller string
+	calls    int
+	caller   string
+	resolved string
 }
 
-func (f *fakeBackend) Authorize(_ context.Context, tool, action, res, caller string) (*hostclient.AuthorizeResult, error) {
+func (f *fakeBackend) Authorize(_ context.Context, tool, action, res, caller, resolved string) (*hostclient.AuthorizeResult, error) {
 	f.calls++
-	f.caller = caller
+	f.caller, f.resolved = caller, resolved
 	return &hostclient.AuthorizeResult{Decision: "ALLOW"}, nil
 }
 func (f *fakeBackend) ApprovalStatus(context.Context, string) (string, error) { return "APPROVED", nil }
@@ -73,15 +74,15 @@ func TestRelayRefusesASocketThatIsNotTheServices(t *testing.T) {
 	srv := newRelayServer(&fakeBackend{})
 	go srv.Serve(l)
 	defer srv.Close()
-	if v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9); v.Allow || !strings.Contains(v.Reason, "manar-edge protect restore") {
-		t.Fatalf("trusted a squatted socket, or gave no way out: %+v", v)
+	if v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9); v.Allow || !strings.Contains(v.Reason, "restart it or contact their administrator") {
+		t.Fatalf("trusted a squatted socket, or gave no hint for the person: %+v", v)
 	}
 }
 
-func TestDecideFailsClosedWithAWayOutWhenTheServiceIsGone(t *testing.T) {
+func TestDecideFailsClosedAndNamesNoCommandWhenTheServiceIsGone(t *testing.T) {
 	relayDir, relaySock, relayOwner = t.TempDir(), filepath.Join(t.TempDir(), "none.sock"), uint32(os.Geteuid())
 	v := NewRelay().Decide(context.Background(), "cursor", "shell", "ls", 5e9)
-	if v.Allow || !strings.Contains(v.Reason, "manar-edge protect restore") {
+	if v.Allow || !strings.Contains(v.Reason, "restart it or contact their administrator") {
 		t.Fatalf("%+v", v)
 	}
 }
@@ -136,5 +137,52 @@ func TestTamperReportOnlyFromProtectedAccounts(t *testing.T) {
 	}
 	if c := post("uid:1000", body); c != 200 || len(*got) != 1 || (*got)[0]["type"] != TamperSettingsWrite || (*got)[0]["blocked"] != true {
 		t.Fatalf("report: %d %v", c, *got)
+	}
+}
+
+// The service works out the target with its links resolved itself (a file that does not exist yet:
+// its existing folder plus the name), only for file actions, sends nothing when it cannot, and
+// ignores what the client claims.
+func TestRelayComputesTheResolvedPathAndIgnoresTheClients(t *testing.T) {
+	dir := t.TempDir()
+	relayDir, relaySock, relayOwner = dir, filepath.Join(dir, "relay.sock"), uint32(os.Geteuid())
+	l, err := listenRelay()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := &fakeBackend{}
+	srv := newRelayServer(b)
+	go srv.Serve(l)
+	defer srv.Close()
+	old := protectedUID
+	defer func() { protectedUID = old }()
+	me := strconv.Itoa(os.Geteuid())
+	protectedUID = func(uid string) bool { return uid == me }
+
+	root, _ := filepath.EvalSymlinks(t.TempDir())
+	secret := filepath.Join(root, "ssh")
+	os.MkdirAll(secret, 0o755)
+	docs := filepath.Join(root, "docs") // the repo ships docs -> ~/.ssh
+	if err := os.Symlink(secret, docs); err != nil {
+		t.Skip(err)
+	}
+	os.WriteFile(filepath.Join(secret, "known_hosts"), []byte("x"), 0o644)
+	r := NewRelay()
+	for name, c := range map[string]struct{ action, res, want string }{
+		"existing file through a link": {"write", filepath.Join(docs, "known_hosts"), filepath.Join(secret, "known_hosts")},
+		"new file through a link":      {"write", filepath.Join(docs, "authorized_keys"), filepath.Join(secret, "authorized_keys")},
+		"plain file":                   {"read", filepath.Join(root, "ssh", "known_hosts"), filepath.Join(secret, "known_hosts")},
+		"folder that does not exist":   {"write", filepath.Join(root, "nodir", "x"), ""},
+		"not a file action":            {"shell", "ls " + docs, ""},
+	} {
+		b.resolved = "unset"
+		var out map[string]any
+		body := map[string]string{"toolId": "host.cursor", "actionId": c.action, "resource": c.res, "resolvedPath": "/etc/passwd"} // a lie
+		if err := r.call(context.Background(), "POST", "/v1/authorize", body, &out); err != nil {
+			t.Fatal(err)
+		}
+		if b.resolved != c.want {
+			t.Errorf("%s: resolvedPath %q, want %q", name, b.resolved, c.want)
+		}
 	}
 }

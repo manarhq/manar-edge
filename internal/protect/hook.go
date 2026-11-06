@@ -9,21 +9,17 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"regexp"
 	"strings"
 	"time"
 	"unicode/utf16"
 
+	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/undo"
 )
 
 // Hooks run as the user and cannot read the host key, so they ask the device service over a local
 // socket (Linux: unix socket, caller from SO_PEERCRED; Windows: named pipe), which asks Manar over
 // mTLS. See relay_linux.go and relay_windows.go.
-
-// restoreHint ends every message that means Manar itself cannot answer, so a person stuck behind a
-// hook that denies everything knows how to take it out.
-const restoreHint = " If Manar was removed or this device was revoked, run: manar-edge protect restore"
 
 const (
 	maxResource = 2048
@@ -153,9 +149,12 @@ type Relay struct {
 	// Session is the tool's own session id from the hook input, when it gave one. Manar uses it to
 	// group a person's actions into sessions; it is never used to decide anything.
 	Session string
+	// Cwd is the tool's working folder from the hook input; the service notes it as a project
+	// folder when a file action in it is allowed.
+	Cwd string
 }
 
-var sessionOK = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,64}$`)
+var sessionOK = lazyre.New(`^[A-Za-z0-9._:-]{1,64}$`)
 
 // SessionID is the id a tool puts in its hook input (Claude Code, Gemini, Codex, Copilot:
 // session_id; Cursor: conversation_id). Anything that is not a plain id is dropped.
@@ -184,6 +183,16 @@ type authorizeReply struct {
 	ApprovalID string `json:"approvalId"`
 }
 
+var offlineVerdictFn = offlineVerdictIn
+
+// downError means nothing is listening where the service should be: the socket is missing, the
+// connection is refused or the connect timed out. It is not returned when something answered, or
+// when the socket or pipe belongs to someone else.
+type downError struct{ err error }
+
+func (e *downError) Error() string { return "the Manar device service is not running" }
+func (e *downError) Unwrap() error { return e.err }
+
 // Decide asks for a decision, waiting for an approval when one is needed. Every failure is a deny.
 func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budget time.Duration) Verdict {
 	ctx, cancel := context.WithTimeout(ctx, budget)
@@ -193,9 +202,24 @@ func (r *Relay) Decide(ctx context.Context, key, actionID, resource string, budg
 	if r.Session != "" {
 		body["session"] = r.Session
 	}
-	if err := r.call(ctx, http.MethodPost, "/v1/authorize", body, &dec); err != nil {
-		return Verdict{false, "Manar: authorization failed: " + err.Error() + "." + restoreHint}
+	if r.Cwd != "" {
+		body["cwd"] = r.Cwd
 	}
+	if err := r.call(ctx, http.MethodPost, "/v1/authorize", body, &dec); err != nil {
+		// Only a service that cannot be reached at all (restarting) uses the last policy it saved. A
+		// service that answered with any error, or an answer that cannot be read, fails closed.
+		var down *downError
+		if errors.As(err, &down) {
+			if v, ok := offlineVerdictFn(key, actionID, resource, r.Cwd); ok {
+				if v.Allow {
+					queueOfflineAllow(key, actionID, resource) // told to Manar when the service is back
+				}
+				return v
+			}
+		}
+		return Verdict{false, "Manar: authorization failed." + unreachableHint}
+	}
+	r.flushOfflineAllows()
 	switch dec.Decision {
 	case "ALLOW":
 		return Verdict{true, "Manar: allowed"}
@@ -270,7 +294,11 @@ func (r *Relay) call(ctx context.Context, method, path string, in, out any) erro
 	}
 	res, err := r.HTTP.Do(req)
 	if err != nil {
-		return errors.New("the Manar device service is not reachable")
+		var down *downError
+		if errors.As(err, &down) {
+			return down
+		}
+		return errors.New("the Manar device service did not answer")
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
@@ -314,6 +342,7 @@ func RunHook(key, event string, stdin io.Reader) (stdout, stderr []byte, exit in
 	budget := time.Duration(Budget(key)) * time.Second
 	relay := NewRelay()
 	relay.Session = SessionID(raw)
+	relay.Cwd = cwdOf(raw)
 	v := relay.Decide(context.Background(), key, actionID, resource, budget)
 	if v.Allow {
 		SnapshotBeforeEdit(key, raw)
@@ -356,4 +385,16 @@ func SnapshotBeforeEdit(tool string, raw []byte) {
 	defer cancel()
 	var ignore map[string]any
 	_ = NewRelay().call(ctx, http.MethodPost, "/v1/changes", rec, &ignore)
+}
+
+// cwdOf is the working folder a tool puts in its hook input ("" when absent or not a plain string).
+func cwdOf(raw []byte) string {
+	var in map[string]any
+	if json.Unmarshal(raw, &in) != nil {
+		return ""
+	}
+	if s, _ := in["cwd"].(string); len(s) <= 1024 {
+		return s
+	}
+	return ""
 }

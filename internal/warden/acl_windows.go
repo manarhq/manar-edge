@@ -64,3 +64,6 @@ func checkOne(path string) error {
 	}
 	return nil
 }
+
+// CheckProtected is checkProtected for other packages (protect uses it for the saved policy).
+func CheckProtected(exe, root string) error { return checkProtected(exe, root) }

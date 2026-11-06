@@ -23,7 +23,7 @@ type stubBackend struct {
 
 func (s *stubBackend) set(v string) { s.mu.Lock(); s.status = v; s.mu.Unlock() }
 
-func (s *stubBackend) Authorize(context.Context, string, string, string, string) (*hostclient.AuthorizeResult, error) {
+func (s *stubBackend) Authorize(context.Context, string, string, string, string, string) (*hostclient.AuthorizeResult, error) {
 	s.asked.Add(1)
 	r := s.result
 	return &r, nil

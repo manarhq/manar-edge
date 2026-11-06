@@ -13,7 +13,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,6 +39,9 @@ type FileEdit struct {
 	Kind string
 	// Mode is used when the file is created; an existing file keeps its own.
 	Mode os.FileMode
+	// Exe is the program whose hook and MCP entries the file holds ("" for a file with none): it
+	// lets Apply tell what Manar wrote from words that merely look like it.
+	Exe string
 }
 
 // Outcome of one FileEdit.
@@ -48,6 +53,9 @@ type Outcome struct {
 	// Repaired: Manar had edited this file before, and everything of Manar's had been taken out of
 	// it since; Apply put it back.
 	Repaired bool
+	// Lost: Apply wrote the file back and it held fewer Manar entries (hook commands, wrapped MCP
+	// servers) than Manar last wrote: something of Manar's was taken out.
+	Lost bool
 }
 
 type entry struct {
@@ -60,7 +68,9 @@ type entry struct {
 	GID      int    `json:"gid"`
 	Home     string `json:"home"`
 	AfterSHA string `json:"afterSha"`
-	At       string `json:"at"`
+	// Owned names the Manar entries in the file as Manar last wrote it (see ownedItems).
+	Owned []string `json:"owned,omitempty"`
+	At    string   `json:"at"`
 }
 
 func (e entry) owner() Owner { return Owner{UID: e.UID, GID: e.GID, Home: e.Home} }
@@ -140,13 +150,24 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 			out = append(out, oc)
 			continue
 		}
+		ent := findEntry(m.Tools[key], fe.Path)
 		if bytes.Equal(next, cur) || (!existed && len(next) == 0) {
+			// Nothing to write. Keep the count honest if the person removed a wrapped server
+			// themselves, so a later server they add is not mistaken for a repair.
+			if ent != nil && fe.Exe != "" {
+				if o, _ := ownedItems(cur, fe.Exe); !equalStrings(o, ent.Owned) {
+					ent.Owned = o
+					_ = s.save(m)
+				}
+			}
 			out = append(out, oc)
 			continue
 		}
-		ent := findEntry(m.Tools[key], fe.Path)
-		// Every edit Manar makes names its own binary (hook command, MCP wrapper).
-		oc.Repaired = ent != nil && !bytes.Contains(cur, []byte("manar-edge"))
+		// The file is not what the service last wrote, and it needs fixing: something changed Manar's
+		// part (not just the person editing their own settings, which needs no fix). Judged by what
+		// the service wrote (its stored checksum), never by searching the file for a program name.
+		oc.Repaired = ent != nil && ent.AfterSHA != "" && sha(cur) != ent.AfterSHA
+		oc.Lost = oc.Repaired && fe.Exe != "" && lostItems(ent.Owned, cur, fe.Exe)
 		if ent == nil {
 			e, berr := s.backup(tool, fe, cur, existed, curMode, owner)
 			if berr != nil {
@@ -169,6 +190,9 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 			continue
 		}
 		ent.AfterSHA = sha(next)
+		if fe.Exe != "" {
+			ent.Owned, _ = ownedItems(next, fe.Exe)
+		}
 		if err := s.save(m); err != nil {
 			return out, err
 		}
@@ -176,6 +200,123 @@ func (s *Store) Apply(tool, user string, owner Owner, edits []FileEdit) ([]Outco
 		out = append(out, oc)
 	}
 	return out, nil
+}
+
+func equalStrings(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// ownedItems lists the Manar entries in a settings file, structurally: a canonical hook command
+// that runs this program, inside the file's "hooks" (named by event, tool and event word), and an
+// MCP server whose command is this program running mcp-wrap (named by server). The second result is
+// every MCP server name in the file, wrapped or not. Words left lying around elsewhere in the file
+// count for nothing.
+func ownedItems(b []byte, exe string) (owned []string, servers map[string]bool) {
+	owned, servers, _ = ownedForms(b, exe)
+	return owned, servers
+}
+
+// mcpForm names a server by what it runs (command and arguments), not by its name.
+func mcpForm(cmd string, args []any) string {
+	h := sha256.New()
+	h.Write([]byte(cmd))
+	for _, a := range args {
+		str, _ := a.(string)
+		h.Write([]byte{0})
+		h.Write([]byte(str))
+	}
+	return hex.EncodeToString(h.Sum(nil)[:12])
+}
+
+// ownedForms is ownedItems plus the forms (see mcpForm) of the servers that are not wrapped. A
+// wrapped server also adds "mcpform:<form>", the form of the command it wraps.
+func ownedForms(b []byte, exe string) (owned []string, servers map[string]bool, plain map[string]bool) {
+	var root map[string]any
+	if json.Unmarshal(b, &root) != nil {
+		return nil, nil, nil
+	}
+	servers, plain = map[string]bool{}, map[string]bool{}
+	seen := map[string]bool{}
+	var walk func(event string, v any)
+	walk = func(event string, v any) {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, c := range x {
+				if str, ok := c.(string); ok && (k == "command" || k == "powershell" || k == "bash") {
+					if m := canonicalHook.FindStringSubmatch(str); m != nil && sameExe(m[2], exe) {
+						seen["hook:"+event+":"+m[3]+":"+m[4]] = true
+					}
+					continue
+				}
+				walk(event, c)
+			}
+		case []any:
+			for _, c := range x {
+				walk(event, c)
+			}
+		}
+	}
+	if hooks, ok := root["hooks"].(map[string]any); ok {
+		for ev, v := range hooks {
+			walk(ev, v)
+		}
+	}
+	for _, key := range []string{"mcpServers", "servers"} {
+		m, _ := root[key].(map[string]any)
+		for name, raw := range m {
+			servers[name] = true
+			srv, _ := raw.(map[string]any)
+			cmd, _ := srv["command"].(string)
+			args, _ := srv["args"].([]any)
+			if sameExe(cmd, exe) && len(args) > 0 && args[0] == "mcp-wrap" {
+				seen["mcp:"+name] = true
+				if len(args) >= 5 && args[3] == "--" {
+					inner, _ := args[4].(string)
+					seen["mcpform:"+mcpForm(inner, args[5:])] = true
+				}
+			} else {
+				plain[mcpForm(cmd, args)] = true
+			}
+		}
+	}
+	for k := range seen {
+		owned = append(owned, k)
+	}
+	sort.Strings(owned)
+	return owned, servers, plain
+}
+
+// lostItems is true when something Manar wrote (prev) is gone from cur: a hook entry that is not
+// there any more, or an MCP server that is still there but no longer wrapped. A server the person
+// removed (or swapped for another) is not lost.
+func lostItems(prev []string, cur []byte, exe string) bool {
+	now, servers, plain := ownedForms(cur, exe)
+	have := map[string]bool{}
+	for _, o := range now {
+		have[o] = true
+	}
+	for _, p := range prev {
+		if have[p] {
+			continue
+		}
+		if name, ok := strings.CutPrefix(p, "mcp:"); ok && !servers[name] {
+			continue
+		}
+		// A wrapped server renamed to unwrap it: a server of another name now runs what it wrapped.
+		if form, ok := strings.CutPrefix(p, "mcpform:"); ok && !plain[form] {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func findEntry(es []entry, path string) *entry {
@@ -391,4 +532,56 @@ func (s *Store) Describe(tool, user string) []string {
 		}
 	}
 	return out
+}
+
+// A person (an administrator at a terminal) can run `manar-edge protect restore`, which takes the
+// hooks out. The service then puts them back, and that must not look like a first install: the CLI
+// leaves a marker per tool, and the service reports the re-add once.
+func (s *Store) restoredPath() string { return filepath.Join(s.dir, "protect", "cli-restored.json") }
+
+func (s *Store) readRestored() []string {
+	var l []string
+	if b, err := os.ReadFile(s.restoredPath()); err == nil {
+		_ = json.Unmarshal(b, &l)
+	}
+	return l
+}
+
+// NoteCLIRestore records that the CLI restored these tools (keys such as claude-code).
+func (s *Store) NoteCLIRestore(tools ...string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.readRestored()
+	for _, t := range tools {
+		found := false
+		for _, x := range l {
+			found = found || x == t
+		}
+		if !found {
+			l = append(l, t)
+		}
+	}
+	b, _ := json.Marshal(l)
+	_ = writeState(s.restoredPath(), b, 0o600)
+}
+
+// TakeCLIRestore reports whether the CLI restored the tool since the service last looked, and clears it.
+func (s *Store) TakeCLIRestore(tool string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	l := s.readRestored()
+	var keep []string
+	hit := false
+	for _, x := range l {
+		if x == tool {
+			hit = true
+		} else {
+			keep = append(keep, x)
+		}
+	}
+	if hit {
+		b, _ := json.Marshal(keep)
+		_ = writeState(s.restoredPath(), b, 0o600)
+	}
+	return hit
 }

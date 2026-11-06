@@ -7,6 +7,7 @@ import (
 	"os"
 	"strconv"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -41,18 +42,30 @@ func listenRelay() (net.Listener, error) {
 	return l, nil
 }
 
+// classifyDial says the service is down only when the connection is refused or the socket is gone.
+// A timeout, a permission error or anything else is not "down": the hook fails closed.
+func classifyDial(err error) error {
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT) {
+		return &downError{err}
+	}
+	return err
+}
+
 // dialRelay connects only to a socket and a server that belong to the service.
 func dialRelay(ctx context.Context) (net.Conn, error) {
 	st, err := os.Lstat(relaySock)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, &downError{err}
+		}
 		return nil, err
 	}
 	if sys, ok := st.Sys().(*syscall.Stat_t); !ok || sys.Uid != relayOwner || st.Mode()&os.ModeSocket == 0 {
 		return nil, errors.New("the relay socket is not the service's")
 	}
-	c, err := (&net.Dialer{}).DialContext(ctx, "unix", relaySock)
+	c, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", relaySock)
 	if err != nil {
-		return nil, err
+		return nil, classifyDial(err)
 	}
 	if cred, err := peerCred(c); err != nil || cred.Uid != relayOwner {
 		c.Close()
@@ -87,4 +100,10 @@ func callerOf(c net.Conn) string {
 		return "unknown"
 	}
 	return "uid:" + strconv.Itoa(int(cred.Uid))
+}
+
+// callerIsAdmin: the other end of the connection is root.
+func callerIsAdmin(c net.Conn) bool {
+	cred, err := peerCred(c)
+	return err == nil && cred.Uid == 0
 }

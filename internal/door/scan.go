@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"math"
-	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // Detectors are deterministic regular expressions, never a model. They run on the raw JSON text of
@@ -14,7 +15,7 @@ import (
 // is replaced by a mask (the private key pattern skips escapes as whole units for the same reason).
 type detector struct {
 	kind string
-	re   *regexp.Regexp
+	re   *lazyre.Re
 	// group is the capture group holding the secret itself (0 = the whole match).
 	group int
 	// accept, when set, vets the matched secret (placeholders, code, low entropy are refused).
@@ -26,21 +27,21 @@ const passKey = `(?i)(?:^|[^A-Za-z0-9])(?:[A-Za-z0-9]+[_-])*(?:password|passwd|p
 const jsonStr = `(?:[^"\\]|\\.)*`
 
 var detectors = []detector{
-	{"private_key", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:` + jsonStr + `?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|` + jsonStr + `)`), 0, nil},
-	{"aws_access_key", regexp.MustCompile(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA)[A-Z0-9]{16}\b`), 0, nil},
-	{"anthropic_key", regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}`), 0, nil},
-	{"openai_key", regexp.MustCompile(`\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}`), 0, nil},
-	{"github_token", regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})`), 0, nil},
-	{"gitlab_token", regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}`), 0, nil},
-	{"google_api_key", regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`), 0, nil},
-	{"slack_token", regexp.MustCompile(`\bxox[abprs]-[A-Za-z0-9-]{10,}`), 0, nil},
-	{"stripe_key", regexp.MustCompile(`\b[sr]k_live_[A-Za-z0-9]{16,}`), 0, nil},
-	{"npm_token", regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`), 0, nil},
-	{"pypi_token", regexp.MustCompile(`\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{40,}`), 0, nil},
+	{"private_key", lazyre.New(`-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----(?:` + jsonStr + `?-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|` + jsonStr + `)`), 0, nil},
+	{"aws_access_key", lazyre.New(`\b(?:AKIA|ASIA|AGPA|AIDA|AROA)[A-Z0-9]{16}\b`), 0, nil},
+	{"anthropic_key", lazyre.New(`\bsk-ant-[A-Za-z0-9_-]{20,}`), 0, nil},
+	{"openai_key", lazyre.New(`\bsk-(?:proj-|svcacct-)?[A-Za-z0-9_-]{32,}`), 0, nil},
+	{"github_token", lazyre.New(`\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})`), 0, nil},
+	{"gitlab_token", lazyre.New(`\bglpat-[A-Za-z0-9_-]{20,}`), 0, nil},
+	{"google_api_key", lazyre.New(`\bAIza[0-9A-Za-z_-]{35}\b`), 0, nil},
+	{"slack_token", lazyre.New(`\bxox[abprs]-[A-Za-z0-9-]{10,}`), 0, nil},
+	{"stripe_key", lazyre.New(`\b[sr]k_live_[A-Za-z0-9]{16,}`), 0, nil},
+	{"npm_token", lazyre.New(`\bnpm_[A-Za-z0-9]{36}\b`), 0, nil},
+	{"pypi_token", lazyre.New(`\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{40,}`), 0, nil},
 	// A key=value pair needs a literal value: either quoted, or unquoted and random-looking. Code
 	// that reads a secret (getenv, settings.X, calls) and placeholders are not findings.
-	{"password", regexp.MustCompile(passKey + `["']?\s*[:=]\s*["']([^"'\s\\]{8,})["']`), 1, func(v string) bool { return acceptValue(v, 2.5) }},
-	{"password", regexp.MustCompile(passKey + `["']?\s*[:=]\s*([^\s"',;]{8,})`), 1, func(v string) bool { return acceptValue(v, 3.0) && classes(v) >= 2 }},
+	{"password", lazyre.New(passKey + `["']?\s*[:=]\s*["']([^"'\s\\]{8,})["']`), 1, func(v string) bool { return acceptValue(v, 2.5) }},
+	{"password", lazyre.New(passKey + `["']?\s*[:=]\s*([^\s"',;]{8,})`), 1, func(v string) bool { return acceptValue(v, 3.0) && classes(v) >= 2 }},
 }
 
 // Finding is one secret found: its kind and a masked sample (first characters, then ****).
@@ -55,7 +56,7 @@ type span struct {
 }
 
 var (
-	dottedIdent = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$`)
+	dottedIdent = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$`)
 	codeWords   = []string{"getenv", "environ", "settings", "config", "secrets.", "getpass", "input(", "prompt", "self.", "this.", "args.", "params."}
 )
 

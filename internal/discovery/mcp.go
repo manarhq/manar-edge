@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"github.com/BurntSushi/toml"
 	"github.com/manarhq/manar-edge/internal/hostclient"
+	"github.com/manarhq/manar-edge/internal/lazyre"
 	"net/url"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -184,7 +184,7 @@ func keysOf(ms ...any) []string {
 	return out
 }
 
-var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
+var envName = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]{0,63}$`)
 
 // safeEnvKeys keeps variable NAMES only, and only plain ones: a "name" that is really a pasted
 // value (or has a secret's shape) is dropped.
@@ -287,9 +287,9 @@ func commandBase(cmd string) string {
 }
 
 var (
-	safeName    = regexp.MustCompile(`^[A-Za-z0-9._+-]{1,100}$`)
-	safePackage = regexp.MustCompile(`^(@[a-z0-9._-]+/)?[a-z0-9._-]+(/[a-z0-9._-]+)*$`)
-	safeVersion = regexp.MustCompile(`^[A-Za-z0-9._+:^~<>=*-]{1,64}$`)
+	safeName    = lazyre.New(`^[A-Za-z0-9._+-]{1,100}$`)
+	safePackage = lazyre.New(`^(@[a-z0-9._-]+/)?[a-z0-9._-]+(/[a-z0-9._-]+)*$`)
+	safeVersion = lazyre.New(`^[A-Za-z0-9._+:^~<>=*-]{1,64}$`)
 )
 
 // hostOnlyURL keeps scheme, host and port. User names, passwords, paths, queries and fragments are
@@ -317,10 +317,10 @@ func outsideHome(args []string) bool {
 			}
 		}
 		v = strings.ReplaceAll(v, `\`, "/")
-		if v == "/" || regexp.MustCompile(`^(?i)[a-z]:/?$`).MatchString(v) {
+		if v == "/" || lazyre.New(`^(?i)[a-z]:/?$`).MatchString(v) {
 			return true
 		}
-		m := regexp.MustCompile(`^(?i)(?:[a-z]:)?/([^/]+)(/[^/]+)?`).FindStringSubmatch(v)
+		m := lazyre.New(`^(?i)(?:[a-z]:)?/([^/]+)(/[^/]+)?`).FindStringSubmatch(v)
 		if m == nil {
 			continue
 		}
@@ -340,8 +340,8 @@ func clip(s string, n int) string {
 }
 
 var (
-	secretValue = regexp.MustCompile(`^(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,})`)
-	tokenish    = regexp.MustCompile(`^[A-Za-z0-9_+=-]{20,}$`)
+	secretValue = lazyre.New(`^(sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{10,}|xox[abprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*|npm_[A-Za-z0-9]{20,}|pypi-[A-Za-z0-9_-]{20,})`)
+	tokenish    = lazyre.New(`^[A-Za-z0-9_+=-]{20,}$`)
 )
 
 // looksSecret is a last check on the one thing taken from the arguments, the package spec: a token
@@ -366,7 +366,7 @@ func looksSecret(v string) bool {
 // list stops the search with no package: we cannot tell whether it swallows the next word.
 type launcher struct {
 	pre, free, val map[string]bool
-	name           *regexp.Regexp
+	name           *lazyre.Re
 }
 
 func set(ss ...string) map[string]bool {
@@ -378,9 +378,9 @@ func set(ss ...string) map[string]bool {
 }
 
 var (
-	npmName    = regexp.MustCompile(`^(@[a-z0-9-~][a-z0-9-._~]*/)?[a-z0-9-~][a-z0-9-._~]*$`)
-	pypiName   = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
-	imageName  = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
+	npmName    = lazyre.New(`^(@[a-z0-9-~][a-z0-9-._~]*/)?[a-z0-9-~][a-z0-9-._~]*$`)
+	pypiName   = lazyre.New(`^[A-Za-z0-9]([A-Za-z0-9._-]*[A-Za-z0-9])?$`)
+	imageName  = lazyre.New(`^[a-z0-9]+([._-][a-z0-9]+)*(:[0-9]{1,5})?(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
 	npmLaunch  = launcher{pre: set("dlx", "exec", "x", "--"), free: set("-y", "--yes", "-q", "--quiet", "--no", "--prefer-offline", "--no-install", "--ignore-existing", "--bun", "-b"), val: set("-p", "--package", "--registry", "--cache", "--userconfig"), name: npmName}
 	pyLaunch   = launcher{pre: set("run", "tool", "--"), free: set("--isolated", "--no-cache", "-q", "--quiet", "--refresh"), val: set("--from", "--with", "--python", "-p", "--spec", "--index-url", "--extra-index-url"), name: pypiName}
 	dockLaunch = launcher{pre: set(), free: set("-i", "-t", "-it", "-ti", "--rm", "-d", "--init", "--read-only", "--interactive", "--tty"), val: set("-e", "--env", "-v", "--volume", "--name", "--network", "--net", "-p", "--publish", "--mount", "-w", "--workdir", "--user", "-u", "--env-file", "--platform", "--add-host", "--pull", "--memory", "-m", "--cpus"), name: imageName}
@@ -461,12 +461,12 @@ func splitImage(name, ver string) (string, string) {
 }
 
 // splitSpec splits `@scope/name@1.2.3`, `name@latest`, `name==1.2.0` or `name` into name and pin.
-func splitSpec(s string, shape *regexp.Regexp) (string, string) {
+func splitSpec(s string, shape *lazyre.Re) (string, string) {
 	// A git or URL spec can carry credentials (git+https://user:token@host/repo): only scheme and
 	// host are kept, as the "package".
 	if strings.Contains(s, "://") {
 		scheme, rest, _ := strings.Cut(s, "://")
-		if !regexp.MustCompile(`^[a-z+]{3,12}$`).MatchString(strings.ToLower(scheme)) {
+		if !lazyre.New(`^[a-z+]{3,12}$`).MatchString(strings.ToLower(scheme)) {
 			return "", ""
 		}
 		host := rest
@@ -474,7 +474,7 @@ func splitSpec(s string, shape *regexp.Regexp) (string, string) {
 			host = host[i+1:]
 		}
 		host = host[:strings.IndexAny(host+"/", "/?#")]
-		if !regexp.MustCompile(`^[A-Za-z0-9.-]{1,100}(:[0-9]{1,5})?$`).MatchString(host) {
+		if !lazyre.New(`^[A-Za-z0-9.-]{1,100}(:[0-9]{1,5})?$`).MatchString(host) {
 			return "", ""
 		}
 		return strings.ToLower(scheme) + "://" + host, ""

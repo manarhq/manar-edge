@@ -10,6 +10,8 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -70,7 +72,7 @@ var lockedReason = func() string {
 	case "account_suspended":
 		return "device_locked (the workspace is suspended; AI actions stay blocked until it is active again)"
 	case "workspace_deleted":
-		return "device_locked (the workspace is being deleted; an administrator of this computer can uninstall Manar)"
+		return "device_locked (the workspace is being deleted; ask your administrator)"
 	case "device_revoked":
 		return "device_locked (this device was revoked by its workspace; AI actions stay blocked until an admin acts)"
 	default:
@@ -110,6 +112,7 @@ func gatewayUp() bool { return door.Routable() && door.Healthy(GatewayURL) }
 // than APPROVED (pending, revoked, rejected) leaves what is installed alone: hooks come out only
 // on the workspace's authenticated "removed" reply (the daemon's unprotect) or a local uninstall.
 func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Config) map[string]discovery.State {
+	var blocked bool
 	st := theStore()
 	states := map[string]discovery.State{}
 	if st == nil {
@@ -120,10 +123,22 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 		off[id] = true
 	}
 	approved := cfg.Status == "APPROVED"
+	setOfflinePolicyVersion(cfg.PolicyVersion)
+	setOfflineReadsPolicy(approved && cfg.OfflineReadsAllowed != nil && *cfg.OfflineReadsAllowed, cfg.OfflineReadDeny)
+	if d := stateDirNow(); d != "" {
+		setOfflineState(cfg.Paused, hostclient.LockedCode(d))
+	}
+	// Hooks are written only by the privileged device service of an enrolled device. A copy run by
+	// a user (or a test install on a developer machine) must not touch anyone's AI-tool settings.
+	if approved && !mayWriteHooks() {
+		logOnce("not changing any AI tool settings: " + refusal())
+		approved = false
+		blocked = true
+	}
 	if approved && !off["host.claude-code"] {
 		scanClaudeOverrides(found)
 	}
-	ctx := Ctx{Exe: exePath(), GatewayURL: GatewayURL}
+	ctx := Ctx{Exe: exePath(), GatewayURL: GatewayURL, Foreign: foreignHook, HooksDisabled: hooksDisabledFound}
 	if approved {
 		ctx.GatewayUp = gatewayUp()
 	}
@@ -144,7 +159,7 @@ func reconcile(_ context.Context, found []discovery.Found, cfg *hostclient.Confi
 		if !known {
 			continue
 		}
-		states[f.ID] = reconcileTool(st, f, ctx, approved, off[f.ID])
+		states[f.ID] = reconcileTool(st, f, ctx, approved, off[f.ID] && !blocked)
 	}
 	return states
 }
@@ -155,6 +170,15 @@ func reconcileTool(st *Store, f discovery.Found, ctx Ctx, approved, off bool) di
 		res.Mode = "none"
 	}
 	rank := map[string]int{"hook": 3, "gateway": 2, "mcp": 1}
+	// Taken before the users are looked at: a restore from the command line is told to the console
+	// once, when the service puts the hooks back.
+	cliRestored := false
+	if approved && !off {
+		cliRestored = st.TakeCLIRestore(f.Key)
+	} else if off {
+		st.TakeCLIRestore(f.Key) // switched off in the console: nothing to report when it comes back
+	}
+	reportedRestore := false
 	for _, u := range f.Users {
 		if off || !approved {
 			if st.Has(f.Key, u.Name) && off {
@@ -179,8 +203,15 @@ func reconcileTool(st *Store, f discovery.Found, ctx Ctx, approved, off bool) di
 			continue
 		}
 		for i, o := range out {
-			if o.Repaired && o.Changed && items[i].Role == RoleHook {
+			// A repair of any Manar-owned item is told to the console: a hook entry put back
+			// (whatever the tool trusts), or a wrapped MCP server or other Manar entry that was
+			// taken out. The person adding their own MCP server is not a repair.
+			if o.Changed && ((o.Repaired && items[i].Role == RoleHook) || o.Lost) {
 				reportTamper(TamperHookRemoved, "host."+f.Key, "", o.Path, false)
+			}
+			if cliRestored && !reportedRestore && o.Changed && items[i].Role == RoleHook {
+				reportedRestore = true
+				reportTamper(TamperHookRemoved, "host."+f.Key, "protect_restore", o.Path, false)
 			}
 			if o.Warning != "" {
 				logOnce("WARNING " + f.Name + " " + o.Path + ": " + o.Warning)
@@ -214,10 +245,15 @@ func claudeCodeState() discovery.State {
 	return discovery.State{Protected: true, Mode: "hook", Changes: []string{ClaudeSettingsPath + " (managed settings written by install-claude-code)"}}
 }
 
-func exePath() string {
+// exePath is the running program (a var so tests can pose as an installed manar-edge).
+var exePath = func() string {
 	p, err := os.Executable()
 	if err != nil {
 		return "manar-edge"
+	}
+	// Resolved once, here, on the service's side: this is the only path a hook entry may name.
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		p = r
 	}
 	return p
 }
@@ -238,18 +274,23 @@ func (*relayModule) Cleanup(context.Context) error {
 
 type callerKey struct{}
 
+// adminKey says the connection came from an administrator (root; on Windows an elevated
+// Administrators member or SYSTEM).
+type adminKey struct{}
+
 func newRelayServer(b backend) *http.Server {
 	return &http.Server{
 		Handler:           relayHandler(b),
 		ReadHeaderTimeout: 5 * time.Second,
 		ConnContext: func(ctx context.Context, conn net.Conn) context.Context {
+			ctx = context.WithValue(ctx, adminKey{}, callerIsAdmin(conn))
 			return context.WithValue(ctx, callerKey{}, callerOf(conn))
 		},
 	}
 }
 
 type backend interface {
-	Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*hostclient.AuthorizeResult, error)
+	Authorize(ctx context.Context, toolID, actionID, resource, caller, resolvedPath string) (*hostclient.AuthorizeResult, error)
 	ApprovalStatus(ctx context.Context, id string) (string, error)
 }
 
@@ -259,12 +300,30 @@ func (m *relayModule) Start(ctx context.Context, c *hostclient.Client) error {
 		return err
 	}
 	setTamperClient(c)
+	go keepOfflineStateFresh(ctx)
 	srv := newRelayServer(c)
 	go func() { <-ctx.Done(); srv.Close() }()
 	if err := srv.Serve(l); err != nil && ctx.Err() == nil {
 		return err
 	}
 	return nil
+}
+
+// keepOfflineStateFresh copies "paused" and "locked" into the saved policy, the only place a hook
+// reads them while the service is away. It runs every 10 s and writes only when something changed.
+func keepOfflineStateFresh(ctx context.Context) {
+	t := time.NewTicker(10 * time.Second)
+	defer t.Stop()
+	for {
+		if d := stateDirNow(); d != "" {
+			setOfflineState(pause.Paused(d), hostclient.LockedCode(d))
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
 }
 
 // relayHandler serves /v1/authorize and /v1/approvals/<id>. It only passes the three fields on;
@@ -306,12 +365,23 @@ func relayHandler(b backend) http.Handler {
 			caller += "|s:" + sid
 		}
 		t0 := time.Now()
-		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller)
+		// The target with its links resolved, worked out here by the service (the hook is the
+		// user's process and its word counts for nothing). A file that does not exist yet is its
+		// existing folder plus the name. Nothing is sent when it cannot be resolved: the API then
+		// cannot tell and refuses learning and folder scopes.
+		resolved := ""
+		if pathActions[in.ActionID] {
+			if p, ok := resolveTarget(in.Resource); ok {
+				resolved = p
+			}
+		}
+		res, err := b.Authorize(ctx, in.ToolID, in.ActionID, in.Resource, caller, resolved)
 		if err != nil {
 			http.Error(w, "upstream", 502)
 			return
 		}
 		recordDecision(in.ToolID, in.ActionID, in.Resource, res.Decision, caller, time.Since(t0))
+		recordOfflineDecision(in.ToolID, caller, in.ActionID, in.Resource, raw["cwd"], offlineDecision(res))
 		json.NewEncoder(w).Encode(res)
 	})
 	// Undo AI file changes: the hook (running as the user) tells the service what it saved. The
@@ -347,6 +417,39 @@ func relayHandler(b backend) http.Handler {
 			return
 		}
 		reportTamper(TamperSettingsWrite, in.ToolID, in.Action, in.Path, true)
+		w.Write([]byte("{}"))
+	})
+	// `manar-edge protect restore` (an administrator at a terminal) tells the service before it
+	// takes hooks out, so the console hears about it.
+	mux.HandleFunc("POST /v1/restored", func(w http.ResponseWriter, r *http.Request) {
+		c, _ := r.Context().Value(callerKey{}).(string)
+		if admin, _ := r.Context().Value(adminKey{}).(bool); !admin {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		var in struct {
+			Tools []string `json:"tools"`
+		}
+		if json.NewDecoder(io.LimitReader(r.Body, 8<<10)).Decode(&in) != nil || len(in.Tools) > len(Keys) {
+			http.Error(w, "bad request", 400)
+			return
+		}
+		for _, k := range in.Tools {
+			if validTool("host." + k) {
+				reportTamperBy(c, TamperHookRemoved, "host."+k, "protect_restore", "", false)
+			}
+		}
+		w.Write([]byte("{}"))
+	})
+	// Allows a hook made from the saved policy while the service was away: told to Manar now.
+	mux.HandleFunc("POST /v1/offline-allows", func(w http.ResponseWriter, r *http.Request) {
+		if c, _ := r.Context().Value(callerKey{}).(string); !callerAllowed(c) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		body, _ := io.ReadAll(io.LimitReader(r.Body, 128<<10))
+		caller, _ := r.Context().Value(callerKey{}).(string)
+		reportOfflineAllows(decodeOfflineAllows(body), caller)
 		w.Write([]byte("{}"))
 	})
 	mux.HandleFunc("GET /v1/approvals/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -406,7 +509,29 @@ func RestoreEverything() []error {
 	if st == nil {
 		return []error{errors.New("protect is not configured")}
 	}
+	var tools []string
+	for _, k := range st.Tools() {
+		if tool, _, ok := strings.Cut(k, "|"); ok {
+			tools = append(tools, tool)
+		}
+	}
+	tellRestore(st, tools)
 	return st.RestoreAll()
+}
+
+// tellRestore tells the running service that these tools are about to be restored by hand, so it
+// reports it. If the service cannot be reached, a marker is left and the service reports it when it
+// puts the hooks back.
+func tellRestore(st *Store, tools []string) {
+	if len(tools) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	var ignore map[string]any
+	if NewRelay().call(ctx, http.MethodPost, "/v1/restored", map[string]any{"tools": tools}, &ignore) != nil {
+		st.NoteCLIRestore(tools...)
+	}
 }
 
 // RestoreTool restores one tool (by key, e.g. cursor) for every account.
@@ -418,6 +543,7 @@ func RestoreTool(key string) error {
 	var errs []error
 	for _, k := range st.Tools() {
 		if tool, user, ok := strings.Cut(k, "|"); ok && tool == key {
+			tellRestore(st, []string{tool})
 			errs = append(errs, st.Restore(tool, user))
 		}
 	}
@@ -466,5 +592,103 @@ func recordDecision(toolID, actionID, resource, decision, caller string, took ti
 	telemetry.Record("warden", strings.TrimPrefix(toolID, "host."), d, kind, text, caller, took)
 }
 
-// Unprotect restores every tool's settings when the device is removed from its workspace.
-func (m *relayModule) Unprotect(ctx context.Context) error { return m.Cleanup(ctx) }
+// Unprotect restores every tool's settings when the device is removed from its workspace. Only the
+// enrolled system service may do it, like every other change to hook files.
+func (m *relayModule) Unprotect(ctx context.Context) error {
+	if !mayWriteHooks() {
+		logOnce("not restoring any AI tool settings: " + refusal())
+		return errors.New("only the enrolled system service restores AI tool settings")
+	}
+	return m.Cleanup(ctx)
+}
+
+// MayWriteHooks is true only for the enrolled, admin-installed service (root/SYSTEM, the system
+// state directory, enrolled). Every path that changes or removes hooks or Manar's managed
+// settings checks it.
+func MayWriteHooks() bool { return mayWriteHooks() }
+
+func stateDirNow() string {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	return stateDir
+}
+
+// SystemStateDir is the state directory of the admin-installed service; set by the command
+// package. Only a service that uses it may write hooks.
+var SystemStateDir string
+
+// mayWriteHooks is true only for the enrolled, admin-installed service: a privileged process (root,
+// SYSTEM) that is enrolled and uses the system state directory. Any other copy, such as one a user
+// runs or a test install with its own state directory, never writes or touches hook files. It is
+// a var so tests can set it.
+var mayWriteHooks = func() bool { return refusal() == "" }
+
+// privileged is a var so tests can pose as root.
+var privileged = isPrivileged
+
+// refusal says why this process may not write hooks ("" when it may).
+func refusal() string {
+	d := stateDirNow()
+	switch {
+	case !privileged():
+		return "it does not run as root or SYSTEM"
+	case SystemStateDir == "" || !sameDir(d, SystemStateDir):
+		return "its state directory is not the system one"
+	case !enrolled(d):
+		return "the device is not enrolled"
+	}
+	return ""
+}
+
+func sameDir(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
+}
+
+func enrolled(dir string) bool {
+	if dir == "" {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(hostclient.Dir(dir), "host.json"))
+	return err == nil
+}
+
+// hooksDisabledFound is told that a settings file Manar writes had "disableAllHooks" set (it is
+// taken out again): tampering, reported to the console.
+func hooksDisabledFound(key, path string) {
+	reportTamper(TamperHooksDisabled, "host."+key, "user_settings", path, false)
+}
+
+// foreignHook is told about Manar-looking hook entries that are not exactly this service's own.
+// One machine has one WARDEN install, so every such entry is tampering (or a stale path): the
+// service puts its own entry back and reports it.
+func foreignHook(key, path string, cmds []string) {
+	reportTamper(TamperHookRemoved, "host."+key, "", path, false)
+}
+
+// plainAllowReasons are the reasons of an ALLOW that is a plain policy allow. Until the API says
+// `cacheable` on every decision, an ALLOW with any other reason (learning mode, a grant, an
+// approval) is not kept for offline use.
+var plainAllowReasons = map[string]bool{"policy_allow": true, "allowed_by_policy": true}
+
+// offlineDecision is the decision the offline snapshot records for an answer: ALLOW only for an
+// ALLOW that may be cached. An uncacheable ALLOW is recorded as such, which also drops any older
+// cached allow of the same action, so a learning-mode or grant allow can never outlive its window.
+func offlineDecision(res *hostclient.AuthorizeResult) string {
+	if res.Decision != "ALLOW" {
+		return res.Decision
+	}
+	if res.Cacheable != nil {
+		if *res.Cacheable {
+			return "ALLOW"
+		}
+		return "ALLOW_NOT_CACHEABLE"
+	}
+	if plainAllowReasons[res.Reason] {
+		return "ALLOW"
+	}
+	return "ALLOW_NOT_CACHEABLE"
+}

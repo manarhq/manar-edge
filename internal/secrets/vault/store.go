@@ -10,7 +10,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"regexp"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // Store keeps named blobs. On Windows the bytes are DPAPI-protected; on Linux the directory is
@@ -25,7 +26,7 @@ type Store interface {
 // ErrNotFound is returned by Store.Get for a name that does not exist.
 var ErrNotFound = errors.New("not in the vault")
 
-var nameOK = regexp.MustCompile(`^[A-Za-z0-9._-]{1,120}$`)
+var nameOK = lazyre.New(`^[A-Za-z0-9._-]{1,120}$`)
 
 // FileStore is a Store in one directory.
 type FileStore struct{ Dir string }

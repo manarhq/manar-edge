@@ -9,13 +9,14 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // slugPattern is what we accept for tenant and agent slugs. Anything else is refused at
 // enrollment, so derived names are always safe in paths, unit names and nft rules.
-var slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+var slugPattern = lazyre.New(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 
 // maxNameLen is the Linux interface and netns name limit the contract sizes names for.
 const maxNameLen = 15

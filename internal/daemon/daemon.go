@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
@@ -262,11 +263,25 @@ func (heartbeat) Name() string { return "heartbeat" }
 
 func (heartbeat) Start(ctx context.Context, c *hostclient.Client) error {
 	last := ""
+	// A service that came back after a crash or a kill tells the console how long it was away.
+	// A clean stop (an administrator, a reboot) leaves no mark and reports nothing.
+	downtime, restarted := takeRestart(c.StateDir(), time.Now())
+	defer markStopped(c.StateDir())
 	// 15 s: "Pause all AI" reaches the device about this fast (the API denies at once anyway).
 	t := time.NewTicker(15 * time.Second)
 	defer t.Stop()
 	for {
 		cfg, err := c.Config(ctx)
+		markAlive(c.StateDir(), time.Now())
+		if err == nil && restarted && ctx.Err() == nil {
+			ev := map[string]any{"type": "service.restarted", "at": time.Now().UTC(), "downtimeSeconds": int(downtime.Seconds())}
+			err := c.Do(ctx, http.MethodPost, "/events", map[string]any{"events": []any{ev}}, nil)
+			var se *hostclient.StatusError
+			// Sent, or an older Manar that does not know the event (4xx): do not try again.
+			if err == nil || (errors.As(err, &se) && se.Code/100 == 4) {
+				restarted = false
+			}
+		}
 		if ctx.Err() == nil {
 			if err == nil {
 				recordSync(cfg.HostID, cfg.Status, cfg.StartMode, cfg.Features, nil)

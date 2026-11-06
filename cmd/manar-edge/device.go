@@ -339,7 +339,7 @@ func serveDevice(ctx context.Context, base string) error {
 	}
 	warden.SetStateDir(base)
 	// Steps for a device the workspace removed. The undo copies and the program itself stay.
-	daemon.RegisterOnRemoved("claude-code-policy", func(context.Context) error { return uninstallClaudeCode() })
+	daemon.RegisterOnRemoved("claude-code-policy", func(context.Context) error { return removeClaudePolicy() })
 	daemon.RegisterOnRemoved("warden", func(context.Context) error { return warden.Remove(base) })
 	return daemon.Run(ctx, c)
 }
@@ -361,6 +361,8 @@ func unitText(exe, base string) string {
 Description=Manar device service
 Wants=network-online.target
 After=network-online.target
+# Always come back: no start-rate limit, whatever made the service stop.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -369,7 +371,7 @@ ExecStart=%s --state-dir %s service run
 # A systemd service does not inherit a login shell's variables. Only http:// CONNECT proxies work.
 EnvironmentFile=-%s/proxy.env
 Restart=always
-RestartSec=5
+RestartSec=2
 # Whenever the service stops or dies, give the protected tools their network back (the filter is
 # put up again within seconds when the service restarts).
 ExecStopPost=-%s --state-dir %s jail-restore

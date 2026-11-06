@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/manarhq/manar-edge/internal/door"
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // maxSample is the longest sample after redaction (design spec section 1).
@@ -24,19 +25,19 @@ const maxRedactInput = 64 << 10
 const redacted = "<redacted>"
 
 var (
-	reURL      = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>` + "`" + `]+`)
-	reMask     = regexp.MustCompile(`\[MANAR-MASKED:[a-z_]+\]`)
-	reJWT      = regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*`)
-	reBearer   = regexp.MustCompile(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
-	rePEM      = regexp.MustCompile(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)`)
-	reAssign   = regexp.MustCompile(`(?i)\b([A-Za-z0-9_.-]*(?:secret|token|passw(?:or)?d|passwd|pwd|api[_-]?key|private[_-]?key|credential|auth)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',;&]+)`)
-	reFlag     = regexp.MustCompile(`(?i)(--?(?:[a-z0-9-]*(?:secret|token|passw(?:or)?d|pass|pwd|api-?key|credential)[a-z0-9-]*)[ =]+)("[^"]*"|'[^']*'|[^\s"']+)`)
-	reEmail    = regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
-	reIPv4     = regexp.MustCompile(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
-	reIPv6     = regexp.MustCompile(`[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*`)
-	reHomeUnix = regexp.MustCompile(`/(?:home|Users)/[^/\s"'\\:]+`)
-	reHomeWin  = regexp.MustCompile(`(?i)[A-Z]:[\\/]+Users[\\/]+[^\\/\s"':]+`)
-	reLong     = regexp.MustCompile(`[A-Za-z0-9+/_=-]{32,}`)
+	reURL      = lazyre.New(`(?i)\b[a-z][a-z0-9+.-]*://[^\s"'<>` + "`" + `]+`)
+	reMask     = lazyre.New(`\[MANAR-MASKED:[a-z_]+\]`)
+	reJWT      = lazyre.New(`\beyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]*`)
+	reBearer   = lazyre.New(`(?i)\b(bearer|basic)\s+[A-Za-z0-9._~+/=-]{8,}`)
+	rePEM      = lazyre.New(`(?s)-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----.*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$)`)
+	reAssign   = lazyre.New(`(?i)\b([A-Za-z0-9_.-]*(?:secret|token|passw(?:or)?d|passwd|pwd|api[_-]?key|private[_-]?key|credential|auth)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s"',;&]+)`)
+	reFlag     = lazyre.New(`(?i)(--?(?:[a-z0-9-]*(?:secret|token|passw(?:or)?d|pass|pwd|api-?key|credential)[a-z0-9-]*)[ =]+)("[^"]*"|'[^']*'|[^\s"']+)`)
+	reEmail    = lazyre.New(`[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+`)
+	reIPv4     = lazyre.New(`\b(?:\d{1,3}\.){3}\d{1,3}\b`)
+	reIPv6     = lazyre.New(`[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*`)
+	reHomeUnix = lazyre.New(`/(?:home|Users)/[^/\s"'\\:]+`)
+	reHomeWin  = lazyre.New(`(?i)[A-Z]:[\\/]+Users[\\/]+[^\\/\s"':]+`)
+	reLong     = lazyre.New(`[A-Za-z0-9+/_=-]{32,}`)
 )
 
 // Redact removes what must never leave the device from a command or domain sample, in the order
@@ -196,16 +197,16 @@ func replaceWord(s, name, with string) string {
 	if len(name) < 3 {
 		return s
 	}
-	return regexp.MustCompile(`(?i)(^|[^A-Za-z0-9])`+regexp.QuoteMeta(name)+`($|[^A-Za-z0-9])`).
+	return lazyre.New(`(?i)(^|[^A-Za-z0-9])`+regexp.QuoteMeta(name)+`($|[^A-Za-z0-9])`).
 		ReplaceAllString(s, "${1}"+with+"${2}")
 }
 
 // ---- sample minimisation ----
 
 var (
-	reFlagName = regexp.MustCompile(`^-{1,2}[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
-	reAssignTk = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*=`)
-	reSegment  = regexp.MustCompile(`&&|\|\||[;|\n]`)
+	reFlagName = lazyre.New(`^-{1,2}[A-Za-z0-9][A-Za-z0-9_-]{0,31}$`)
+	reAssignTk = lazyre.New(`^[A-Za-z_][A-Za-z0-9_]*=`)
+	reSegment  = lazyre.New(`&&|\|\||[;|\n]`)
 	programs   = set("git", "gh", "npm", "npx", "pnpm", "yarn", "node", "python", "python3", "pip", "go",
 		"cargo", "make", "docker", "kubectl", "helm", "terraform", "az", "aws", "gcloud", "curl", "wget",
 		"ssh", "scp", "rsync", "rm", "mv", "cp", "chmod", "chown", "sudo", "bash", "sh", "zsh", "pwsh",

@@ -29,7 +29,7 @@ func TestUnitTextRunsTheServiceFromTheStateDir(t *testing.T) {
 	u := unitText("/usr/local/bin/manar-edge", "/var/lib/manar-edge")
 	for _, want := range []string{
 		"ExecStart=/usr/local/bin/manar-edge --state-dir /var/lib/manar-edge service run",
-		"EnvironmentFile=-/var/lib/manar-edge/proxy.env", "Restart=always", "WantedBy=multi-user.target",
+		"EnvironmentFile=-/var/lib/manar-edge/proxy.env", "Restart=always", "RestartSec=2", "StartLimitIntervalSec=0", "WantedBy=multi-user.target",
 	} {
 		if !strings.Contains(u, want) {
 			t.Errorf("unit lacks %q:\n%s", want, u)
@@ -196,6 +196,14 @@ func TestKeylessEnrolRefusesAComputerOfAnotherWorkspace(t *testing.T) {
 	_ = hostclient.MarkRemoved(base)
 	if err := refuseOtherWorkspace(base, "acme"); err != nil {
 		t.Fatalf("a removed enrolment must not block: %v", err)
+	}
+}
+
+// Removing Manar's managed settings on a device removal is only for the enrolled system service;
+// a copy run any other way (no system state directory configured here) must leave them alone.
+func TestRemoveClaudePolicyIsGated(t *testing.T) {
+	if err := removeClaudePolicy(); err == nil {
+		t.Fatal("a process that is not the enrolled system service removed managed settings")
 	}
 }
 

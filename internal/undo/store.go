@@ -15,11 +15,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 const (
@@ -37,7 +38,7 @@ var (
 	ErrNotRegular = errors.New("not a regular file (link, folder or device)")
 )
 
-var idPattern = regexp.MustCompile(`^[a-f0-9]{32}$`)
+var idPattern = lazyre.New(`^[a-f0-9]{32}$`)
 
 // ValidID says whether s is a snapshot id this package made.
 func ValidID(s string) bool { return idPattern.MatchString(s) }

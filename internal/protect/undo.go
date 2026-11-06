@@ -3,8 +3,9 @@ package protect
 import (
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"strings"
+
+	"github.com/manarhq/manar-edge/internal/lazyre"
 )
 
 // Undo reverses what Manar added to the current content of a file, leaving everything else in it,
@@ -122,7 +123,7 @@ func unwrapServer(srv map[string]any) {
 	}
 }
 
-var codexAdded = regexp.MustCompile(`(?m)^# Added by Manar:[^\n]*\n\s*openai_base_url\s*=\s*"[^"\n]*"[ \t]*\n\n?`)
+var codexAdded = lazyre.New(`(?m)^# Added by Manar:[^\n]*\n\s*openai_base_url\s*=\s*"[^"\n]*"[ \t]*\n\n?`)
 
 func undoCodexTOML(cur []byte, _ bool) ([]byte, error) {
 	return codexAdded.ReplaceAll(cur, nil), nil

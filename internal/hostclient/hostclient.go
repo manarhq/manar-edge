@@ -24,13 +24,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/manarhq/manar-edge/internal/lazyre"
 	"github.com/manarhq/manar-edge/internal/ports"
 )
 
@@ -48,7 +48,7 @@ const (
 	maxBody = 1 << 20
 )
 
-var machineIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+var machineIDPattern = lazyre.New(`^[A-Za-z0-9._-]{1,128}$`)
 
 // Info is host.json.
 type Info struct {
@@ -464,7 +464,7 @@ func LockedCode(stateDir string) string {
 	return l.Code
 }
 
-var lockedCodePattern = regexp.MustCompile(`^[a-z_]{1,64}$`)
+var lockedCodePattern = lazyre.New(`^[a-z_]{1,64}$`)
 
 func markLocked(stateDir, code string) error {
 	if !lockedCodePattern.MatchString(code) {
@@ -554,6 +554,14 @@ type Config struct {
 	// VaultGrants lists the standing secret-vault grants ("8 hours", "Always") the device may keep;
 	// it drops any other. Nil from an API that does not send it: then no standing grant counts.
 	VaultGrants *[]VaultGrant `json:"vaultGrants,omitempty"`
+	// OfflineReadsAllowed is the workspace policy that reads of ordinary files keep working while
+	// the device service restarts (decision 35). Nil from an API that does not send it: no.
+	OfflineReadsAllowed *bool `json:"offlineReadsAllowed,omitempty"`
+	// OfflineReadDeny are path patterns (globs, or folders ending in a slash) never read offline.
+	OfflineReadDeny []string `json:"offlineReadDeny,omitempty"`
+	// PolicyVersion identifies the workspace policy in force. A different value than before drops
+	// every allow the device kept for offline use. Empty from an API that does not send it.
+	PolicyVersion string `json:"policyVersion,omitempty"`
 }
 
 // VaultGrant is one standing grant: the console request that gave it and when it ends (nil: no end).
@@ -646,11 +654,21 @@ type AuthorizeResult struct {
 	Decision   string `json:"decision"`
 	Reason     string `json:"reason"`
 	ApprovalID string `json:"approvalId"`
+	// Cacheable is false for an ALLOW served because of learning mode or a long grant: the device
+	// must not keep it for offline use, or it would outlive the window or the revocation. Nil from an
+	// API that does not send it (then only a plain policy allow may be kept).
+	Cacheable *bool `json:"cacheable,omitempty"`
 }
 
-func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource, caller string) (*AuthorizeResult, error) {
+// Authorize asks for a decision. resolvedPath, when not empty, is the target of a file action with
+// its links resolved; the API refuses learning and folder scopes when it differs from resource.
+func (c *Client) Authorize(ctx context.Context, toolID, actionID, resource, caller, resolvedPath string) (*AuthorizeResult, error) {
 	var out AuthorizeResult
-	err := c.Do(ctx, http.MethodPost, "/authorize", map[string]string{"toolId": toolID, "actionId": actionID, "resource": resource, "caller": caller}, &out)
+	body := map[string]string{"toolId": toolID, "actionId": actionID, "resource": resource, "caller": caller}
+	if resolvedPath != "" {
+		body["resolvedPath"] = resolvedPath
+	}
+	err := c.Do(ctx, http.MethodPost, "/authorize", body, &out)
 	if err != nil {
 		return nil, err
 	}
@@ -680,11 +698,11 @@ func (c *Client) Config(ctx context.Context) (*Config, error) {
 }
 
 var (
-	shortCode   = regexp.MustCompile(`^[A-HJKMNP-Z2-9]{10}$`)
-	slugPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	shortCode   = lazyre.New(`^[A-HJKMNP-Z2-9]{10}$`)
+	slugPattern = lazyre.New(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 )
 
-var keyPattern = regexp.MustCompile(`^mik_([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)_[A-Za-z0-9_-]{43}$`)
+var keyPattern = lazyre.New(`^mik_([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)_[A-Za-z0-9_-]{43}$`)
 
 func tenantSlugOf(installKey string) (string, bool) {
 	m := keyPattern.FindStringSubmatch(installKey)
